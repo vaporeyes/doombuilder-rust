@@ -1,0 +1,15 @@
+# ABOUTME: CPU-side mesh generation for doombuilder. Pure functions over Map data.
+# ABOUTME: GPU-agnostic so both the iced Canvas (2D) and the wgpu shader widget (3D) consume it.
+
+[package]
+name = "doombuilder-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+doombuilder-core.workspace = true
+spade.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true

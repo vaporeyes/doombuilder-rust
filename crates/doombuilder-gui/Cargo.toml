@@ -1,0 +1,16 @@
+# ABOUTME: Iced-based GUI crate for doombuilder-rust.
+# ABOUTME: Owns window state, menu bar, and the (currently empty) map viewport.
+
+[package]
+name = "doombuilder-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iced.workspace = true
+doombuilder-core.workspace = true
+doombuilder-render.workspace = true
+rfd.workspace = true
+glam.workspace = true
+bytemuck.workspace = true

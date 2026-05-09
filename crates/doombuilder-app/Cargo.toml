@@ -1,0 +1,16 @@
+# ABOUTME: Thin binary crate that launches the doombuilder GUI.
+# ABOUTME: All real logic lives in doombuilder-core and doombuilder-gui.
+
+[package]
+name = "doombuilder-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "doombuilder"
+path = "src/main.rs"
+
+[dependencies]
+doombuilder-gui.workspace = true
+iced.workspace = true

@@ -1,0 +1,35 @@
+# ABOUTME: Cargo workspace root for doombuilder-rust.
+# ABOUTME: Member crates split core map/wad logic from the iced GUI shell.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/doombuilder-core",
+    "crates/doombuilder-render",
+    "crates/doombuilder-gui",
+    "crates/doombuilder-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jsh/doombuilder-rust"
+
+[workspace.dependencies]
+iced = { version = "0.14", features = ["canvas", "advanced"] }
+thiserror = "2"
+bytemuck = { version = "1.18", features = ["derive"] }
+memmap2 = "0.9"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+slotmap = "1"
+rfd = "0.17"
+spade = "2"
+glam = { version = "0.32", features = ["bytemuck"] }
+doombuilder-core = { path = "crates/doombuilder-core" }
+doombuilder-render = { path = "crates/doombuilder-render" }
+doombuilder-gui = { path = "crates/doombuilder-gui" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,15 @@
+# ABOUTME: Core crate for WAD parsing and Doom/Hexen map data structures.
+# ABOUTME: GUI-independent so it can be used by tooling, tests, and future backends.
+
+[package]
+name = "doombuilder-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+bytemuck.workspace = true
+memmap2.workspace = true
+zip.workspace = true
+slotmap.workspace = true

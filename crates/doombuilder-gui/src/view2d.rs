@@ -1,0 +1,328 @@
+// ABOUTME: 2D editor viewport using iced's Canvas. Renders grid, filled sectors
+// ABOUTME: (from triangulated meshes), linedefs, and vertex dots. Emits messages
+// ABOUTME: for pan, zoom, and frame-on-load so App owns the camera state.
+
+use std::sync::Arc;
+
+use doombuilder_core::map::Map;
+use doombuilder_render::FloorMesh;
+use glam::Vec2;
+use iced::mouse;
+use iced::widget::canvas::{self, Cache, Canvas, Event, Frame, Geometry, Path, Program, Stroke};
+use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
+
+use crate::camera::Camera2D;
+
+#[derive(Debug, Clone)]
+pub enum View2DMessage {
+    PanBy(Vec2),
+    ZoomAt { pivot: Vec2, factor: f32, viewport: Vec2 },
+}
+
+pub struct View2D {
+    pub map: Arc<Map>,
+    pub meshes: Arc<Vec<FloorMesh>>,
+    pub camera: Camera2D,
+    pub cache: Arc<Cache>,
+}
+
+impl View2D {
+    pub fn into_widget<Message: 'static>(
+        self,
+        on_event: impl Fn(View2DMessage) -> Message + 'static,
+    ) -> Element<'static, Message>
+    where
+        Message: Clone,
+    {
+        Canvas::new(View2DProgram {
+            inner: self,
+            on_event: Box::new(on_event),
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+}
+
+struct View2DProgram<Message> {
+    inner: View2D,
+    on_event: Box<dyn Fn(View2DMessage) -> Message>,
+}
+
+#[derive(Default)]
+pub struct InternalState {
+    panning: bool,
+    last_cursor: Option<Point>,
+}
+
+impl<Message> Program<Message> for View2DProgram<Message> {
+    type State = InternalState;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        let viewport = Vec2::new(bounds.width, bounds.height);
+        let cursor_pos = cursor.position_in(bounds);
+
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left | mouse::Button::Middle)) => {
+                if let Some(p) = cursor_pos {
+                    state.panning = true;
+                    state.last_cursor = Some(p);
+                    return Some(canvas::Action::request_redraw().and_capture());
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left | mouse::Button::Middle)) => {
+                state.panning = false;
+                state.last_cursor = None;
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let Some(p) = cursor_pos {
+                    if state.panning {
+                        if let Some(prev) = state.last_cursor.replace(p) {
+                            let delta = Vec2::new(p.x - prev.x, p.y - prev.y);
+                            return Some(
+                                canvas::Action::publish((self.on_event)(View2DMessage::PanBy(delta)))
+                                    .and_capture(),
+                            );
+                        }
+                        state.last_cursor = Some(p);
+                    } else {
+                        state.last_cursor = Some(p);
+                    }
+                }
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if let Some(p) = cursor_pos {
+                    let units = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => *y,
+                        mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
+                    };
+                    let factor = (1.15_f32).powf(units);
+                    let pivot = Vec2::new(p.x, p.y);
+                    return Some(
+                        canvas::Action::publish((self.on_event)(View2DMessage::ZoomAt {
+                            pivot,
+                            factor,
+                            viewport,
+                        }))
+                        .and_capture(),
+                    );
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let viewport = Vec2::new(bounds.width, bounds.height);
+        let geometry = self.inner.cache.draw(renderer, bounds.size(), |frame| {
+            draw_background(frame, bounds);
+            draw_grid(frame, &self.inner.camera, viewport);
+            draw_sector_fills(frame, &self.inner.meshes, &self.inner.camera, viewport);
+            draw_linedefs(frame, &self.inner.map, &self.inner.camera, viewport);
+            draw_vertices(frame, &self.inner.map, &self.inner.camera, viewport);
+        });
+        vec![geometry]
+    }
+
+    fn mouse_interaction(
+        &self,
+        state: &Self::State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if cursor.position_in(bounds).is_none() {
+            return mouse::Interaction::default();
+        }
+        if state.panning {
+            mouse::Interaction::Grabbing
+        } else {
+            mouse::Interaction::Crosshair
+        }
+    }
+}
+
+fn draw_background(frame: &mut Frame, bounds: Rectangle) {
+    frame.fill_rectangle(
+        Point::ORIGIN,
+        Size::new(bounds.width, bounds.height),
+        Color::from_rgb(0.07, 0.07, 0.09),
+    );
+}
+
+fn draw_grid(frame: &mut Frame, camera: &Camera2D, viewport: Vec2) {
+    let major_world = grid_step(camera.zoom);
+    let minor_world = major_world * 0.25;
+
+    let world_min = camera.screen_to_world(Vec2::new(0.0, viewport.y), viewport);
+    let world_max = camera.screen_to_world(Vec2::new(viewport.x, 0.0), viewport);
+
+    draw_grid_lines(
+        frame,
+        camera,
+        viewport,
+        world_min,
+        world_max,
+        minor_world,
+        Color::from_rgba(0.20, 0.20, 0.22, 0.5),
+        0.5,
+    );
+    draw_grid_lines(
+        frame,
+        camera,
+        viewport,
+        world_min,
+        world_max,
+        major_world,
+        Color::from_rgba(0.30, 0.30, 0.34, 1.0),
+        0.7,
+    );
+
+    // Origin axes.
+    let origin_screen = camera.world_to_screen(Vec2::ZERO, viewport);
+    let axis_color = Color::from_rgba(0.45, 0.45, 0.50, 1.0);
+    let h = Path::line(
+        Point::new(0.0, origin_screen.y),
+        Point::new(viewport.x, origin_screen.y),
+    );
+    let v = Path::line(
+        Point::new(origin_screen.x, 0.0),
+        Point::new(origin_screen.x, viewport.y),
+    );
+    frame.stroke(&h, Stroke::default().with_color(axis_color).with_width(1.0));
+    frame.stroke(&v, Stroke::default().with_color(axis_color).with_width(1.0));
+}
+
+fn draw_grid_lines(
+    frame: &mut Frame,
+    camera: &Camera2D,
+    viewport: Vec2,
+    world_min: Vec2,
+    world_max: Vec2,
+    step: f32,
+    color: Color,
+    width: f32,
+) {
+    if step <= 0.0 {
+        return;
+    }
+    let stroke = Stroke::default().with_color(color).with_width(width);
+    let x_start = (world_min.x / step).floor() * step;
+    let mut x = x_start;
+    while x <= world_max.x {
+        let s = camera.world_to_screen(Vec2::new(x, 0.0), viewport);
+        let path = Path::line(Point::new(s.x, 0.0), Point::new(s.x, viewport.y));
+        frame.stroke(&path, stroke);
+        x += step;
+    }
+    let y_start = (world_min.y / step).floor() * step;
+    let mut y = y_start;
+    while y <= world_max.y {
+        let s = camera.world_to_screen(Vec2::new(0.0, y), viewport);
+        let path = Path::line(Point::new(0.0, s.y), Point::new(viewport.x, s.y));
+        frame.stroke(&path, stroke);
+        y += step;
+    }
+}
+
+/// Pick a power-of-two grid step that stays visually around 64 px on screen.
+fn grid_step(zoom: f32) -> f32 {
+    let target_pixels = 64.0_f32;
+    let world_per_pixel = 1.0 / zoom.max(1e-6);
+    let raw = target_pixels * world_per_pixel;
+    let exp = raw.log2().round();
+    2.0_f32.powf(exp).max(1.0)
+}
+
+fn draw_sector_fills(
+    frame: &mut Frame,
+    meshes: &[FloorMesh],
+    camera: &Camera2D,
+    viewport: Vec2,
+) {
+    let fill = Color::from_rgba(0.15, 0.20, 0.30, 0.6);
+    for mesh in meshes {
+        let mut tri_path = canvas::path::Builder::new();
+        let mut i = 0;
+        while i + 2 < mesh.indices.len() {
+            let a = mesh.positions[mesh.indices[i] as usize];
+            let b = mesh.positions[mesh.indices[i + 1] as usize];
+            let c = mesh.positions[mesh.indices[i + 2] as usize];
+            let pa = camera.world_to_screen(Vec2::new(a[0], a[1]), viewport);
+            let pb = camera.world_to_screen(Vec2::new(b[0], b[1]), viewport);
+            let pc = camera.world_to_screen(Vec2::new(c[0], c[1]), viewport);
+            tri_path.move_to(Point::new(pa.x, pa.y));
+            tri_path.line_to(Point::new(pb.x, pb.y));
+            tri_path.line_to(Point::new(pc.x, pc.y));
+            tri_path.close();
+            i += 3;
+        }
+        frame.fill(&tri_path.build(), fill);
+    }
+}
+
+fn draw_linedefs(frame: &mut Frame, map: &Map, camera: &Camera2D, viewport: Vec2) {
+    let one_sided = Stroke::default()
+        .with_color(Color::from_rgb(0.85, 0.85, 0.90))
+        .with_width(1.2);
+    let two_sided = Stroke::default()
+        .with_color(Color::from_rgba(0.55, 0.65, 0.80, 0.9))
+        .with_width(1.0);
+
+    for (_, line) in &map.linedefs {
+        let (Some(v1), Some(v2)) = (map.vertices.get(line.v1), map.vertices.get(line.v2)) else {
+            continue;
+        };
+        let p1 = camera.world_to_screen(Vec2::new(v1.x as f32, v1.y as f32), viewport);
+        let p2 = camera.world_to_screen(Vec2::new(v2.x as f32, v2.y as f32), viewport);
+        let path = Path::line(Point::new(p1.x, p1.y), Point::new(p2.x, p2.y));
+        let stroke = if line.left.is_some() && line.right.is_some() {
+            two_sided
+        } else {
+            one_sided
+        };
+        frame.stroke(&path, stroke);
+    }
+}
+
+fn draw_vertices(frame: &mut Frame, map: &Map, camera: &Camera2D, viewport: Vec2) {
+    if camera.zoom < 0.15 {
+        return;
+    }
+    let color = Color::from_rgb(1.0, 0.85, 0.3);
+    let radius = (camera.zoom * 0.6).clamp(1.5, 3.5);
+    for (_, v) in &map.vertices {
+        let s = camera.world_to_screen(Vec2::new(v.x as f32, v.y as f32), viewport);
+        frame.fill(
+            &Path::circle(Point::new(s.x, s.y), radius),
+            color,
+        );
+    }
+}
+
+/// Compute the AABB of all map vertices, useful for framing the camera.
+pub fn map_aabb(map: &Map) -> Option<(Vec2, Vec2)> {
+    let mut iter = map.vertices.iter().map(|(_, v)| Vec2::new(v.x as f32, v.y as f32));
+    let first = iter.next()?;
+    let mut min = first;
+    let mut max = first;
+    for p in iter {
+        min = min.min(p);
+        max = max.max(p);
+    }
+    Some((min, max))
+}
+
