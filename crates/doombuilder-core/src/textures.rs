@@ -35,6 +35,7 @@ pub struct TextureSet {
     pub palette: Palette,
     pub textures: HashMap<String, TextureImage>,
     pub flats: HashMap<String, TextureImage>,
+    pub sprites: HashMap<String, TextureImage>,
     /// Textures that referenced a missing patch; surfaced for diagnostics.
     pub diagnostics: Vec<String>,
 }
@@ -128,10 +129,39 @@ impl TextureSet {
             }
         }
 
+        // Sprites: between S_START/S_END (or SS_START/SS_END). Each lump is a
+        // single Doom patch; compose with the palette into an RGBA image.
+        let mut sprites: HashMap<String, TextureImage> = HashMap::new();
+        let mut in_sprites = false;
+        for entry in dir {
+            let n = entry.name_str();
+            let upper = n.to_ascii_uppercase();
+            match upper.as_str() {
+                "S_START" | "SS_START" => {
+                    in_sprites = true;
+                    continue;
+                }
+                "S_END" | "SS_END" => {
+                    in_sprites = false;
+                    continue;
+                }
+                _ => {}
+            }
+            if !in_sprites || entry.size == 0 {
+                continue;
+            }
+            if let Ok(bytes) = wad.lump_bytes(entry) {
+                if let Some(img) = compose_sprite(bytes, &palette) {
+                    insert_sprite_aliases(&mut sprites, &upper, img);
+                }
+            }
+        }
+
         Self {
             palette,
             textures,
             flats,
+            sprites,
             diagnostics,
         }
     }
@@ -141,8 +171,13 @@ impl TextureSet {
             palette: Palette([[0; 3]; 256]),
             textures: HashMap::new(),
             flats: HashMap::new(),
+            sprites: HashMap::new(),
             diagnostics,
         }
+    }
+
+    pub fn sprite(&self, name: &str) -> Option<&TextureImage> {
+        self.sprites.get(&name.to_ascii_uppercase())
     }
 
     pub fn texture_or_flat(&self, name: &str) -> Option<&TextureImage> {
@@ -286,6 +321,7 @@ struct PatchPost {
 #[derive(Debug, Clone)]
 struct Patch {
     width: u16,
+    height: u16,
     columns: Vec<Vec<PatchPost>>,
 }
 
@@ -298,7 +334,7 @@ fn parse_patch(bytes: &[u8]) -> Result<Patch> {
         });
     }
     let width = u16::from_le_bytes(bytes[0..2].try_into().unwrap());
-    let _height = u16::from_le_bytes(bytes[2..4].try_into().unwrap());
+    let height = u16::from_le_bytes(bytes[2..4].try_into().unwrap());
     let cols_table_end = 8 + (width as usize) * 4;
     if bytes.len() < cols_table_end {
         return Err(Error::Truncated {
@@ -337,7 +373,67 @@ fn parse_patch(bytes: &[u8]) -> Result<Patch> {
         }
         columns.push(posts);
     }
-    Ok(Patch { width, columns })
+    Ok(Patch {
+        width,
+        height,
+        columns,
+    })
+}
+
+/// Doom sprite lumps come in two forms:
+/// - 6-char names like `PLAYA1` → one frame/rotation, store as-is.
+/// - 8-char names like `PLAYF1F8` → the same image data covers two rotations
+///   (the second half indicates a mirror). Store the bitmap under BOTH 6-char
+///   keys so a config entry asking for either rotation can find it.
+fn insert_sprite_aliases(
+    sprites: &mut HashMap<String, TextureImage>,
+    name: &str,
+    img: TextureImage,
+) {
+    if name.len() >= 8 {
+        let base = &name[..4];
+        let first = &name[4..6];
+        let second = &name[6..8];
+        let key_a = format!("{}{}", base, first);
+        let key_b = format!("{}{}", base, second);
+        sprites.insert(key_a, img.clone());
+        sprites.insert(key_b, img);
+    } else {
+        sprites.insert(name.to_string(), img);
+    }
+}
+
+fn compose_sprite(bytes: &[u8], palette: &Palette) -> Option<TextureImage> {
+    let patch = parse_patch(bytes).ok()?;
+    let w = patch.width as usize;
+    let h = patch.height.max(1) as usize;
+    if w == 0 {
+        return None;
+    }
+    let mut indices: Vec<Option<u8>> = vec![None; w * h];
+    for (col, posts) in patch.columns.iter().enumerate() {
+        for post in posts {
+            for (row, pixel) in post.pixels.iter().enumerate() {
+                let y = post.top as usize + row;
+                if y >= h || col >= w {
+                    continue;
+                }
+                indices[y * w + col] = Some(*pixel);
+            }
+        }
+    }
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for idx in indices {
+        match idx {
+            Some(i) => rgba.extend_from_slice(&palette.rgba(i)),
+            None => rgba.extend_from_slice(&[0, 0, 0, 0]),
+        }
+    }
+    Some(TextureImage {
+        width: patch.width,
+        height: patch.height,
+        rgba,
+    })
 }
 
 fn compose_texture(

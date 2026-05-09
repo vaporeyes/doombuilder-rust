@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
+use doombuilder_core::config::GameConfig;
 use doombuilder_core::map::{Map, SectorId};
 use doombuilder_core::textures::{TextureImage, TextureSet};
-use doombuilder_render::{FloorMesh, Wall, WallKind};
+use doombuilder_render::{FloorMesh, SpatialIndex, Wall, WallKind};
 use glam::{Mat4, Vec3};
 use iced::mouse;
 use iced::widget::shader::{self, Action, Pipeline as PipelineTrait, Primitive};
@@ -28,12 +29,14 @@ struct VIn {
     @location(0) pos: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) light: f32,
+    @location(3) tint: vec3<f32>,
 };
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) light: f32,
+    @location(2) tint: vec3<f32>,
 };
 
 @vertex
@@ -42,21 +45,21 @@ fn vs(in: VIn) -> VOut {
     o.clip = u.view_proj * vec4<f32>(in.pos, 1.0);
     o.uv = in.uv;
     o.light = in.light;
+    o.tint = in.tint;
     return o;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv);
-    // Editor lighting: ambient floor + boosted sector light. Real Doom uses a
-    // darker non-linear ramp; in the editor we lift mid-light so everything is
-    // legible.
     let lit = 0.35 + 0.65 * pow(in.light, 0.6);
-    return vec4<f32>(c.rgb * lit, 1.0);
+    return vec4<f32>(c.rgb * in.tint * lit, 1.0);
 }
 "#;
 
 const MISSING_TEXTURE_KEY: &str = "__missing__";
+const SOLID_TEXTURE_KEY: &str = "__solid__";
+const SKY_FLAT_NAME: &str = "F_SKY1";
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -64,6 +67,7 @@ pub struct Vertex3D {
     pos: [f32; 3],
     uv: [f32; 2],
     light: f32,
+    tint: [f32; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +88,8 @@ pub fn build_geometry(
     sector_meshes: &[(SectorId, FloorMesh)],
     walls: &[Wall],
     textures: &TextureSet,
+    spatial: Option<&SpatialIndex>,
+    config: &GameConfig,
 ) -> View3DGeometry {
     let mut by_texture: HashMap<String, Vec<Vertex3D>> = HashMap::new();
 
@@ -94,8 +100,12 @@ pub fn build_geometry(
         let light = (sector.light as f32 / 255.0).clamp(0.0, 1.0);
         let floor_y = sector.floor_height as f32;
         let ceil_y = sector.ceiling_height as f32;
-        let floor_tex = key(sector.floor_texture.as_str());
-        let ceil_tex = key(sector.ceiling_texture.as_str());
+        let floor_name = sector.floor_texture.as_str().to_ascii_uppercase();
+        let ceil_name = sector.ceiling_texture.as_str().to_ascii_uppercase();
+        let floor_tex = key(&floor_name);
+        let ceil_tex = key(&ceil_name);
+        let skip_floor = floor_name == SKY_FLAT_NAME;
+        let skip_ceiling = ceil_name == SKY_FLAT_NAME;
 
         let mut i = 0;
         while i + 2 < mesh.indices.len() {
@@ -103,13 +113,26 @@ pub fn build_geometry(
             let b = mesh.positions[mesh.indices[i + 1] as usize];
             let c = mesh.positions[mesh.indices[i + 2] as usize];
 
-            // Floor: visible from above. Triangulator returns CCW from +Z; in our
-            // world (y-up, z = -doom_y), the floor must wind CCW when viewed
-            // from +Y looking down. Reverse to compensate the y-axis flip.
-            push_floor_tri(by_texture.entry(floor_tex.clone()).or_default(), a, c, b, floor_y, light);
-
-            // Ceiling: visible from below; opposite winding from floor.
-            push_floor_tri(by_texture.entry(ceil_tex.clone()).or_default(), a, b, c, ceil_y, light);
+            if !skip_floor {
+                push_floor_tri(
+                    by_texture.entry(floor_tex.clone()).or_default(),
+                    a,
+                    c,
+                    b,
+                    floor_y,
+                    light,
+                );
+            }
+            if !skip_ceiling {
+                push_floor_tri(
+                    by_texture.entry(ceil_tex.clone()).or_default(),
+                    a,
+                    b,
+                    c,
+                    ceil_y,
+                    light,
+                );
+            }
             i += 3;
         }
     }
@@ -134,6 +157,21 @@ pub fn build_geometry(
             tex_w,
             tex_h,
         );
+    }
+
+    // Things: render as colored boxes, color from game config category.
+    if let Some(spatial) = spatial {
+        let solid_bucket = by_texture.entry(SOLID_TEXTURE_KEY.to_string()).or_default();
+        for (_, thing) in &map.things {
+            let tx = thing.x as f32;
+            let ty = thing.y as f32;
+            let floor_y = match spatial.sector_at(tx, ty) {
+                Some(sid) => map.sectors.get(sid).map(|s| s.floor_height as f32).unwrap_or(0.0),
+                None => 0.0,
+            };
+            let color = thing_color(config, thing.kind);
+            push_thing_box(solid_bucket, tx, ty, floor_y, color);
+        }
     }
 
     // Flatten into one vertex buffer with batch start/count records.
@@ -193,12 +231,11 @@ fn push_floor_tri(
 }
 
 fn world_floor_vertex(p: [f32; 2], y: f32, light: f32) -> Vertex3D {
-    // World mapping: doom_x -> world_x, height -> world_y, doom_y -> -world_z.
-    // Flat textures tile every 64 units in Doom's XY space.
     Vertex3D {
         pos: [p[0], y, -p[1]],
         uv: [p[0] / 64.0, p[1] / 64.0],
         light,
+        tint: [1.0, 1.0, 1.0],
     }
 }
 
@@ -226,9 +263,76 @@ fn push_wall(out: &mut Vec<Vertex3D>, wall: &Wall, light: f32, tex_w: f32, tex_h
 
 fn wall_vertex(p: [f32; 3], u: f32, v: f32, light: f32) -> Vertex3D {
     Vertex3D {
-        pos: [p[0], p[2], -p[1]], // Doom (x, y, z=height) -> world (x, y=height, -doom_y)
+        pos: [p[0], p[2], -p[1]],
         uv: [u, v],
         light,
+        tint: [1.0, 1.0, 1.0],
+    }
+}
+
+fn push_thing_box(out: &mut Vec<Vertex3D>, doom_x: f32, doom_y: f32, floor_y: f32, color: [f32; 3]) {
+    let r = 16.0_f32;
+    let h = 56.0_f32;
+    let cx = doom_x;
+    let cz = -doom_y;
+    let y0 = floor_y;
+    let y1 = floor_y + h;
+    // 8 box corners.
+    let p = [
+        [cx - r, y0, cz - r], // 0 nbl
+        [cx + r, y0, cz - r], // 1 nbr
+        [cx + r, y0, cz + r], // 2 fbr
+        [cx - r, y0, cz + r], // 3 fbl
+        [cx - r, y1, cz - r], // 4 ntl
+        [cx + r, y1, cz - r], // 5 ntr
+        [cx + r, y1, cz + r], // 6 ftr
+        [cx - r, y1, cz + r], // 7 ftl
+    ];
+    let mut push = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| {
+        for v in [a, b, c] {
+            out.push(Vertex3D {
+                pos: v,
+                uv: [0.0, 0.0],
+                light: 1.0,
+                tint: color,
+            });
+        }
+    };
+    // Bottom (skipped — sits on the floor).
+    // Top (CCW from above).
+    push(p[4], p[5], p[6]);
+    push(p[4], p[6], p[7]);
+    // North face (z = -r), CCW when looking from +Z.
+    push(p[0], p[5], p[1]);
+    push(p[0], p[4], p[5]);
+    // South face (z = +r).
+    push(p[3], p[2], p[6]);
+    push(p[3], p[6], p[7]);
+    // East face (x = +r).
+    push(p[1], p[6], p[2]);
+    push(p[1], p[5], p[6]);
+    // West face (x = -r).
+    push(p[0], p[3], p[7]);
+    push(p[0], p[7], p[4]);
+}
+
+fn thing_color(config: &GameConfig, kind: u16) -> [f32; 3] {
+    let category = config
+        .thing_type(kind)
+        .map(|t| t.category.to_ascii_lowercase())
+        .unwrap_or_default();
+    match category.as_str() {
+        "players" | "playerstart" | "starts" => [0.4, 1.0, 0.4],
+        "monsters" => [1.0, 0.35, 0.35],
+        "weapons" => [1.0, 0.85, 0.2],
+        "ammunition" | "ammo" => [1.0, 0.95, 0.6],
+        "powerups" => [1.0, 0.4, 1.0],
+        "health" => [0.5, 1.0, 1.0],
+        "armor" => [0.3, 0.6, 1.0],
+        "keys" => [1.0, 0.9, 0.0],
+        "obstacles" | "decoration" | "lights" => [0.7, 0.7, 0.7],
+        "teleports" => [0.4, 1.0, 0.85],
+        _ => [0.85, 0.85, 0.85],
     }
 }
 
@@ -456,12 +560,16 @@ impl Primitive for Map3DPrimitive {
             if pipeline.texture_bind_groups.contains_key(&batch.texture_name) {
                 continue;
             }
-            let img = if batch.texture_name == MISSING_TEXTURE_KEY {
-                None
+            let bg = if batch.texture_name == SOLID_TEXTURE_KEY {
+                pipeline.upload_solid_white(device, queue)
             } else {
-                self.textures.texture_or_flat(&batch.texture_name)
+                let img = if batch.texture_name == MISSING_TEXTURE_KEY {
+                    None
+                } else {
+                    self.textures.texture_or_flat(&batch.texture_name)
+                };
+                pipeline.upload_texture(device, queue, img)
             };
-            let bg = pipeline.upload_texture(device, queue, img);
             pipeline.texture_bind_groups.insert(batch.texture_name.clone(), bg);
         }
     }
@@ -600,6 +708,7 @@ impl PipelineTrait for Map3DPipeline {
             0 => Float32x3, // position
             1 => Float32x2, // uv
             2 => Float32,   // light
+            3 => Float32x3, // tint
         ];
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -713,6 +822,44 @@ impl PipelineTrait for Map3DPipeline {
 }
 
 impl Map3DPipeline {
+    fn upload_solid_white(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::BindGroup {
+        let pixels: Vec<u8> = vec![255, 255, 255, 255];
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("solid white"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &pixels,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("solid bg"),
+            layout: &self.texture_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        })
+    }
+
     fn upload_texture(
         &self,
         device: &wgpu::Device,

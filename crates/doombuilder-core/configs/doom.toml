@@ -846,111 +846,133 @@ category = "crusher"
 id = 1
 title = "Player 1 start"
 category = "players"
+sprite = "PLAYA2A8"
 
 [[thing_types]]
 id = 2
 title = "Player 2 start"
 category = "players"
+sprite = "PLAYA3A7"
 
 [[thing_types]]
 id = 3
 title = "Player 3 start"
 category = "players"
+sprite = "PLAYA4A6"
 
 [[thing_types]]
 id = 4
 title = "Player 4 start"
 category = "players"
+sprite = "PLAYA5"
 
 [[thing_types]]
 id = 5
 title = "Blue keycard"
 category = "keys"
+sprite = "BKEYA0"
 
 [[thing_types]]
 id = 6
 title = "Yellow keycard"
 category = "keys"
+sprite = "YKEYA0"
 
 [[thing_types]]
 id = 7
 title = "Spider Mastermind"
 category = "monsters"
+sprite = "SPIDG2G8"
 
 [[thing_types]]
 id = 8
 title = "Backpack"
 category = "ammunition"
+sprite = "BPAKA0"
 
 [[thing_types]]
 id = 9
 title = "Former Sergeant"
 category = "monsters"
+sprite = "SPOSA2A8"
 
 [[thing_types]]
 id = 10
 title = "Bloody mess 1"
 category = "decoration"
+sprite = "PLAYW0"
 
 [[thing_types]]
 id = 11
 title = "Player Deathmatch start"
 category = "players"
+sprite = "PLAYF1"
 
 [[thing_types]]
 id = 12
 title = "Bloody mess 2"
 category = "decoration"
+sprite = "PLAYW0"
 
 [[thing_types]]
 id = 13
 title = "Red keycard"
 category = "keys"
+sprite = "RKEYA0"
 
 [[thing_types]]
 id = 14
 title = "Teleport Destination"
 category = "teleports"
+sprite = "TFOGB0"
 
 [[thing_types]]
 id = 15
 title = "Dead player"
 category = "decoration"
+sprite = "PLAYN0"
 
 [[thing_types]]
 id = 16
 title = "Cyberdemon"
 category = "monsters"
+sprite = "CYBRA2"
 
 [[thing_types]]
 id = 17
 title = "Cell charge pack"
 category = "ammunition"
+sprite = "CELPA0"
 
 [[thing_types]]
 id = 18
 title = "Dead former human"
 category = "decoration"
+sprite = "POSSL0"
 
 [[thing_types]]
 id = 19
 title = "Dead former sergeant"
 category = "decoration"
+sprite = "SPOSL0"
 
 [[thing_types]]
 id = 20
 title = "Dead imp"
 category = "decoration"
+sprite = "TROOM0"
 
 [[thing_types]]
 id = 21
 title = "Dead demon"
 category = "decoration"
+sprite = "SARGN0"
 
 [[thing_types]]
 id = 22
 title = "Dead cacodemon"
 category = "decoration"
+sprite = "HEADL0"
 
 [[thing_types]]
 id = 23
@@ -961,371 +983,445 @@ category = "decoration"
 id = 24
 title = "Pool of blood and bones"
 category = "decoration"
+sprite = "POL5A0"
 
 [[thing_types]]
 id = 25
 title = "Impaled human"
 category = "decoration"
+sprite = "POL1A0"
 
 [[thing_types]]
 id = 26
 title = "Twitching impaled human"
 category = "decoration"
+sprite = "POL6A0"
 
 [[thing_types]]
 id = 27
 title = "Skull on a pole"
 category = "decoration"
+sprite = "POL4A0"
 
 [[thing_types]]
 id = 28
 title = "5 skulls shish kebob"
 category = "decoration"
+sprite = "POL2A0"
 
 [[thing_types]]
 id = 29
 title = "Pile of skulls and candles"
 category = "decoration"
+sprite = "POL3A0"
 
 [[thing_types]]
 id = 30
 title = "Tall green pillar"
 category = "obstacles"
+sprite = "COL1A0"
 
 [[thing_types]]
 id = 31
 title = "Short green pillar"
 category = "obstacles"
+sprite = "COL2A0"
 
 [[thing_types]]
 id = 32
 title = "Tall red pillar"
 category = "obstacles"
+sprite = "COL3A0"
 
 [[thing_types]]
 id = 33
 title = "Short red pillar"
 category = "obstacles"
+sprite = "COL4A0"
 
 [[thing_types]]
 id = 34
 title = "Candle"
 category = "lights"
+sprite = "CANDA0"
 
 [[thing_types]]
 id = 35
 title = "Candelabra"
 category = "lights"
+sprite = "CBRAA0"
 
 [[thing_types]]
 id = 36
 title = "Short green pillar (beating heart)"
 category = "obstacles"
+sprite = "COL5A0"
 
 [[thing_types]]
 id = 37
 title = "Short red pillar (skull)"
 category = "obstacles"
+sprite = "COL6A0"
 
 [[thing_types]]
 id = 38
 title = "Red skullkey"
 category = "keys"
+sprite = "RSKUB0"
 
 [[thing_types]]
 id = 39
 title = "Yellow skullkey"
 category = "keys"
+sprite = "YSKUB0"
 
 [[thing_types]]
 id = 40
 title = "Blue skullkey"
 category = "keys"
+sprite = "BSKUB0"
 
 [[thing_types]]
 id = 41
 title = "Evil Eye"
 category = "obstacles"
+sprite = "CEYEA0"
 
 [[thing_types]]
 id = 42
 title = "Floating skull rock"
 category = "obstacles"
+sprite = "FSKUA0"
 
 [[thing_types]]
 id = 43
 title = "Gray tree"
 category = "obstacles"
+sprite = "TRE1A0"
 
 [[thing_types]]
 id = 44
 title = "Tall blue firestick"
 category = "lights"
+sprite = "TBLUA0"
 
 [[thing_types]]
 id = 45
 title = "Tall green firestick"
 category = "lights"
+sprite = "TGRNA0"
 
 [[thing_types]]
 id = 46
 title = "Tall red firestick"
 category = "lights"
+sprite = "TREDA0"
 
 [[thing_types]]
 id = 47
 title = "Stalagmite"
 category = "obstacles"
+sprite = "SMITA0"
 
 [[thing_types]]
 id = 48
 title = "Tall techno pillar"
 category = "obstacles"
+sprite = "ELECA0"
 
 [[thing_types]]
 id = 49
 title = "Hanging victim, twitching (blocking)"
 category = "decoration"
+sprite = "GOR1A0"
 
 [[thing_types]]
 id = 50
 title = "Hanging victim, arms out (blocking)"
 category = "decoration"
+sprite = "GOR2A0"
 
 [[thing_types]]
 id = 51
 title = "Hanging victim, 1-legged (blocking)"
 category = "decoration"
+sprite = "GOR3A0"
 
 [[thing_types]]
 id = 52
 title = "Hanging pair of legs (blocking)"
 category = "decoration"
+sprite = "GOR4A0"
 
 [[thing_types]]
 id = 53
 title = "Hanging leg (blocking)"
 category = "decoration"
+sprite = "GOR5A0"
 
 [[thing_types]]
 id = 54
 title = "Large brown tree"
 category = "obstacles"
+sprite = "TRE2A0"
 
 [[thing_types]]
 id = 55
 title = "Short blue firestick"
 category = "lights"
+sprite = "SMBTA0"
 
 [[thing_types]]
 id = 56
 title = "Short green firestick"
 category = "lights"
+sprite = "SMGTA0"
 
 [[thing_types]]
 id = 57
 title = "Short red firestick"
 category = "lights"
+sprite = "SMRTA0"
 
 [[thing_types]]
 id = 58
 title = "Spectre"
 category = "monsters"
+sprite = "SARGF1"
 
 [[thing_types]]
 id = 59
 title = "Hanging victim, arms out"
 category = "decoration"
+sprite = "GOR2A0"
 
 [[thing_types]]
 id = 60
 title = "Hanging pair of legs"
 category = "decoration"
+sprite = "GOR4A0"
 
 [[thing_types]]
 id = 61
 title = "Hanging victim, 1-legged"
 category = "decoration"
+sprite = "GOR3A0"
 
 [[thing_types]]
 id = 62
 title = "Hanging leg"
 category = "decoration"
+sprite = "GOR5A0"
 
 [[thing_types]]
 id = 63
 title = "Hanging victim, twitching"
 category = "decoration"
+sprite = "GOR1C0"
 
 [[thing_types]]
 id = 2001
 title = "Shotgun"
 category = "weapons"
+sprite = "SHOTA0"
 
 [[thing_types]]
 id = 2002
 title = "Chaingun"
 category = "weapons"
+sprite = "MGUNA0"
 
 [[thing_types]]
 id = 2003
 title = "Rocket launcher"
 category = "weapons"
+sprite = "LAUNA0"
 
 [[thing_types]]
 id = 2004
 title = "Plasma gun"
 category = "weapons"
+sprite = "PLASA0"
 
 [[thing_types]]
 id = 2005
 title = "Chainsaw"
 category = "weapons"
+sprite = "CSAWA0"
 
 [[thing_types]]
 id = 2006
 title = "BFG9000"
 category = "weapons"
+sprite = "BFUGA0"
 
 [[thing_types]]
 id = 2007
 title = "Ammo clip"
 category = "ammunition"
+sprite = "CLIPA0"
 
 [[thing_types]]
 id = 2008
 title = "Shotgun shells"
 category = "ammunition"
+sprite = "SHELA0"
 
 [[thing_types]]
 id = 2010
 title = "Rocket"
 category = "ammunition"
+sprite = "ROCKA0"
 
 [[thing_types]]
 id = 2011
 title = "Stimpack"
 category = "health"
+sprite = "STIMA0"
 
 [[thing_types]]
 id = 2012
 title = "Medikit"
 category = "health"
+sprite = "MEDIA0"
 
 [[thing_types]]
 id = 2013
 title = "Soulsphere"
 category = "powerups"
+sprite = "SOULA0"
 
 [[thing_types]]
 id = 2014
 title = "Health bonus"
 category = "health"
+sprite = "BON1A0"
 
 [[thing_types]]
 id = 2015
 title = "Armor bonus"
 category = "health"
+sprite = "BON2A0"
 
 [[thing_types]]
 id = 2018
 title = "Green armor"
 category = "health"
+sprite = "ARM1A0"
 
 [[thing_types]]
 id = 2019
 title = "Blue armor"
 category = "health"
+sprite = "ARM2A0"
 
 [[thing_types]]
 id = 2022
 title = "Invulnerability"
 category = "powerups"
+sprite = "PINVA0"
 
 [[thing_types]]
 id = 2023
 title = "Berserk"
 category = "powerups"
+sprite = "PSTRA0"
 
 [[thing_types]]
 id = 2024
 title = "Invisibility"
 category = "powerups"
+sprite = "PINSA0"
 
 [[thing_types]]
 id = 2025
 title = "Radiation suit"
 category = "powerups"
+sprite = "SUITA0"
 
 [[thing_types]]
 id = 2026
 title = "Computer map"
 category = "powerups"
+sprite = "PMAPA0"
 
 [[thing_types]]
 id = 2028
 title = "Floor lamp"
 category = "lights"
+sprite = "COLUA0"
 
 [[thing_types]]
 id = 2035
 title = "Barrel"
 category = "obstacles"
+sprite = "BAR1A0"
 
 [[thing_types]]
 id = 2045
 title = "Lite Amplification goggles"
 category = "powerups"
+sprite = "PVISA0"
 
 [[thing_types]]
 id = 2046
 title = "Box of Rockets"
 category = "ammunition"
+sprite = "BROKA0"
 
 [[thing_types]]
 id = 2047
 title = "Cell charge"
 category = "ammunition"
+sprite = "CELLA0"
 
 [[thing_types]]
 id = 2048
 title = "Box of Ammo"
 category = "ammunition"
+sprite = "AMMOA0"
 
 [[thing_types]]
 id = 2049
 title = "Box of Shells"
 category = "ammunition"
+sprite = "SBOXA0"
 
 [[thing_types]]
 id = 3001
 title = "Imp"
 category = "monsters"
+sprite = "TROOA2A8"
 
 [[thing_types]]
 id = 3002
 title = "Demon"
 category = "monsters"
+sprite = "SARGA2A8"
 
 [[thing_types]]
 id = 3003
 title = "Baron of Hell"
 category = "monsters"
+sprite = "BOSSA2A8"
 
 [[thing_types]]
 id = 3004
 title = "Former Human"
 category = "monsters"
+sprite = "POSSA2A8"
 
 [[thing_types]]
 id = 3005
 title = "Cacodemon"
 category = "monsters"
+sprite = "HEADA2A8"
 
 [[thing_types]]
 id = 3006
 title = "Lost Soul"
 category = "monsters"
+sprite = "SKULA8A2"
 
 [sector_specials]
 "0" = "Normal"

@@ -13,7 +13,9 @@ use std::sync::Arc;
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::edit::{Command, SectorSlot, SidedefSlot, UndoStack, VertexMove};
-use doombuilder_core::map::{save_map_as_pwad, Map, MapSidedef, SectorId, TextureName, VertexId};
+use doombuilder_core::map::{
+    save_map_as_pwad, Map, MapSidedef, SectorId, TextureName, ThingId, VertexId,
+};
 use doombuilder_core::textures::TextureSet;
 use doombuilder_core::wad::WadKind;
 use doombuilder_core::{load_auto, MapFormat, Wad};
@@ -77,6 +79,7 @@ pub struct App {
     config: Arc<GameConfig>,
     textures: Option<Arc<TextureSet>>,
     texture_handles: Arc<HashMap<String, ImageHandle>>,
+    sprite_handles: Arc<HashMap<String, ImageHandle>>,
     sorted_texture_names: Arc<Vec<String>>,
     texture_picker: Option<PickerTarget>,
     texture_filter: String,
@@ -134,6 +137,7 @@ impl Default for App {
             config: Arc::new(GameConfig::vanilla_doom()),
             textures: None,
             texture_handles: Arc::new(HashMap::new()),
+            sprite_handles: Arc::new(HashMap::new()),
             sorted_texture_names: Arc::new(Vec::new()),
             texture_picker: None,
             texture_filter: String::new(),
@@ -174,6 +178,7 @@ pub struct AssetSummary {
     wad: Option<Wad>,
     textures: Option<Arc<TextureSet>>,
     texture_handles: Arc<HashMap<String, ImageHandle>>,
+    sprite_handles: Arc<HashMap<String, ImageHandle>>,
     summary: String,
     maps: Vec<String>,
 }
@@ -268,6 +273,7 @@ impl App {
                 sorted.sort();
                 self.sorted_texture_names = Arc::new(sorted);
                 self.texture_handles = asset.texture_handles;
+                self.sprite_handles = asset.sprite_handles;
                 self.summary = Some(asset.summary);
                 self.maps = asset.maps;
                 self.reset_map_state();
@@ -500,7 +506,14 @@ impl App {
             self.geometry3d = Arc::new(View3DGeometry::default());
             return;
         };
-        let geom = build_geometry(map, &self.sector_meshes, &self.walls, textures);
+        let geom = build_geometry(
+            map,
+            &self.sector_meshes,
+            &self.walls,
+            textures,
+            self.spatial.as_deref(),
+            &self.config,
+        );
         self.geometry3d = Arc::new(geom);
     }
 
@@ -676,7 +689,7 @@ impl App {
                         ids.insert(line.v2);
                     }
                 }
-                HighlightKind::Sector(_) => {}
+                HighlightKind::Sector(_) | HighlightKind::Thing(_) => {}
             }
         }
         ids.into_iter()
@@ -853,6 +866,7 @@ impl App {
                     } else {
                         Arc::new(Vec::new())
                     },
+                    config: self.config.clone(),
                 };
                 view.into_widget(Message::View2D)
             }
@@ -910,6 +924,11 @@ impl App {
             Some(HighlightKind::Sector(id)) => {
                 let sec = map.sectors.get(id);
                 row![sector_texture_panel(id, sec, &self.texture_handles)]
+                    .spacing(10)
+                    .into()
+            }
+            Some(HighlightKind::Thing(id)) => {
+                row![thing_preview_panel(map, &self.config, &self.sprite_handles, id)]
                     .spacing(10)
                     .into()
             }
@@ -1107,11 +1126,13 @@ fn multi_select_summary<'a>(selection: &HashSet<HighlightKind>) -> Element<'a, M
     let mut verts = 0usize;
     let mut lines = 0usize;
     let mut sectors = 0usize;
+    let mut things = 0usize;
     for h in selection {
         match h {
             HighlightKind::Vertex(_) => verts += 1,
             HighlightKind::Linedef(_) => lines += 1,
             HighlightKind::Sector(_) => sectors += 1,
+            HighlightKind::Thing(_) => things += 1,
         }
     }
     column![
@@ -1119,6 +1140,7 @@ fn multi_select_summary<'a>(selection: &HashSet<HighlightKind>) -> Element<'a, M
         text(format!("Vertices: {verts}")).size(13),
         text(format!("Linedefs: {lines}")).size(13),
         text(format!("Sectors:  {sectors}")).size(13),
+        text(format!("Things:   {things}")).size(13),
     ]
     .spacing(2)
     .into()
@@ -1180,6 +1202,24 @@ fn selection_details<'a>(
                 let (bfh, bch) = sector_heights(map, back_sec);
                 col = col.push(text(format!(
                     "Front Height: {fh}/{ch}    Back Height: {bfh}/{bch}"
+                )));
+            }
+            col.into()
+        }
+        HighlightKind::Thing(id) => {
+            let mut col = column![text("Thing").size(15)].spacing(2);
+            if let Some(t) = map.things.get(id) {
+                let name = match config.thing_type(t.kind) {
+                    Some(tt) => format!("{} - {}", t.kind, tt.title),
+                    None => format!("{} - (unknown)", t.kind),
+                };
+                col = col.push(text(format!("Type:    {name}")));
+                col = col.push(text(format!("X:       {}", t.x)));
+                col = col.push(text(format!("Y:       {}", t.y)));
+                col = col.push(text(format!("Angle:   {}\u{00B0}", t.angle)));
+                col = col.push(text(format!(
+                    "Flags:   {}",
+                    config.format_thing_flags(t.flags)
                 )));
             }
             col.into()
@@ -1262,6 +1302,77 @@ fn side_panel<'a>(
         .padding(8)
         .style(side_panel_style)
         .into()
+}
+
+fn thing_preview_panel<'a>(
+    map: &Map,
+    config: &GameConfig,
+    sprite_handles: &HashMap<String, ImageHandle>,
+    id: ThingId,
+) -> Element<'a, Message> {
+    let body: Element<'_, Message> = match map.things.get(id) {
+        Some(t) => {
+            let title = config
+                .thing_type(t.kind)
+                .map(|tt| tt.title.clone())
+                .unwrap_or_else(|| format!("Thing {}", t.kind));
+            let preview: Element<'_, Message> = match find_sprite_handle(config, sprite_handles, t.kind)
+            {
+                Some(handle) => container(
+                    image(handle.clone())
+                        .width(Length::Fixed(96.0))
+                        .height(Length::Fixed(96.0)),
+                )
+                .width(Length::Fixed(96.0))
+                .height(Length::Fixed(96.0))
+                .center_x(Length::Fixed(96.0))
+                .center_y(Length::Fixed(96.0))
+                .style(texture_slot_style)
+                .into(),
+                None => container(text(format!("kind {}", t.kind)).size(11))
+                    .width(Length::Fixed(96.0))
+                    .height(Length::Fixed(96.0))
+                    .center_x(Length::Fixed(96.0))
+                    .center_y(Length::Fixed(96.0))
+                    .style(texture_slot_style)
+                    .into(),
+            };
+            column![preview, text(title).size(11)]
+                .spacing(2)
+                .align_x(iced::Alignment::Center)
+                .into()
+        }
+        None => text("(missing)").size(13).into(),
+    };
+    container(column![text("Sprite").size(14), body].spacing(6))
+        .padding(8)
+        .style(side_panel_style)
+        .into()
+}
+
+fn find_sprite_handle<'a>(
+    config: &GameConfig,
+    handles: &'a HashMap<String, ImageHandle>,
+    kind: u16,
+) -> Option<&'a ImageHandle> {
+    let raw = config.thing_type(kind)?.sprite.to_ascii_uppercase();
+    if raw.is_empty() {
+        return None;
+    }
+    let take_n = |n| raw.chars().take(n).collect::<String>();
+    let base4 = take_n(4);
+    let candidates = [
+        take_n(6),
+        format!("{base4}A0"),
+        format!("{base4}A1"),
+        format!("{base4}A2"),
+    ];
+    for c in candidates {
+        if let Some(h) = handles.get(&c) {
+            return Some(h);
+        }
+    }
+    None
 }
 
 fn sector_texture_panel<'a>(
@@ -1546,15 +1657,16 @@ async fn pick_file() -> Option<PathBuf> {
 
 async fn load_asset(path: PathBuf) -> Result<AssetSummary, String> {
     let (wad, textures, summary, maps) = open_and_summarise(&path).map_err(|e| e.to_string())?;
-    let handles = textures
-        .as_ref()
-        .map(|ts| build_texture_handles(ts))
-        .unwrap_or_default();
+    let (texture_handles, sprite_handles) = match textures.as_ref() {
+        Some(ts) => (build_texture_handles(ts), build_sprite_handles(ts)),
+        None => (HashMap::new(), HashMap::new()),
+    };
     Ok(AssetSummary {
         path,
         wad,
         textures,
-        texture_handles: Arc::new(handles),
+        texture_handles: Arc::new(texture_handles),
+        sprite_handles: Arc::new(sprite_handles),
         summary,
         maps,
     })
@@ -1563,6 +1675,15 @@ async fn load_asset(path: PathBuf) -> Result<AssetSummary, String> {
 fn build_texture_handles(set: &TextureSet) -> HashMap<String, ImageHandle> {
     let mut out = HashMap::with_capacity(set.textures.len() + set.flats.len());
     for (name, img) in set.textures.iter().chain(set.flats.iter()) {
+        let handle = ImageHandle::from_rgba(img.width as u32, img.height as u32, img.rgba.clone());
+        out.insert(name.clone(), handle);
+    }
+    out
+}
+
+fn build_sprite_handles(set: &TextureSet) -> HashMap<String, ImageHandle> {
+    let mut out = HashMap::with_capacity(set.sprites.len());
+    for (name, img) in set.sprites.iter() {
         let handle = ImageHandle::from_rgba(img.width as u32, img.height as u32, img.rgba.clone());
         out.insert(name.clone(), handle);
     }

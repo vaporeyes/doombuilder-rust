@@ -5,7 +5,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use doombuilder_core::map::{LinedefId, Map, SectorId, VertexId};
+use doombuilder_core::config::GameConfig;
+use doombuilder_core::map::{LinedefId, Map, SectorId, ThingId, VertexId};
 use doombuilder_render::{FloorMesh, Hit};
 use glam::Vec2;
 use iced::mouse;
@@ -33,6 +34,7 @@ pub enum HighlightKind {
     Vertex(VertexId),
     Linedef(LinedefId),
     Sector(SectorId),
+    Thing(ThingId),
 }
 
 impl From<Hit> for HighlightKind {
@@ -41,6 +43,7 @@ impl From<Hit> for HighlightKind {
             Hit::Vertex(v) => HighlightKind::Vertex(v),
             Hit::Linedef(l) => HighlightKind::Linedef(l),
             Hit::Sector(s) => HighlightKind::Sector(s),
+            Hit::Thing(t) => HighlightKind::Thing(t),
         }
     }
 }
@@ -61,6 +64,7 @@ pub struct View2D {
     pub selection: Arc<HashSet<HighlightKind>>,
     pub drag_rect: Option<(Vec2, Vec2)>,
     pub fills: Arc<Vec<FillTile>>,
+    pub config: Arc<GameConfig>,
 }
 
 impl View2D {
@@ -270,6 +274,15 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                 &self.inner.map,
                 &self.inner.camera,
                 viewport,
+                self.inner.hover,
+                &self.inner.selection,
+            );
+            draw_things(
+                frame,
+                &self.inner.map,
+                &self.inner.camera,
+                viewport,
+                &self.inner.config,
                 self.inner.hover,
                 &self.inner.selection,
             );
@@ -557,6 +570,80 @@ fn draw_vertices(
             (base, radius)
         };
         frame.fill(&Path::circle(Point::new(s.x, s.y), r), color);
+    }
+}
+
+fn draw_things(
+    frame: &mut Frame,
+    map: &Map,
+    camera: &Camera2D,
+    viewport: Vec2,
+    config: &GameConfig,
+    hover: Option<HighlightKind>,
+    selection: &HashSet<HighlightKind>,
+) {
+    let radius_world = 16.0_f32;
+    for (id, t) in &map.things {
+        let world_x = t.x as f32;
+        let world_y = t.y as f32;
+        let center = camera.world_to_screen(Vec2::new(world_x, world_y), viewport);
+        let radius_px = (radius_world * camera.zoom).clamp(3.0, 18.0);
+
+        let rad = (t.angle as f32).to_radians();
+        let dx = rad.cos();
+        let dy = rad.sin();
+        // Translate world-space arrow into screen by sampling two world points;
+        // this naturally honours the camera's Y-flip.
+        let arrow_world = Vec2::new(world_x + dx * radius_world, world_y + dy * radius_world);
+        let arrow_end = camera.world_to_screen(arrow_world, viewport);
+
+        let base = thing_color(config, t.kind);
+        let is_selected = selection.contains(&HighlightKind::Thing(id));
+        let is_hover = matches!(hover, Some(HighlightKind::Thing(h)) if h == id);
+        let (fill, ring_color, ring_width) = if is_selected {
+            (base, Color::from_rgb(1.0, 0.25, 0.25), 2.5)
+        } else if is_hover {
+            (base, Color::from_rgb(1.0, 0.75, 0.2), 2.0)
+        } else {
+            (base, Color::from_rgba(0.0, 0.0, 0.0, 0.85), 1.0)
+        };
+
+        frame.fill(&Path::circle(Point::new(center.x, center.y), radius_px), fill);
+        let ring = Path::circle(Point::new(center.x, center.y), radius_px);
+        frame.stroke(
+            &ring,
+            Stroke::default().with_color(ring_color).with_width(ring_width),
+        );
+        let arrow = Path::line(
+            Point::new(center.x, center.y),
+            Point::new(arrow_end.x, arrow_end.y),
+        );
+        frame.stroke(
+            &arrow,
+            Stroke::default()
+                .with_color(Color::from_rgba(0.0, 0.0, 0.0, 0.95))
+                .with_width(2.0),
+        );
+    }
+}
+
+fn thing_color(config: &GameConfig, kind: u16) -> Color {
+    let category = config
+        .thing_type(kind)
+        .map(|t| t.category.to_ascii_lowercase())
+        .unwrap_or_default();
+    match category.as_str() {
+        "players" | "playerstart" | "starts" => Color::from_rgb(0.4, 1.0, 0.4),
+        "monsters" => Color::from_rgb(1.0, 0.35, 0.35),
+        "weapons" => Color::from_rgb(1.0, 0.85, 0.2),
+        "ammunition" | "ammo" => Color::from_rgb(1.0, 0.95, 0.6),
+        "powerups" => Color::from_rgb(1.0, 0.4, 1.0),
+        "health" => Color::from_rgb(0.5, 1.0, 1.0),
+        "armor" => Color::from_rgb(0.3, 0.6, 1.0),
+        "keys" => Color::from_rgb(1.0, 0.9, 0.0),
+        "obstacles" | "decoration" | "lights" => Color::from_rgb(0.7, 0.7, 0.7),
+        "teleports" => Color::from_rgb(0.4, 1.0, 0.85),
+        _ => Color::from_rgb(0.85, 0.85, 0.85),
     }
 }
 

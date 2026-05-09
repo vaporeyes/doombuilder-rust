@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use doombuilder_core::map::{LinedefId, Map, SectorId, VertexId};
+use doombuilder_core::map::{LinedefId, Map, SectorId, ThingId, VertexId};
 use rstar::{RTree, RTreeObject, AABB};
 
 use crate::mesh::FloorMesh;
@@ -14,6 +14,7 @@ pub enum Hit {
     Vertex(VertexId),
     Linedef(LinedefId),
     Sector(SectorId),
+    Thing(ThingId),
 }
 
 #[derive(Debug)]
@@ -21,6 +22,7 @@ pub struct SpatialIndex {
     vertices: RTree<VertexNode>,
     linedefs: RTree<LinedefNode>,
     sectors: RTree<SectorBoundsNode>,
+    things: RTree<ThingNode>,
     sector_meshes: HashMap<SectorId, FloorMesh>,
 }
 
@@ -64,12 +66,23 @@ impl SpatialIndex {
             })
             .collect();
 
+        let thing_nodes: Vec<ThingNode> = map
+            .things
+            .iter()
+            .map(|(id, t)| ThingNode {
+                id,
+                x: t.x as f32,
+                y: t.y as f32,
+            })
+            .collect();
+
         let sector_meshes_by_id = sector_meshes.into_iter().collect();
 
         Self {
             vertices: RTree::bulk_load(vertex_nodes),
             linedefs: RTree::bulk_load(linedef_nodes),
             sectors: RTree::bulk_load(sector_nodes),
+            things: RTree::bulk_load(thing_nodes),
             sector_meshes: sector_meshes_by_id,
         }
     }
@@ -150,9 +163,21 @@ impl SpatialIndex {
             .collect()
     }
 
-    /// Top-level hit test honouring editor priority (vertex > linedef > sector).
-    /// `vertex_radius` and `linedef_radius` are world-space tolerances; pass in
-    /// pixel tolerances divided by camera zoom.
+    /// Thing closest to (x, y), within `max_distance` world units.
+    pub fn nearest_thing(&self, x: f32, y: f32, max_distance: f32) -> Option<ThingId> {
+        let node = self.things.nearest_neighbor(&[x, y])?;
+        let dx = node.x - x;
+        let dy = node.y - y;
+        if dx * dx + dy * dy <= max_distance * max_distance {
+            Some(node.id)
+        } else {
+            None
+        }
+    }
+
+    /// Top-level hit test. Things sit on top of everything else (their
+    /// pickable radius is fixed in world units), then standard
+    /// vertex > linedef > sector priority.
     pub fn hit_test(
         &self,
         x: f32,
@@ -160,6 +185,9 @@ impl SpatialIndex {
         vertex_radius: f32,
         linedef_radius: f32,
     ) -> Option<Hit> {
+        if let Some(t) = self.nearest_thing(x, y, 24.0) {
+            return Some(Hit::Thing(t));
+        }
         if let Some(v) = self.nearest_vertex(x, y, vertex_radius) {
             return Some(Hit::Vertex(v));
         }
@@ -167,6 +195,28 @@ impl SpatialIndex {
             return Some(Hit::Linedef(l));
         }
         self.sector_at(x, y).map(Hit::Sector)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ThingNode {
+    id: ThingId,
+    x: f32,
+    y: f32,
+}
+
+impl RTreeObject for ThingNode {
+    type Envelope = AABB<[f32; 2]>;
+    fn envelope(&self) -> Self::Envelope {
+        AABB::from_point([self.x, self.y])
+    }
+}
+
+impl rstar::PointDistance for ThingNode {
+    fn distance_2(&self, point: &[f32; 2]) -> f32 {
+        let dx = self.x - point[0];
+        let dy = self.y - point[1];
+        dx * dx + dy * dy
     }
 }
 
