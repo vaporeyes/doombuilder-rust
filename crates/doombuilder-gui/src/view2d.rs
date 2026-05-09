@@ -23,9 +23,8 @@ pub enum View2DMessage {
     HoverAt(Vec2),
     HoverCleared,
     ClickAt(Vec2),
-    RectDragMoved { start: Vec2, current: Vec2 },
-    RectDragCleared,
-    RectDragComplete { start: Vec2, end: Vec2 },
+    DragMoved { start: Vec2, current: Vec2 },
+    DragComplete { start: Vec2, end: Vec2 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -145,7 +144,7 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                     (true, Some(s)) => {
                         let start_w = camera.screen_to_world(Vec2::new(s.x, s.y), viewport);
                         let end_w = camera.screen_to_world(Vec2::new(p.x, p.y), viewport);
-                        View2DMessage::RectDragComplete {
+                        View2DMessage::DragComplete {
                             start: start_w,
                             end: end_w,
                         }
@@ -181,7 +180,7 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                             let cur_w = camera.screen_to_world(Vec2::new(p.x, p.y), viewport);
                             return Some(
                                 canvas::Action::publish((self.on_event)(
-                                    View2DMessage::RectDragMoved {
+                                    View2DMessage::DragMoved {
                                         start: start_w,
                                         current: cur_w,
                                     },

@@ -3,6 +3,7 @@
 
 pub mod archive;
 pub mod config;
+pub mod edit;
 pub mod error;
 pub mod format;
 pub mod map;

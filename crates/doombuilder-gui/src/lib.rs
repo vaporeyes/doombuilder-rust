@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
-use doombuilder_core::map::{Map, MapSidedef, SectorId, TextureName};
+use doombuilder_core::edit::{Command, UndoStack, VertexMove};
+use doombuilder_core::map::{Map, MapSidedef, SectorId, TextureName, VertexId};
 use doombuilder_core::wad::WadKind;
 use doombuilder_core::{load_auto, MapFormat, Wad};
 use doombuilder_render::{
@@ -57,9 +58,20 @@ pub struct App {
     hover: Option<HighlightKind>,
     selection: Arc<HashSet<HighlightKind>>,
     drag_rect: Option<(Vec2, Vec2)>,
+    active_drag: Option<DragMode>,
+    undo: UndoStack,
     modifiers: Modifiers,
     mode: Mode,
     config: Arc<GameConfig>,
+}
+
+#[derive(Debug)]
+enum DragMode {
+    Rect,
+    MoveVertices {
+        /// Original (x, y) for each vertex involved in the drag.
+        originals: Vec<(VertexId, i32, i32)>,
+    },
 }
 
 impl Default for App {
@@ -81,6 +93,8 @@ impl Default for App {
             hover: None,
             selection: Arc::new(HashSet::new()),
             drag_rect: None,
+            active_drag: None,
+            undo: UndoStack::new(),
             modifiers: Modifiers::default(),
             mode: Mode::default(),
             config: Arc::new(GameConfig::vanilla_doom()),
@@ -100,6 +114,8 @@ pub enum Message {
     ModifiersChanged(Modifiers),
     KeyboardEsc,
     SelectAll,
+    Undo,
+    Redo,
     Quit,
     Noop,
 }
@@ -219,9 +235,29 @@ impl App {
                 Task::none()
             }
             Message::KeyboardEsc => {
-                if !self.selection.is_empty() {
+                if self.active_drag.is_some() {
+                    self.cancel_active_drag();
+                } else if !self.selection.is_empty() {
                     self.selection = Arc::new(HashSet::new());
-                    self.cache2d.clear();
+                }
+                self.cache2d.clear();
+                Task::none()
+            }
+            Message::Undo => {
+                if let Some(map) = self.map.as_mut() {
+                    if self.undo.undo(Arc::make_mut(map)) {
+                        self.rebuild_geometry_indices();
+                        self.cache2d.clear();
+                    }
+                }
+                Task::none()
+            }
+            Message::Redo => {
+                if let Some(map) = self.map.as_mut() {
+                    if self.undo.redo(Arc::make_mut(map)) {
+                        self.rebuild_geometry_indices();
+                        self.cache2d.clear();
+                    }
                 }
                 Task::none()
             }
@@ -254,6 +290,8 @@ impl App {
         self.hover = None;
         self.selection = Arc::new(HashSet::new());
         self.drag_rect = None;
+        self.active_drag = None;
+        self.undo.clear();
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -262,6 +300,11 @@ impl App {
             keyboard::Event::KeyPressed { key, modifiers, .. } => match key.as_ref() {
                 keyboard::Key::Named(keyboard::key::Named::Escape) => Message::KeyboardEsc,
                 keyboard::Key::Character("a") if modifiers.command() => Message::SelectAll,
+                keyboard::Key::Character("z") if modifiers.command() && modifiers.shift() => {
+                    Message::Redo
+                }
+                keyboard::Key::Character("z") if modifiers.command() => Message::Undo,
+                keyboard::Key::Character("y") if modifiers.command() => Message::Redo,
                 _ => Message::ModifiersChanged(modifiers),
             },
             keyboard::Event::KeyReleased { modifiers, .. } => {
@@ -306,14 +349,52 @@ impl App {
                 }
                 self.selection = Arc::new(sel);
             }
-            View2DMessage::RectDragMoved { start, current } => {
+            View2DMessage::DragMoved { start, current } => {
+                self.handle_drag_moved(start, current);
+            }
+            View2DMessage::DragComplete { start, end } => {
+                self.handle_drag_complete(start, end);
+            }
+        }
+    }
+
+    fn handle_drag_moved(&mut self, start: Vec2, current: Vec2) {
+        // First DragMoved decides the drag mode based on what the press hit.
+        if self.active_drag.is_none() {
+            let hit = self.hit_test(start);
+            self.active_drag = Some(self.begin_drag(hit, start));
+        }
+        let mode = self.active_drag.as_ref();
+        match mode {
+            Some(DragMode::Rect) => {
                 self.drag_rect = Some((start, current));
                 self.hover = None;
             }
-            View2DMessage::RectDragCleared => {
-                self.drag_rect = None;
+            Some(DragMode::MoveVertices { originals }) => {
+                self.hover = None;
+                let dx = (current.x - start.x).round() as i32;
+                let dy = (current.y - start.y).round() as i32;
+                let originals = originals.clone();
+                if let Some(map) = self.map.as_mut() {
+                    let map = Arc::make_mut(map);
+                    for &(id, ox, oy) in &originals {
+                        if let Some(v) = map.vertices.get_mut(id) {
+                            v.x = ox.saturating_add(dx);
+                            v.y = oy.saturating_add(dy);
+                        }
+                    }
+                }
+                // Drop sector fills until drag ends so they don't appear stale.
+                self.sector_meshes = Arc::new(Vec::new());
             }
-            View2DMessage::RectDragComplete { start, end } => {
+            None => {}
+        }
+    }
+
+    fn handle_drag_complete(&mut self, start: Vec2, end: Vec2) {
+        let mode = self.active_drag.take();
+        match mode {
+            Some(DragMode::Rect) => {
                 self.drag_rect = None;
                 if let Some(spatial) = &self.spatial {
                     let min = [start.x.min(end.x), start.y.min(end.y)];
@@ -332,7 +413,120 @@ impl App {
                     self.selection = Arc::new(sel);
                 }
             }
+            Some(DragMode::MoveVertices { originals }) => {
+                let dx = (end.x - start.x).round() as i32;
+                let dy = (end.y - start.y).round() as i32;
+                if dx != 0 || dy != 0 {
+                    let moves: Vec<VertexMove> = originals
+                        .iter()
+                        .map(|&(id, _, _)| VertexMove { id, dx, dy })
+                        .collect();
+                    self.undo.push(Command::MoveVertices(moves));
+                } else {
+                    // Zero-length drag: revert any in-flight changes.
+                    if let Some(map) = self.map.as_mut() {
+                        let map = Arc::make_mut(map);
+                        for &(id, ox, oy) in &originals {
+                            if let Some(v) = map.vertices.get_mut(id) {
+                                v.x = ox;
+                                v.y = oy;
+                            }
+                        }
+                    }
+                }
+                self.rebuild_geometry_indices();
+            }
+            None => {}
         }
+    }
+
+    fn begin_drag(&mut self, hit: Option<HighlightKind>, _start: Vec2) -> DragMode {
+        // If we pressed on a draggable element, switch the selection to it (or
+        // include it via shift) and start a vertex-translate drag.
+        let promote = match hit {
+            Some(HighlightKind::Vertex(_)) | Some(HighlightKind::Linedef(_)) => true,
+            _ => false,
+        };
+        if promote {
+            let h = hit.unwrap();
+            if self.modifiers.shift() {
+                let mut sel = (*self.selection).clone();
+                sel.insert(h);
+                self.selection = Arc::new(sel);
+            } else if !self.selection.contains(&h) {
+                let mut sel = HashSet::new();
+                sel.insert(h);
+                self.selection = Arc::new(sel);
+            }
+            let originals = self.collect_drag_vertices();
+            if !originals.is_empty() {
+                return DragMode::MoveVertices { originals };
+            }
+        }
+        DragMode::Rect
+    }
+
+    /// Vertices that should move with the current selection (vertex selections
+    /// contribute themselves; linedef selections contribute both endpoints).
+    fn collect_drag_vertices(&self) -> Vec<(VertexId, i32, i32)> {
+        let map = match &self.map {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        let mut ids: HashSet<VertexId> = HashSet::new();
+        for h in self.selection.iter() {
+            match h {
+                HighlightKind::Vertex(v) => {
+                    ids.insert(*v);
+                }
+                HighlightKind::Linedef(l) => {
+                    if let Some(line) = map.linedefs.get(*l) {
+                        ids.insert(line.v1);
+                        ids.insert(line.v2);
+                    }
+                }
+                HighlightKind::Sector(_) => {}
+            }
+        }
+        ids.into_iter()
+            .filter_map(|id| map.vertices.get(id).map(|v| (id, v.x, v.y)))
+            .collect()
+    }
+
+    fn cancel_active_drag(&mut self) {
+        let mode = self.active_drag.take();
+        if let Some(DragMode::MoveVertices { originals }) = mode {
+            if let Some(map) = self.map.as_mut() {
+                let map = Arc::make_mut(map);
+                for &(id, ox, oy) in &originals {
+                    if let Some(v) = map.vertices.get_mut(id) {
+                        v.x = ox;
+                        v.y = oy;
+                    }
+                }
+            }
+            self.rebuild_geometry_indices();
+        }
+        self.drag_rect = None;
+    }
+
+    fn rebuild_geometry_indices(&mut self) {
+        let Some(map) = self.map.clone() else { return };
+        let loops = doombuilder_render::extract_sector_loops(&map);
+        let mut meshes_with_id: Vec<(SectorId, FloorMesh)> = Vec::with_capacity(loops.len());
+        for (sid, lp) in &loops {
+            if let Ok(mesh) = doombuilder_render::triangulate_sector(&map, *sid, lp) {
+                if !mesh.indices.is_empty() {
+                    meshes_with_id.push((*sid, mesh));
+                }
+            }
+        }
+        let walls = build_walls(&map);
+        let spatial = SpatialIndex::build(&map, meshes_with_id.clone());
+        let meshes: Vec<FloorMesh> = meshes_with_id.into_iter().map(|(_, m)| m).collect();
+        self.sector_meshes = Arc::new(meshes);
+        self.walls = Arc::new(walls);
+        self.spatial = Some(Arc::new(spatial));
     }
 
     fn hit_test(&self, world: Vec2) -> Option<HighlightKind> {
@@ -733,7 +927,12 @@ impl std::fmt::Display for MenuItem {
 }
 
 const FILE_MENU_ITEMS: &[MenuItem] = &[MenuItem("Open WAD…"), MenuItem("Quit")];
-const EDIT_MENU_ITEMS: &[MenuItem] = &[MenuItem("Undo (n/a)"), MenuItem("Redo (n/a)")];
+const EDIT_MENU_ITEMS: &[MenuItem] = &[
+    MenuItem("Undo"),
+    MenuItem("Redo"),
+    MenuItem("Select All"),
+    MenuItem("Clear Selection"),
+];
 const VIEW_MENU_ITEMS: &[MenuItem] = &[MenuItem("2D Mode"), MenuItem("3D Mode")];
 const TOOLS_MENU_ITEMS: &[MenuItem] = &[MenuItem("Map Statistics (n/a)")];
 const HELP_MENU_ITEMS: &[MenuItem] = &[MenuItem("About (n/a)")];
@@ -746,8 +945,14 @@ fn dispatch_file(item: MenuItem) -> Message {
     }
 }
 
-fn dispatch_edit(_item: MenuItem) -> Message {
-    Message::Noop
+fn dispatch_edit(item: MenuItem) -> Message {
+    match item.0 {
+        "Undo" => Message::Undo,
+        "Redo" => Message::Redo,
+        "Select All" => Message::SelectAll,
+        "Clear Selection" => Message::KeyboardEsc,
+        _ => Message::Noop,
+    }
 }
 
 fn dispatch_view(item: MenuItem) -> Message {
