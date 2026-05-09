@@ -1,11 +1,11 @@
-// ABOUTME: 2D editor viewport using iced's Canvas. Renders grid, filled sectors
-// ABOUTME: (from triangulated meshes), linedefs, and vertex dots. Emits messages
-// ABOUTME: for pan, zoom, and frame-on-load so App owns the camera state.
+// ABOUTME: 2D editor viewport using iced's Canvas. Renders grid, filled sectors,
+// ABOUTME: linedefs, vertices, and hover/selection overlays. Mouse: middle/right
+// ABOUTME: drag pans, wheel zooms about cursor, left click selects, move hovers.
 
 use std::sync::Arc;
 
-use doombuilder_core::map::Map;
-use doombuilder_render::FloorMesh;
+use doombuilder_core::map::{LinedefId, Map, SectorId, VertexId};
+use doombuilder_render::{FloorMesh, Hit};
 use glam::Vec2;
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Canvas, Event, Frame, Geometry, Path, Program, Stroke};
@@ -17,6 +17,26 @@ use crate::camera::Camera2D;
 pub enum View2DMessage {
     PanBy(Vec2),
     ZoomAt { pivot: Vec2, factor: f32, viewport: Vec2 },
+    HoverAt(Vec2),
+    HoverCleared,
+    ClickAt(Vec2),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HighlightKind {
+    Vertex(VertexId),
+    Linedef(LinedefId),
+    Sector(SectorId),
+}
+
+impl From<Hit> for HighlightKind {
+    fn from(h: Hit) -> Self {
+        match h {
+            Hit::Vertex(v) => HighlightKind::Vertex(v),
+            Hit::Linedef(l) => HighlightKind::Linedef(l),
+            Hit::Sector(s) => HighlightKind::Sector(s),
+        }
+    }
 }
 
 pub struct View2D {
@@ -24,6 +44,8 @@ pub struct View2D {
     pub meshes: Arc<Vec<FloorMesh>>,
     pub camera: Camera2D,
     pub cache: Arc<Cache>,
+    pub hover: Option<HighlightKind>,
+    pub selection: Option<HighlightKind>,
 }
 
 impl View2D {
@@ -53,6 +75,7 @@ struct View2DProgram<Message> {
 pub struct InternalState {
     panning: bool,
     last_cursor: Option<Point>,
+    cursor_in_bounds: bool,
 }
 
 impl<Message> Program<Message> for View2DProgram<Message> {
@@ -69,30 +92,60 @@ impl<Message> Program<Message> for View2DProgram<Message> {
         let cursor_pos = cursor.position_in(bounds);
 
         match event {
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left | mouse::Button::Middle)) => {
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                state.cursor_in_bounds = false;
+                state.panning = false;
+                return Some(
+                    canvas::Action::publish((self.on_event)(View2DMessage::HoverCleared))
+                        .and_capture(),
+                );
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle))
+            | Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 if let Some(p) = cursor_pos {
                     state.panning = true;
                     state.last_cursor = Some(p);
                     return Some(canvas::Action::request_redraw().and_capture());
                 }
             }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left | mouse::Button::Middle)) => {
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle))
+            | Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)) => {
                 state.panning = false;
                 state.last_cursor = None;
             }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if let Some(p) = cursor_pos {
+                    let world = self
+                        .inner
+                        .camera
+                        .screen_to_world(Vec2::new(p.x, p.y), viewport);
+                    return Some(
+                        canvas::Action::publish((self.on_event)(View2DMessage::ClickAt(world)))
+                            .and_capture(),
+                    );
+                }
+            }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if let Some(p) = cursor_pos {
+                    state.cursor_in_bounds = true;
+                    let prev = state.last_cursor.replace(p);
                     if state.panning {
-                        if let Some(prev) = state.last_cursor.replace(p) {
+                        if let Some(prev) = prev {
                             let delta = Vec2::new(p.x - prev.x, p.y - prev.y);
                             return Some(
                                 canvas::Action::publish((self.on_event)(View2DMessage::PanBy(delta)))
                                     .and_capture(),
                             );
                         }
-                        state.last_cursor = Some(p);
                     } else {
-                        state.last_cursor = Some(p);
+                        let world = self
+                            .inner
+                            .camera
+                            .screen_to_world(Vec2::new(p.x, p.y), viewport);
+                        return Some(
+                            canvas::Action::publish((self.on_event)(View2DMessage::HoverAt(world)))
+                                .and_capture(),
+                        );
                     }
                 }
             }
@@ -131,9 +184,30 @@ impl<Message> Program<Message> for View2DProgram<Message> {
         let geometry = self.inner.cache.draw(renderer, bounds.size(), |frame| {
             draw_background(frame, bounds);
             draw_grid(frame, &self.inner.camera, viewport);
-            draw_sector_fills(frame, &self.inner.meshes, &self.inner.camera, viewport);
-            draw_linedefs(frame, &self.inner.map, &self.inner.camera, viewport);
-            draw_vertices(frame, &self.inner.map, &self.inner.camera, viewport);
+            draw_sector_fills(
+                frame,
+                &self.inner.meshes,
+                &self.inner.camera,
+                viewport,
+                self.inner.hover,
+                self.inner.selection,
+            );
+            draw_linedefs(
+                frame,
+                &self.inner.map,
+                &self.inner.camera,
+                viewport,
+                self.inner.hover,
+                self.inner.selection,
+            );
+            draw_vertices(
+                frame,
+                &self.inner.map,
+                &self.inner.camera,
+                viewport,
+                self.inner.hover,
+                self.inner.selection,
+            );
         });
         vec![geometry]
     }
@@ -191,7 +265,6 @@ fn draw_grid(frame: &mut Frame, camera: &Camera2D, viewport: Vec2) {
         0.7,
     );
 
-    // Origin axes.
     let origin_screen = camera.world_to_screen(Vec2::ZERO, viewport);
     let axis_color = Color::from_rgba(0.45, 0.45, 0.50, 1.0);
     let h = Path::line(
@@ -238,7 +311,6 @@ fn draw_grid_lines(
     }
 }
 
-/// Pick a power-of-two grid step that stays visually around 64 px on screen.
 fn grid_step(zoom: f32) -> f32 {
     let target_pixels = 64.0_f32;
     let world_per_pixel = 1.0 / zoom.max(1e-6);
@@ -252,7 +324,11 @@ fn draw_sector_fills(
     meshes: &[FloorMesh],
     camera: &Camera2D,
     viewport: Vec2,
+    _hover: Option<HighlightKind>,
+    _selection: Option<HighlightKind>,
 ) {
+    // Sector highlights would need (SectorId, FloorMesh) pairs in this slice;
+    // currently meshes is just the geometry. Pre-pass: render all in base fill.
     let fill = Color::from_rgba(0.15, 0.20, 0.30, 0.6);
     for mesh in meshes {
         let mut tri_path = canvas::path::Builder::new();
@@ -274,22 +350,40 @@ fn draw_sector_fills(
     }
 }
 
-fn draw_linedefs(frame: &mut Frame, map: &Map, camera: &Camera2D, viewport: Vec2) {
+fn draw_linedefs(
+    frame: &mut Frame,
+    map: &Map,
+    camera: &Camera2D,
+    viewport: Vec2,
+    hover: Option<HighlightKind>,
+    selection: Option<HighlightKind>,
+) {
     let one_sided = Stroke::default()
         .with_color(Color::from_rgb(0.85, 0.85, 0.90))
         .with_width(1.2);
     let two_sided = Stroke::default()
         .with_color(Color::from_rgba(0.55, 0.65, 0.80, 0.9))
         .with_width(1.0);
+    let hovered = Stroke::default()
+        .with_color(Color::from_rgb(1.0, 0.7, 0.2))
+        .with_width(2.5);
+    let selected = Stroke::default()
+        .with_color(Color::from_rgb(1.0, 0.3, 0.3))
+        .with_width(2.5);
 
-    for (_, line) in &map.linedefs {
+    for (id, line) in &map.linedefs {
         let (Some(v1), Some(v2)) = (map.vertices.get(line.v1), map.vertices.get(line.v2)) else {
             continue;
         };
         let p1 = camera.world_to_screen(Vec2::new(v1.x as f32, v1.y as f32), viewport);
         let p2 = camera.world_to_screen(Vec2::new(v2.x as f32, v2.y as f32), viewport);
         let path = Path::line(Point::new(p1.x, p1.y), Point::new(p2.x, p2.y));
-        let stroke = if line.left.is_some() && line.right.is_some() {
+
+        let stroke = if matches!(selection, Some(HighlightKind::Linedef(s)) if s == id) {
+            selected
+        } else if matches!(hover, Some(HighlightKind::Linedef(h)) if h == id) {
+            hovered
+        } else if line.left.is_some() && line.right.is_some() {
             two_sided
         } else {
             one_sided
@@ -298,22 +392,39 @@ fn draw_linedefs(frame: &mut Frame, map: &Map, camera: &Camera2D, viewport: Vec2
     }
 }
 
-fn draw_vertices(frame: &mut Frame, map: &Map, camera: &Camera2D, viewport: Vec2) {
-    if camera.zoom < 0.15 {
-        return;
-    }
-    let color = Color::from_rgb(1.0, 0.85, 0.3);
+fn draw_vertices(
+    frame: &mut Frame,
+    map: &Map,
+    camera: &Camera2D,
+    viewport: Vec2,
+    hover: Option<HighlightKind>,
+    selection: Option<HighlightKind>,
+) {
+    let visible = camera.zoom >= 0.15;
+    let base = Color::from_rgb(1.0, 0.85, 0.3);
+    let hovered = Color::from_rgb(1.0, 0.55, 0.1);
+    let selected = Color::from_rgb(1.0, 0.2, 0.2);
     let radius = (camera.zoom * 0.6).clamp(1.5, 3.5);
-    for (_, v) in &map.vertices {
+    let highlight_radius = radius + 2.0;
+
+    for (id, v) in &map.vertices {
         let s = camera.world_to_screen(Vec2::new(v.x as f32, v.y as f32), viewport);
-        frame.fill(
-            &Path::circle(Point::new(s.x, s.y), radius),
-            color,
-        );
+        let is_sel = matches!(selection, Some(HighlightKind::Vertex(x)) if x == id);
+        let is_hov = matches!(hover, Some(HighlightKind::Vertex(x)) if x == id);
+        if !visible && !is_sel && !is_hov {
+            continue;
+        }
+        let (color, r) = if is_sel {
+            (selected, highlight_radius)
+        } else if is_hov {
+            (hovered, highlight_radius)
+        } else {
+            (base, radius)
+        };
+        frame.fill(&Path::circle(Point::new(s.x, s.y), r), color);
     }
 }
 
-/// Compute the AABB of all map vertices, useful for framing the camera.
 pub fn map_aabb(map: &Map) -> Option<(Vec2, Vec2)> {
     let mut iter = map.vertices.iter().map(|(_, v)| Vec2::new(v.x as f32, v.y as f32));
     let first = iter.next()?;
@@ -325,4 +436,3 @@ pub fn map_aabb(map: &Map) -> Option<(Vec2, Vec2)> {
     }
     Some((min, max))
 }
-

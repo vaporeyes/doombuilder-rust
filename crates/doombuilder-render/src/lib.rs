@@ -3,8 +3,10 @@
 
 pub mod loops;
 pub mod mesh;
+pub mod spatial;
 pub mod walls;
 
 pub use loops::{extract_sector_loops, SectorLoops};
 pub use mesh::{triangulate_sector, FloorMesh, MeshError};
+pub use spatial::{Hit, SpatialIndex};
 pub use walls::{build_walls, Wall, WallKind};

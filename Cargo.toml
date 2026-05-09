@@ -25,6 +25,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 slotmap = "1"
 rfd = "0.17"
 spade = "2"
+rstar = "0.12"
 glam = { version = "0.32", features = ["bytemuck"] }
 doombuilder-core = { path = "crates/doombuilder-core" }
 doombuilder-render = { path = "crates/doombuilder-render" }

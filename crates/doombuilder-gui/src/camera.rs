@@ -54,4 +54,14 @@ impl Camera2D {
         self.zoom = zx.min(zy) * margin;
         self.center = (min + max) * 0.5;
     }
+
+    /// Power-of-two world-space grid spacing chosen so major lines stay around
+    /// 64 px on screen at the current zoom level.
+    pub fn grid_step(&self) -> f32 {
+        let target_pixels = 64.0_f32;
+        let world_per_pixel = 1.0 / self.zoom.max(1e-6);
+        let raw = target_pixels * world_per_pixel;
+        let exp = raw.log2().round();
+        2.0_f32.powf(exp).max(1.0)
+    }
 }
