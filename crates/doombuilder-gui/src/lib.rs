@@ -5,6 +5,7 @@
 mod camera;
 mod view2d;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,9 +18,10 @@ use doombuilder_render::{
     build_walls, extract_sector_loops, triangulate_sector, FloorMesh, SpatialIndex, Wall,
 };
 use glam::Vec2;
+use iced::keyboard::{self, Modifiers};
 use iced::widget::canvas::Cache;
 use iced::widget::{button, column, container, pick_list, row, text, Space};
-use iced::{Border, Color, Element, Length, Task, Theme};
+use iced::{Border, Color, Element, Length, Subscription, Task, Theme};
 
 use camera::Camera2D;
 use view2d::{map_aabb, HighlightKind, View2D, View2DMessage};
@@ -27,6 +29,7 @@ use view2d::{map_aabb, HighlightKind, View2D, View2DMessage};
 pub fn run() -> iced::Result {
     iced::application(App::default, App::update, App::view)
         .title(App::window_title)
+        .subscription(App::subscription)
         .run()
 }
 
@@ -52,7 +55,9 @@ pub struct App {
     camera2d: Camera2D,
     cache2d: Arc<Cache>,
     hover: Option<HighlightKind>,
-    selection: Option<HighlightKind>,
+    selection: Arc<HashSet<HighlightKind>>,
+    drag_rect: Option<(Vec2, Vec2)>,
+    modifiers: Modifiers,
     mode: Mode,
     config: Arc<GameConfig>,
 }
@@ -74,7 +79,9 @@ impl Default for App {
             camera2d: Camera2D::default(),
             cache2d: Arc::new(Cache::new()),
             hover: None,
-            selection: None,
+            selection: Arc::new(HashSet::new()),
+            drag_rect: None,
+            modifiers: Modifiers::default(),
             mode: Mode::default(),
             config: Arc::new(GameConfig::vanilla_doom()),
         }
@@ -90,6 +97,9 @@ pub enum Message {
     MapLoaded(Result<MapPayload, String>),
     Mode(Mode),
     View2D(View2DMessage),
+    ModifiersChanged(Modifiers),
+    KeyboardEsc,
+    SelectAll,
     Quit,
     Noop,
 }
@@ -184,7 +194,8 @@ impl App {
                 self.spatial = Some(payload.spatial);
                 self.cache2d = Arc::new(Cache::new());
                 self.hover = None;
-                self.selection = None;
+                self.selection = Arc::new(HashSet::new());
+                self.drag_rect = None;
                 if let Some((min, max)) = map_aabb(&payload.map) {
                     self.camera2d.frame_aabb(min, max, Vec2::new(800.0, 600.0));
                 }
@@ -203,6 +214,30 @@ impl App {
                 self.cache2d.clear();
                 Task::none()
             }
+            Message::ModifiersChanged(m) => {
+                self.modifiers = m;
+                Task::none()
+            }
+            Message::KeyboardEsc => {
+                if !self.selection.is_empty() {
+                    self.selection = Arc::new(HashSet::new());
+                    self.cache2d.clear();
+                }
+                Task::none()
+            }
+            Message::SelectAll => {
+                if let Some(map) = &self.map {
+                    let all: HashSet<HighlightKind> = map
+                        .vertices
+                        .keys()
+                        .map(HighlightKind::Vertex)
+                        .chain(map.linedefs.keys().map(HighlightKind::Linedef))
+                        .collect();
+                    self.selection = Arc::new(all);
+                    self.cache2d.clear();
+                }
+                Task::none()
+            }
             Message::Quit => iced::exit(),
             Message::Noop => Task::none(),
         }
@@ -217,7 +252,22 @@ impl App {
         self.spatial = None;
         self.cache2d = Arc::new(Cache::new());
         self.hover = None;
-        self.selection = None;
+        self.selection = Arc::new(HashSet::new());
+        self.drag_rect = None;
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        keyboard::listen().map(|event| match event {
+            keyboard::Event::ModifiersChanged(m) => Message::ModifiersChanged(m),
+            keyboard::Event::KeyPressed { key, modifiers, .. } => match key.as_ref() {
+                keyboard::Key::Named(keyboard::key::Named::Escape) => Message::KeyboardEsc,
+                keyboard::Key::Character("a") if modifiers.command() => Message::SelectAll,
+                _ => Message::ModifiersChanged(modifiers),
+            },
+            keyboard::Event::KeyReleased { modifiers, .. } => {
+                Message::ModifiersChanged(modifiers)
+            }
+        })
     }
 
     fn handle_view2d(&mut self, msg: View2DMessage) {
@@ -238,7 +288,49 @@ impl App {
                 self.hover = None;
             }
             View2DMessage::ClickAt(world) => {
-                self.selection = self.hit_test(world);
+                let hit = self.hit_test(world);
+                let additive = self.modifiers.shift();
+                let mut sel: HashSet<HighlightKind> = (*self.selection).clone();
+                match (hit, additive) {
+                    (Some(h), true) => {
+                        if !sel.insert(h) {
+                            sel.remove(&h);
+                        }
+                    }
+                    (Some(h), false) => {
+                        sel.clear();
+                        sel.insert(h);
+                    }
+                    (None, false) => sel.clear(),
+                    (None, true) => {}
+                }
+                self.selection = Arc::new(sel);
+            }
+            View2DMessage::RectDragMoved { start, current } => {
+                self.drag_rect = Some((start, current));
+                self.hover = None;
+            }
+            View2DMessage::RectDragCleared => {
+                self.drag_rect = None;
+            }
+            View2DMessage::RectDragComplete { start, end } => {
+                self.drag_rect = None;
+                if let Some(spatial) = &self.spatial {
+                    let min = [start.x.min(end.x), start.y.min(end.y)];
+                    let max = [start.x.max(end.x), start.y.max(end.y)];
+                    let mut sel: HashSet<HighlightKind> = if self.modifiers.shift() {
+                        (*self.selection).clone()
+                    } else {
+                        HashSet::new()
+                    };
+                    for v in spatial.vertices_in_rect(min, max) {
+                        sel.insert(HighlightKind::Vertex(v));
+                    }
+                    for l in spatial.linedefs_in_rect(min, max) {
+                        sel.insert(HighlightKind::Linedef(l));
+                    }
+                    self.selection = Arc::new(sel);
+                }
             }
         }
     }
@@ -328,7 +420,8 @@ impl App {
                     camera: self.camera2d,
                     cache: self.cache2d.clone(),
                     hover: self.hover,
-                    selection: self.selection,
+                    selection: self.selection.clone(),
+                    drag_rect: self.drag_rect,
                 };
                 view.into_widget(Message::View2D)
             }
@@ -343,20 +436,31 @@ impl App {
     fn bottom_panel(&self) -> Option<Element<'_, Message>> {
         let map = self.map.as_ref()?;
 
-        let details_body: Element<'_, Message> = match self.selection {
-            Some(highlight) => selection_details(map, &self.config, highlight),
-            None => column![
+        let single = if self.selection.len() == 1 {
+            self.selection.iter().next().copied()
+        } else {
+            None
+        };
+
+        let details_body: Element<'_, Message> = if self.selection.is_empty() {
+            column![
                 text("No selection").size(15),
                 text("Click an element to inspect.").size(12),
+                text("Drag an empty area to box-select.").size(12),
+                text("Shift+click adds, Esc clears.").size(12),
             ]
             .spacing(2)
-            .into(),
+            .into()
+        } else if let Some(h) = single {
+            selection_details(map, &self.config, h)
+        } else {
+            multi_select_summary(&self.selection)
         };
         let details = container(details_body)
             .width(Length::Fixed(320.0))
             .padding(10);
 
-        let (front_side, back_side) = match self.selection {
+        let (front_side, back_side) = match single {
             Some(HighlightKind::Linedef(id)) => {
                 let line = map.linedefs.get(id);
                 (
@@ -405,7 +509,13 @@ impl App {
         let grid = self.camera2d.grid_step();
         let zoom = self.camera2d.zoom;
         let right = if self.map.is_some() {
-            format!("Grid: {grid:.0}   Zoom: {zoom:.3}")
+            let sel = self.selection.len();
+            let sel_part = if sel > 0 {
+                format!("Sel: {sel}   ")
+            } else {
+                String::new()
+            };
+            format!("{sel_part}Grid: {grid:.0}   Zoom: {zoom:.3}")
         } else {
             String::new()
         };
@@ -441,6 +551,27 @@ impl App {
             .center_y(Length::Fill)
             .into()
     }
+}
+
+fn multi_select_summary<'a>(selection: &HashSet<HighlightKind>) -> Element<'a, Message> {
+    let mut verts = 0usize;
+    let mut lines = 0usize;
+    let mut sectors = 0usize;
+    for h in selection {
+        match h {
+            HighlightKind::Vertex(_) => verts += 1,
+            HighlightKind::Linedef(_) => lines += 1,
+            HighlightKind::Sector(_) => sectors += 1,
+        }
+    }
+    column![
+        text(format!("{} elements selected", selection.len())).size(15),
+        text(format!("Vertices: {verts}")).size(13),
+        text(format!("Linedefs: {lines}")).size(13),
+        text(format!("Sectors:  {sectors}")).size(13),
+    ]
+    .spacing(2)
+    .into()
 }
 
 fn selection_details<'a>(

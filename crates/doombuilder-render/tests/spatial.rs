@@ -99,6 +99,33 @@ fn sector_hit_inside_polygon() {
 }
 
 #[test]
+fn vertices_in_rect_returns_contained_only() {
+    let (map, ids) = square_map();
+    let idx = build_index(&map);
+    let inside = idx.vertices_in_rect([-1.0, -1.0], [10.0, 10.0]);
+    assert_eq!(inside.len(), 1);
+    assert_eq!(inside[0], ids[0]);
+
+    let all = idx.vertices_in_rect([-1.0, -1.0], [65.0, 65.0]);
+    assert_eq!(all.len(), 4);
+}
+
+#[test]
+fn linedefs_in_rect_requires_both_endpoints() {
+    let (map, _) = square_map();
+    let idx = build_index(&map);
+    // Only the bottom edge has both endpoints in this rect.
+    let lines = idx.linedefs_in_rect([-1.0, -1.0], [65.0, 1.0]);
+    assert_eq!(lines.len(), 1);
+    // Whole map: 4 linedefs.
+    let all = idx.linedefs_in_rect([-1.0, -1.0], [65.0, 65.0]);
+    assert_eq!(all.len(), 4);
+    // Box that only clips one endpoint of any line: 0.
+    let none = idx.linedefs_in_rect([-100.0, -100.0], [-1.0, -1.0]);
+    assert_eq!(none.len(), 0);
+}
+
+#[test]
 fn hit_priority_vertex_over_linedef_over_sector() {
     let (map, ids) = square_map();
     let idx = build_index(&map);

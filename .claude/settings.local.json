@@ -6,7 +6,8 @@
       "Bash(cargo check *)",
       "Bash(cargo build *)",
       "Bash(cargo test *)",
-      "Bash(xargs ls -1)"
+      "Bash(xargs ls -1)",
+      "Bash(find ~/.cargo/registry/src/index.crates.io-*/iced*-0.14*/src -name \"keyboard*\")"
     ]
   }
 }

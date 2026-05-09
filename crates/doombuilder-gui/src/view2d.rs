@@ -2,6 +2,7 @@
 // ABOUTME: linedefs, vertices, and hover/selection overlays. Mouse: middle/right
 // ABOUTME: drag pans, wheel zooms about cursor, left click selects, move hovers.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use doombuilder_core::map::{LinedefId, Map, SectorId, VertexId};
@@ -13,6 +14,8 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::camera::Camera2D;
 
+const DRAG_THRESHOLD_PX: f32 = 3.0;
+
 #[derive(Debug, Clone)]
 pub enum View2DMessage {
     PanBy(Vec2),
@@ -20,9 +23,12 @@ pub enum View2DMessage {
     HoverAt(Vec2),
     HoverCleared,
     ClickAt(Vec2),
+    RectDragMoved { start: Vec2, current: Vec2 },
+    RectDragCleared,
+    RectDragComplete { start: Vec2, end: Vec2 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HighlightKind {
     Vertex(VertexId),
     Linedef(LinedefId),
@@ -45,7 +51,8 @@ pub struct View2D {
     pub camera: Camera2D,
     pub cache: Arc<Cache>,
     pub hover: Option<HighlightKind>,
-    pub selection: Option<HighlightKind>,
+    pub selection: Arc<HashSet<HighlightKind>>,
+    pub drag_rect: Option<(Vec2, Vec2)>,
 }
 
 impl View2D {
@@ -76,6 +83,8 @@ pub struct InternalState {
     panning: bool,
     last_cursor: Option<Point>,
     cursor_in_bounds: bool,
+    drag_start: Option<Point>,
+    drag_active: bool,
 }
 
 impl<Message> Program<Message> for View2DProgram<Message> {
@@ -95,6 +104,8 @@ impl<Message> Program<Message> for View2DProgram<Message> {
             Event::Mouse(mouse::Event::CursorLeft) => {
                 state.cursor_in_bounds = false;
                 state.panning = false;
+                state.drag_start = None;
+                state.drag_active = false;
                 return Some(
                     canvas::Action::publish((self.on_event)(View2DMessage::HoverCleared))
                         .and_capture(),
@@ -113,17 +124,38 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                 state.panning = false;
                 state.last_cursor = None;
             }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(p) = cursor_pos {
-                    let world = self
-                        .inner
-                        .camera
-                        .screen_to_world(Vec2::new(p.x, p.y), viewport);
-                    return Some(
-                        canvas::Action::publish((self.on_event)(View2DMessage::ClickAt(world)))
-                            .and_capture(),
-                    );
+                    state.drag_start = Some(p);
+                    state.drag_active = false;
+                    return Some(canvas::Action::request_redraw().and_capture());
                 }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let Some(p) = cursor_pos else {
+                    state.drag_start = None;
+                    state.drag_active = false;
+                    return None;
+                };
+                let camera = &self.inner.camera;
+                let was_drag = state.drag_active;
+                let start = state.drag_start.take();
+                state.drag_active = false;
+                let msg = match (was_drag, start) {
+                    (true, Some(s)) => {
+                        let start_w = camera.screen_to_world(Vec2::new(s.x, s.y), viewport);
+                        let end_w = camera.screen_to_world(Vec2::new(p.x, p.y), viewport);
+                        View2DMessage::RectDragComplete {
+                            start: start_w,
+                            end: end_w,
+                        }
+                    }
+                    _ => {
+                        let world = camera.screen_to_world(Vec2::new(p.x, p.y), viewport);
+                        View2DMessage::ClickAt(world)
+                    }
+                };
+                return Some(canvas::Action::publish((self.on_event)(msg)).and_capture());
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if let Some(p) = cursor_pos {
@@ -135,6 +167,26 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                             return Some(
                                 canvas::Action::publish((self.on_event)(View2DMessage::PanBy(delta)))
                                     .and_capture(),
+                            );
+                        }
+                    } else if let Some(start) = state.drag_start {
+                        let dx = p.x - start.x;
+                        let dy = p.y - start.y;
+                        let dist_sq = dx * dx + dy * dy;
+                        if state.drag_active || dist_sq > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
+                            state.drag_active = true;
+                            let camera = &self.inner.camera;
+                            let start_w = camera
+                                .screen_to_world(Vec2::new(start.x, start.y), viewport);
+                            let cur_w = camera.screen_to_world(Vec2::new(p.x, p.y), viewport);
+                            return Some(
+                                canvas::Action::publish((self.on_event)(
+                                    View2DMessage::RectDragMoved {
+                                        start: start_w,
+                                        current: cur_w,
+                                    },
+                                ))
+                                .and_capture(),
                             );
                         }
                     } else {
@@ -184,21 +236,14 @@ impl<Message> Program<Message> for View2DProgram<Message> {
         let geometry = self.inner.cache.draw(renderer, bounds.size(), |frame| {
             draw_background(frame, bounds);
             draw_grid(frame, &self.inner.camera, viewport);
-            draw_sector_fills(
-                frame,
-                &self.inner.meshes,
-                &self.inner.camera,
-                viewport,
-                self.inner.hover,
-                self.inner.selection,
-            );
+            draw_sector_fills(frame, &self.inner.meshes, &self.inner.camera, viewport);
             draw_linedefs(
                 frame,
                 &self.inner.map,
                 &self.inner.camera,
                 viewport,
                 self.inner.hover,
-                self.inner.selection,
+                &self.inner.selection,
             );
             draw_vertices(
                 frame,
@@ -206,8 +251,11 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                 &self.inner.camera,
                 viewport,
                 self.inner.hover,
-                self.inner.selection,
+                &self.inner.selection,
             );
+            if let Some((start, end)) = self.inner.drag_rect {
+                draw_drag_rect(frame, &self.inner.camera, viewport, start, end);
+            }
         });
         vec![geometry]
     }
@@ -324,11 +372,7 @@ fn draw_sector_fills(
     meshes: &[FloorMesh],
     camera: &Camera2D,
     viewport: Vec2,
-    _hover: Option<HighlightKind>,
-    _selection: Option<HighlightKind>,
 ) {
-    // Sector highlights would need (SectorId, FloorMesh) pairs in this slice;
-    // currently meshes is just the geometry. Pre-pass: render all in base fill.
     let fill = Color::from_rgba(0.15, 0.20, 0.30, 0.6);
     for mesh in meshes {
         let mut tri_path = canvas::path::Builder::new();
@@ -356,7 +400,7 @@ fn draw_linedefs(
     camera: &Camera2D,
     viewport: Vec2,
     hover: Option<HighlightKind>,
-    selection: Option<HighlightKind>,
+    selection: &HashSet<HighlightKind>,
 ) {
     let one_sided = Stroke::default()
         .with_color(Color::from_rgb(0.85, 0.85, 0.90))
@@ -379,9 +423,11 @@ fn draw_linedefs(
         let p2 = camera.world_to_screen(Vec2::new(v2.x as f32, v2.y as f32), viewport);
         let path = Path::line(Point::new(p1.x, p1.y), Point::new(p2.x, p2.y));
 
-        let stroke = if matches!(selection, Some(HighlightKind::Linedef(s)) if s == id) {
+        let is_selected = selection.contains(&HighlightKind::Linedef(id));
+        let is_hovered = matches!(hover, Some(HighlightKind::Linedef(h)) if h == id);
+        let stroke = if is_selected {
             selected
-        } else if matches!(hover, Some(HighlightKind::Linedef(h)) if h == id) {
+        } else if is_hovered {
             hovered
         } else if line.left.is_some() && line.right.is_some() {
             two_sided
@@ -398,7 +444,7 @@ fn draw_vertices(
     camera: &Camera2D,
     viewport: Vec2,
     hover: Option<HighlightKind>,
-    selection: Option<HighlightKind>,
+    selection: &HashSet<HighlightKind>,
 ) {
     let visible = camera.zoom >= 0.15;
     let base = Color::from_rgb(1.0, 0.85, 0.3);
@@ -409,7 +455,7 @@ fn draw_vertices(
 
     for (id, v) in &map.vertices {
         let s = camera.world_to_screen(Vec2::new(v.x as f32, v.y as f32), viewport);
-        let is_sel = matches!(selection, Some(HighlightKind::Vertex(x)) if x == id);
+        let is_sel = selection.contains(&HighlightKind::Vertex(id));
         let is_hov = matches!(hover, Some(HighlightKind::Vertex(x)) if x == id);
         if !visible && !is_sel && !is_hov {
             continue;
@@ -423,6 +469,32 @@ fn draw_vertices(
         };
         frame.fill(&Path::circle(Point::new(s.x, s.y), r), color);
     }
+}
+
+fn draw_drag_rect(frame: &mut Frame, camera: &Camera2D, viewport: Vec2, start: Vec2, end: Vec2) {
+    let s = camera.world_to_screen(start, viewport);
+    let e = camera.world_to_screen(end, viewport);
+    let min_x = s.x.min(e.x);
+    let max_x = s.x.max(e.x);
+    let min_y = s.y.min(e.y);
+    let max_y = s.y.max(e.y);
+    let fill = Color::from_rgba(0.4, 0.7, 1.0, 0.15);
+    frame.fill_rectangle(
+        Point::new(min_x, min_y),
+        Size::new(max_x - min_x, max_y - min_y),
+        fill,
+    );
+    let path = Path::new(|p| {
+        p.move_to(Point::new(min_x, min_y));
+        p.line_to(Point::new(max_x, min_y));
+        p.line_to(Point::new(max_x, max_y));
+        p.line_to(Point::new(min_x, max_y));
+        p.close();
+    });
+    let stroke = Stroke::default()
+        .with_color(Color::from_rgba(0.5, 0.8, 1.0, 0.9))
+        .with_width(1.0);
+    frame.stroke(&path, stroke);
 }
 
 pub fn map_aabb(map: &Map) -> Option<(Vec2, Vec2)> {

@@ -128,6 +128,28 @@ impl SpatialIndex {
         best.map(|(id, _)| id)
     }
 
+    /// All vertices whose point lies inside the world-space rectangle.
+    pub fn vertices_in_rect(&self, min: [f32; 2], max: [f32; 2]) -> Vec<VertexId> {
+        let envelope = AABB::from_corners(min, max);
+        self.vertices
+            .locate_in_envelope(&envelope)
+            .map(|n| n.id)
+            .collect()
+    }
+
+    /// All linedefs whose BOTH endpoints lie inside the world-space rectangle.
+    /// "Fully contained" matches the convention used by classic Doom editors.
+    pub fn linedefs_in_rect(&self, min: [f32; 2], max: [f32; 2]) -> Vec<LinedefId> {
+        let envelope = AABB::from_corners(min, max);
+        self.linedefs
+            .locate_in_envelope_intersecting(&envelope)
+            .filter(|n| {
+                point_in_rect(n.ax, n.ay, min, max) && point_in_rect(n.bx, n.by, min, max)
+            })
+            .map(|n| n.id)
+            .collect()
+    }
+
     /// Top-level hit test honouring editor priority (vertex > linedef > sector).
     /// `vertex_radius` and `linedef_radius` are world-space tolerances; pass in
     /// pixel tolerances divided by camera zoom.
@@ -201,6 +223,10 @@ impl RTreeObject for SectorBoundsNode {
     fn envelope(&self) -> Self::Envelope {
         AABB::from_corners(self.min, self.max)
     }
+}
+
+fn point_in_rect(px: f32, py: f32, min: [f32; 2], max: [f32; 2]) -> bool {
+    px >= min[0] && px <= max[0] && py >= min[1] && py <= max[1]
 }
 
 fn segment_distance_squared(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
