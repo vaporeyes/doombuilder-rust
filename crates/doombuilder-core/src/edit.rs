@@ -2,7 +2,7 @@
 // ABOUTME: can be applied or reverted in O(k) where k is the number of elements
 // ABOUTME: touched. Snapshot-of-Map is intentionally avoided to keep undo cheap.
 
-use crate::map::{Map, VertexId};
+use crate::map::{Map, SidedefId, TextureName, VertexId};
 
 #[derive(Debug, Clone)]
 pub struct VertexMove {
@@ -11,10 +11,24 @@ pub struct VertexMove {
     pub dy: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidedefSlot {
+    Upper,
+    Middle,
+    Lower,
+}
+
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Translate one or more vertices by the given per-vertex deltas.
     MoveVertices(Vec<VertexMove>),
+    /// Replace one of a sidedef's three texture slot names.
+    SetSidedefTexture {
+        id: SidedefId,
+        slot: SidedefSlot,
+        old: TextureName,
+        new: TextureName,
+    },
 }
 
 impl Command {
@@ -26,6 +40,11 @@ impl Command {
                         v.x = v.x.saturating_add(m.dx);
                         v.y = v.y.saturating_add(m.dy);
                     }
+                }
+            }
+            Command::SetSidedefTexture { id, slot, new, .. } => {
+                if let Some(side) = map.sidedefs.get_mut(*id) {
+                    write_sidedef_slot(side, *slot, *new);
                 }
             }
         }
@@ -41,7 +60,20 @@ impl Command {
                     }
                 }
             }
+            Command::SetSidedefTexture { id, slot, old, .. } => {
+                if let Some(side) = map.sidedefs.get_mut(*id) {
+                    write_sidedef_slot(side, *slot, *old);
+                }
+            }
         }
+    }
+}
+
+fn write_sidedef_slot(side: &mut crate::map::MapSidedef, slot: SidedefSlot, value: TextureName) {
+    match slot {
+        SidedefSlot::Upper => side.upper_texture = value,
+        SidedefSlot::Middle => side.middle_texture = value,
+        SidedefSlot::Lower => side.lower_texture = value,
     }
 }
 

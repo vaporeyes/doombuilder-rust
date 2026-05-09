@@ -7,6 +7,7 @@ pub mod edit;
 pub mod error;
 pub mod format;
 pub mod map;
+pub mod textures;
 pub mod wad;
 
 pub use archive::{open, Asset};

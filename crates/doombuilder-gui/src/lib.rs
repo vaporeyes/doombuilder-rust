@@ -5,14 +5,15 @@
 mod camera;
 mod view2d;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
-use doombuilder_core::edit::{Command, UndoStack, VertexMove};
+use doombuilder_core::edit::{Command, SidedefSlot, UndoStack, VertexMove};
 use doombuilder_core::map::{Map, MapSidedef, SectorId, TextureName, VertexId};
+use doombuilder_core::textures::TextureSet;
 use doombuilder_core::wad::WadKind;
 use doombuilder_core::{load_auto, MapFormat, Wad};
 use doombuilder_render::{
@@ -21,7 +22,11 @@ use doombuilder_render::{
 use glam::Vec2;
 use iced::keyboard::{self, Modifiers};
 use iced::widget::canvas::Cache;
-use iced::widget::{button, column, container, pick_list, row, text, Space};
+use iced::widget::image::Handle as ImageHandle;
+use iced::widget::{
+    button, column, container, image, mouse_area, pick_list, row, scrollable, stack, text,
+    text_input, Space,
+};
 use iced::{Border, Color, Element, Length, Subscription, Task, Theme};
 
 use camera::Camera2D;
@@ -63,6 +68,17 @@ pub struct App {
     modifiers: Modifiers,
     mode: Mode,
     config: Arc<GameConfig>,
+    textures: Option<Arc<TextureSet>>,
+    texture_handles: Arc<HashMap<String, ImageHandle>>,
+    sorted_texture_names: Arc<Vec<String>>,
+    texture_picker: Option<PickerTarget>,
+    texture_filter: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PickerTarget {
+    pub sidedef: doombuilder_core::map::SidedefId,
+    pub slot: SidedefSlot,
 }
 
 #[derive(Debug)]
@@ -98,6 +114,11 @@ impl Default for App {
             modifiers: Modifiers::default(),
             mode: Mode::default(),
             config: Arc::new(GameConfig::vanilla_doom()),
+            textures: None,
+            texture_handles: Arc::new(HashMap::new()),
+            sorted_texture_names: Arc::new(Vec::new()),
+            texture_picker: None,
+            texture_filter: String::new(),
         }
     }
 }
@@ -116,6 +137,10 @@ pub enum Message {
     SelectAll,
     Undo,
     Redo,
+    OpenTexturePicker(PickerTarget),
+    CloseTexturePicker,
+    PickTexture(String),
+    TextureFilterChanged(String),
     Quit,
     Noop,
 }
@@ -124,6 +149,8 @@ pub enum Message {
 pub struct AssetSummary {
     path: PathBuf,
     wad: Option<Wad>,
+    textures: Option<Arc<TextureSet>>,
+    texture_handles: Arc<HashMap<String, ImageHandle>>,
     summary: String,
     maps: Vec<String>,
 }
@@ -183,6 +210,12 @@ impl App {
                 self.status = format!("Loaded {}", asset.path.display());
                 self.wad_path = Some(asset.path);
                 self.wad = asset.wad;
+                self.textures = asset.textures;
+                let mut sorted: Vec<String> =
+                    asset.texture_handles.keys().cloned().collect();
+                sorted.sort();
+                self.sorted_texture_names = Arc::new(sorted);
+                self.texture_handles = asset.texture_handles;
                 self.summary = Some(asset.summary);
                 self.maps = asset.maps;
                 self.reset_map_state();
@@ -271,6 +304,47 @@ impl App {
                         .collect();
                     self.selection = Arc::new(all);
                     self.cache2d.clear();
+                }
+                Task::none()
+            }
+            Message::OpenTexturePicker(target) => {
+                self.texture_picker = Some(target);
+                self.texture_filter.clear();
+                Task::none()
+            }
+            Message::CloseTexturePicker => {
+                self.texture_picker = None;
+                self.texture_filter.clear();
+                Task::none()
+            }
+            Message::TextureFilterChanged(q) => {
+                self.texture_filter = q;
+                Task::none()
+            }
+            Message::PickTexture(name) => {
+                if let (Some(target), Some(map)) = (self.texture_picker.take(), self.map.as_mut()) {
+                    let map_mut = Arc::make_mut(map);
+                    if let Some(side) = map_mut.sidedefs.get(target.sidedef) {
+                        let old = match target.slot {
+                            SidedefSlot::Upper => side.upper_texture,
+                            SidedefSlot::Middle => side.middle_texture,
+                            SidedefSlot::Lower => side.lower_texture,
+                        };
+                        let mut padded = [0u8; 8];
+                        let bytes = name.as_bytes();
+                        let len = bytes.len().min(8);
+                        padded[..len].copy_from_slice(&bytes[..len]);
+                        let new = TextureName(padded);
+                        let cmd = Command::SetSidedefTexture {
+                            id: target.sidedef,
+                            slot: target.slot,
+                            old,
+                            new,
+                        };
+                        cmd.apply(map_mut);
+                        self.undo.push(cmd);
+                        self.cache2d.clear();
+                    }
                 }
                 Task::none()
             }
@@ -548,7 +622,12 @@ impl App {
             layout = layout.push(panel);
         }
         layout = layout.push(self.status_bar());
-        layout.into()
+        let main: Element<'_, Message> = layout.into();
+        if self.texture_picker.is_some() {
+            stack![main, self.texture_picker_modal()].into()
+        } else {
+            main
+        }
     }
 
     fn menu_bar(&self) -> Element<'_, Message> {
@@ -657,18 +736,19 @@ impl App {
         let (front_side, back_side) = match single {
             Some(HighlightKind::Linedef(id)) => {
                 let line = map.linedefs.get(id);
-                (
-                    line.and_then(|l| l.right)
-                        .and_then(|sid| map.sidedefs.get(sid)),
-                    line.and_then(|l| l.left)
-                        .and_then(|sid| map.sidedefs.get(sid)),
-                )
+                let front = line
+                    .and_then(|l| l.right)
+                    .and_then(|sid| map.sidedefs.get(sid).map(|s| (sid, s)));
+                let back = line
+                    .and_then(|l| l.left)
+                    .and_then(|sid| map.sidedefs.get(sid).map(|s| (sid, s)));
+                (front, back)
             }
             _ => (None, None),
         };
         let texture_panels = row![
-            side_panel(map, "Front Side", front_side),
-            side_panel(map, "Back Side", back_side),
+            side_panel("Front Side", front_side, &self.texture_handles),
+            side_panel("Back Side", back_side, &self.texture_handles),
         ]
         .spacing(10);
 
@@ -725,6 +805,119 @@ impl App {
         .style(status_bar_style)
         .width(Length::Fill)
         .into()
+    }
+
+    fn texture_picker_modal(&self) -> Element<'_, Message> {
+        let backdrop = mouse_area(
+            container(Space::new().width(Length::Fill).height(Length::Fill))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(modal_backdrop_style),
+        )
+        .on_press(Message::CloseTexturePicker);
+
+        let panel = container(self.texture_picker_panel())
+            .width(Length::Fixed(760.0))
+            .height(Length::Fixed(560.0))
+            .style(modal_panel_style);
+
+        let centered = container(panel)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
+
+        stack![backdrop, centered].into()
+    }
+
+    fn texture_picker_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Pick a texture").size(18),
+            Space::new().width(Length::Fill),
+            button("Close").on_press(Message::CloseTexturePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let search = text_input("Filter…", &self.texture_filter)
+            .on_input(Message::TextureFilterChanged)
+            .padding(6)
+            .width(Length::Fill);
+
+        let q = self.texture_filter.to_ascii_uppercase();
+        let filtered: Vec<&String> = self
+            .sorted_texture_names
+            .iter()
+            .filter(|n| q.is_empty() || n.contains(&q))
+            .collect();
+
+        let count = text(if self.sorted_texture_names.is_empty() {
+            "No textures loaded.".to_string()
+        } else {
+            format!(
+                "{} of {} textures",
+                filtered.len(),
+                self.sorted_texture_names.len()
+            )
+        })
+        .size(12);
+
+        const COLS: usize = 5;
+        const TILE: f32 = 96.0;
+
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        let mut current_row: Vec<Element<'_, Message>> = Vec::with_capacity(COLS);
+        for name in &filtered {
+            let Some(handle) = self.texture_handles.get(*name) else {
+                continue;
+            };
+            let tile = column![
+                container(
+                    image(handle.clone())
+                        .width(Length::Fixed(TILE))
+                        .height(Length::Fixed(TILE))
+                )
+                .width(Length::Fixed(TILE))
+                .height(Length::Fixed(TILE))
+                .center_x(Length::Fixed(TILE))
+                .center_y(Length::Fixed(TILE))
+                .style(texture_slot_style),
+                text((*name).clone()).size(11),
+            ]
+            .spacing(2)
+            .align_x(iced::Alignment::Center);
+            let pickable: Element<'_, Message> = button(tile)
+                .padding(2)
+                .style(button::text)
+                .on_press(Message::PickTexture((*name).clone()))
+                .into();
+            current_row.push(pickable);
+            if current_row.len() == COLS {
+                let r = std::mem::replace(&mut current_row, Vec::with_capacity(COLS));
+                rows.push(row(r).spacing(8).into());
+            }
+        }
+        if !current_row.is_empty() {
+            rows.push(row(current_row).spacing(8).into());
+        }
+
+        let grid: Element<'_, Message> = if rows.is_empty() {
+            container(text("No textures match.").size(13))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
+        } else {
+            scrollable(column(rows).spacing(8).padding(8))
+                .height(Length::Fill)
+                .into()
+        };
+
+        column![title_row, search, count, grid]
+            .spacing(8)
+            .padding(12)
+            .into()
     }
 
     fn view3d_placeholder(&self) -> Element<'_, Message> {
@@ -863,49 +1056,88 @@ fn sector_heights(map: &Map, s: Option<SectorId>) -> (String, String) {
     }
 }
 
-fn side_panel<'a>(_map: &Map, title: &'a str, side: Option<&MapSidedef>) -> Element<'a, Message> {
-    let slots: Element<'_, Message> = match side {
-        Some(side) => row![
-            texture_slot("Upper", side.upper_texture),
-            texture_slot("Middle", side.middle_texture),
-            texture_slot("Lower", side.lower_texture),
+fn side_panel<'a>(
+    title: &'a str,
+    side_with_id: Option<(doombuilder_core::map::SidedefId, &MapSidedef)>,
+    handles: &HashMap<String, ImageHandle>,
+) -> Element<'a, Message> {
+    let slots: Element<'_, Message> = match side_with_id {
+        Some((id, side)) => row![
+            texture_slot("Upper", side.upper_texture, handles, Some((id, SidedefSlot::Upper))),
+            texture_slot(
+                "Middle",
+                side.middle_texture,
+                handles,
+                Some((id, SidedefSlot::Middle))
+            ),
+            texture_slot("Lower", side.lower_texture, handles, Some((id, SidedefSlot::Lower))),
         ]
         .spacing(8)
         .into(),
         None => text("(none)").size(13).into(),
     };
-    container(
-        column![text(title).size(14), slots]
-            .spacing(6),
-    )
-    .padding(8)
-    .style(side_panel_style)
-    .into()
+    container(column![text(title).size(14), slots].spacing(6))
+        .padding(8)
+        .style(side_panel_style)
+        .into()
 }
 
-fn texture_slot<'a>(label: &'a str, name: TextureName) -> Element<'a, Message> {
-    let displayed = name.as_str();
-    let (line, color) = if displayed.is_empty() || displayed == "-" {
-        ("Missing".to_string(), Color::from_rgb(0.85, 0.45, 0.45))
-    } else {
-        (displayed.to_string(), Color::from_rgb(0.9, 0.9, 0.9))
-    };
-    column![
+fn texture_slot<'a>(
+    label: &'a str,
+    name: TextureName,
+    handles: &HashMap<String, ImageHandle>,
+    target: Option<(doombuilder_core::map::SidedefId, SidedefSlot)>,
+) -> Element<'a, Message> {
+    let displayed = name.as_str().to_ascii_uppercase();
+    let is_missing = displayed.is_empty() || displayed == "-";
+
+    let body: Element<'_, Message> = if is_missing {
         container(
-            text(line)
+            text("Missing")
                 .size(12)
-                .color(color)
+                .color(Color::from_rgb(0.85, 0.45, 0.45)),
         )
         .width(Length::Fixed(72.0))
         .height(Length::Fixed(72.0))
         .center_x(Length::Fixed(72.0))
         .center_y(Length::Fixed(72.0))
-        .style(texture_slot_style),
-        text(label).size(11),
-    ]
-    .spacing(2)
-    .align_x(iced::Alignment::Center)
-    .into()
+        .style(texture_slot_style)
+        .into()
+    } else if let Some(handle) = handles.get(&displayed) {
+        container(image(handle.clone()).width(Length::Fixed(72.0)).height(Length::Fixed(72.0)))
+            .width(Length::Fixed(72.0))
+            .height(Length::Fixed(72.0))
+            .center_x(Length::Fixed(72.0))
+            .center_y(Length::Fixed(72.0))
+            .style(texture_slot_style)
+            .into()
+    } else {
+        container(text(displayed.clone()).size(11).color(Color::from_rgb(0.9, 0.9, 0.9)))
+            .width(Length::Fixed(72.0))
+            .height(Length::Fixed(72.0))
+            .center_x(Length::Fixed(72.0))
+            .center_y(Length::Fixed(72.0))
+            .style(texture_slot_style)
+            .into()
+    };
+
+    let slot: Element<'_, Message> = if let Some((sid, kind)) = target {
+        button(body)
+            .padding(0)
+            .style(button::text)
+            .on_press(Message::OpenTexturePicker(PickerTarget {
+                sidedef: sid,
+                slot: kind,
+            }))
+            .into()
+    } else {
+        body
+    };
+
+    column![slot, text(label).size(11)]
+        .spacing(2)
+        .align_x(iced::Alignment::Center)
+        .into()
 }
 
 fn vertical_separator() -> Element<'static, Message> {
@@ -1033,6 +1265,25 @@ fn side_panel_style(_theme: &Theme) -> container::Style {
     }
 }
 
+fn modal_backdrop_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
+        ..Default::default()
+    }
+}
+
+fn modal_panel_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(Color::from_rgb(0.16, 0.16, 0.18))),
+        border: Border {
+            color: Color::from_rgb(0.40, 0.40, 0.44),
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
 fn texture_slot_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(iced::Background::Color(Color::from_rgb(0.08, 0.08, 0.10))),
@@ -1062,14 +1313,28 @@ async fn pick_file() -> Option<PathBuf> {
 }
 
 async fn load_asset(path: PathBuf) -> Result<AssetSummary, String> {
-    open_and_summarise(&path).map_err(|e| e.to_string()).map(
-        |(wad, summary, maps)| AssetSummary {
-            path,
-            wad,
-            summary,
-            maps,
-        },
-    )
+    let (wad, textures, summary, maps) = open_and_summarise(&path).map_err(|e| e.to_string())?;
+    let handles = textures
+        .as_ref()
+        .map(|ts| build_texture_handles(ts))
+        .unwrap_or_default();
+    Ok(AssetSummary {
+        path,
+        wad,
+        textures,
+        texture_handles: Arc::new(handles),
+        summary,
+        maps,
+    })
+}
+
+fn build_texture_handles(set: &TextureSet) -> HashMap<String, ImageHandle> {
+    let mut out = HashMap::with_capacity(set.textures.len() + set.flats.len());
+    for (name, img) in set.textures.iter().chain(set.flats.iter()) {
+        let handle = ImageHandle::from_rgba(img.width as u32, img.height as u32, img.rgba.clone());
+        out.insert(name.clone(), handle);
+    }
+    out
 }
 
 async fn load_map_payload(wad: Wad, name: String) -> Result<MapPayload, String> {
@@ -1114,15 +1379,19 @@ async fn load_map_payload(wad: Wad, name: String) -> Result<MapPayload, String> 
 
 fn open_and_summarise(
     path: &Path,
-) -> Result<(Option<Wad>, String, Vec<String>), doombuilder_core::Error> {
+) -> Result<
+    (Option<Wad>, Option<Arc<TextureSet>>, String, Vec<String>),
+    doombuilder_core::Error,
+> {
     match open_asset(path)? {
         Asset::Wad(wad) => {
+            let textures = Arc::new(TextureSet::load_from_wad(&wad));
             let (summary, maps) = summarise_wad(&wad);
-            Ok((Some(wad), summary, maps))
+            Ok((Some(wad), Some(textures), summary, maps))
         }
         Asset::Pk3(pk3) => {
             let (summary, maps) = summarise_pk3(&pk3);
-            Ok((None, summary, maps))
+            Ok((None, None, summary, maps))
         }
     }
 }
