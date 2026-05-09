@@ -2,6 +2,7 @@
 // ABOUTME: Re-exports map format, WAD reader, and archive opener.
 
 pub mod archive;
+pub mod config;
 pub mod error;
 pub mod format;
 pub mod map;

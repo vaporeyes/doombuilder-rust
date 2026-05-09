@@ -13,3 +13,5 @@ bytemuck.workspace = true
 memmap2.workspace = true
 zip.workspace = true
 slotmap.workspace = true
+serde.workspace = true
+toml.workspace = true

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
+use doombuilder_core::config::GameConfig;
 use doombuilder_core::map::{Map, MapSidedef, SectorId, TextureName};
 use doombuilder_core::wad::WadKind;
 use doombuilder_core::{load_auto, MapFormat, Wad};
@@ -36,7 +37,6 @@ pub enum Mode {
     View3D,
 }
 
-#[derive(Default)]
 pub struct App {
     status: String,
     wad: Option<Wad>,
@@ -54,6 +54,31 @@ pub struct App {
     hover: Option<HighlightKind>,
     selection: Option<HighlightKind>,
     mode: Mode,
+    config: Arc<GameConfig>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            status: String::new(),
+            wad: None,
+            wad_path: None,
+            summary: None,
+            maps: Vec::new(),
+            selected_map: None,
+            map: None,
+            map_stats: None,
+            sector_meshes: Arc::new(Vec::new()),
+            walls: Arc::new(Vec::new()),
+            spatial: None,
+            camera2d: Camera2D::default(),
+            cache2d: Arc::new(Cache::new()),
+            hover: None,
+            selection: None,
+            mode: Mode::default(),
+            config: Arc::new(GameConfig::vanilla_doom()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +91,7 @@ pub enum Message {
     Mode(Mode),
     View2D(View2DMessage),
     Quit,
+    Noop,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +204,7 @@ impl App {
                 Task::none()
             }
             Message::Quit => iced::exit(),
+            Message::Noop => Task::none(),
         }
     }
 
@@ -227,9 +254,10 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let menu = self.menu_bar();
         let toolbar = self.toolbar();
         let viewport = self.viewport_widget();
-        let mut layout = column![toolbar, viewport].spacing(0);
+        let mut layout = column![menu, toolbar, viewport].spacing(0);
         if let Some(panel) = self.bottom_panel() {
             layout = layout.push(panel);
         }
@@ -237,9 +265,27 @@ impl App {
         layout.into()
     }
 
+    fn menu_bar(&self) -> Element<'_, Message> {
+        container(
+            row![
+                menu_picker("File", FILE_MENU_ITEMS, dispatch_file),
+                menu_picker("Edit", EDIT_MENU_ITEMS, dispatch_edit),
+                menu_picker("View", VIEW_MENU_ITEMS, dispatch_view),
+                menu_picker("Tools", TOOLS_MENU_ITEMS, dispatch_tools),
+                menu_picker("Help", HELP_MENU_ITEMS, dispatch_help),
+            ]
+            .spacing(2)
+            .padding(2)
+            .align_y(iced::Alignment::Center),
+        )
+        .style(menu_bar_style)
+        .width(Length::Fill)
+        .into()
+    }
+
     fn toolbar(&self) -> Element<'_, Message> {
         let map_picker: Element<'_, Message> = if self.maps.is_empty() {
-            text("No map").size(14).into()
+            text("No map").size(13).into()
         } else {
             pick_list(
                 self.maps.clone(),
@@ -252,18 +298,14 @@ impl App {
 
         container(
             row![
-                button("Open WAD...").on_press(Message::OpenWadRequested),
-                vertical_separator(),
-                text("Map:").size(14),
+                text("Map:").size(13),
                 map_picker,
                 vertical_separator(),
                 mode_button("2D", Mode::View2D, self.mode),
                 mode_button("3D", Mode::View3D, self.mode),
-                Space::new().width(Length::Fill),
-                button("Quit").on_press(Message::Quit),
             ]
             .spacing(8)
-            .padding(8)
+            .padding(6)
             .align_y(iced::Alignment::Center),
         )
         .style(panel_style)
@@ -302,7 +344,7 @@ impl App {
         let map = self.map.as_ref()?;
 
         let details_body: Element<'_, Message> = match self.selection {
-            Some(highlight) => selection_details(map, highlight),
+            Some(highlight) => selection_details(map, &self.config, highlight),
             None => column![
                 text("No selection").size(15),
                 text("Click an element to inspect.").size(12),
@@ -401,7 +443,11 @@ impl App {
     }
 }
 
-fn selection_details<'a>(map: &Map, highlight: HighlightKind) -> Element<'a, Message> {
+fn selection_details<'a>(
+    map: &Map,
+    config: &GameConfig,
+    highlight: HighlightKind,
+) -> Element<'a, Message> {
     match highlight {
         HighlightKind::Vertex(id) => {
             let mut col = column![text("Vertex").size(15)].spacing(2);
@@ -412,7 +458,7 @@ fn selection_details<'a>(map: &Map, highlight: HighlightKind) -> Element<'a, Mes
             col.into()
         }
         HighlightKind::Linedef(id) => {
-            let mut col = column![text(format!("Linedef {:?}", id)).size(15)].spacing(2);
+            let mut col = column![text("Linedef").size(15)].spacing(2);
             if let Some(l) = map.linedefs.get(id) {
                 let length = match (map.vertices.get(l.v1), map.vertices.get(l.v2)) {
                     (Some(a), Some(b)) => {
@@ -422,10 +468,20 @@ fn selection_details<'a>(map: &Map, highlight: HighlightKind) -> Element<'a, Mes
                     }
                     _ => 0.0,
                 };
-                col = col.push(text(format!("Action:  {}", l.special)));
+                let action_label = match config.linedef_special(l.special) {
+                    Some(s) if !s.prefix.is_empty() => {
+                        format!("{} - {} {}", l.special, s.prefix, s.title)
+                    }
+                    Some(s) => format!("{} - {}", l.special, s.title),
+                    None => format!("{} - (unknown)", l.special),
+                };
+                col = col.push(text(format!("Action:  {action_label}")));
                 col = col.push(text(format!("Length:  {length:.0}")));
                 col = col.push(text(format!("Tag:     {}", l.tag)));
-                col = col.push(text(format!("Flags:   0x{:04X}", l.flags)));
+                col = col.push(text(format!(
+                    "Flags:   {}",
+                    config.format_linedef_flags(l.flags)
+                )));
                 let front_sec = l
                     .right
                     .and_then(|sid| map.sidedefs.get(sid))
@@ -448,12 +504,16 @@ fn selection_details<'a>(map: &Map, highlight: HighlightKind) -> Element<'a, Mes
             col.into()
         }
         HighlightKind::Sector(id) => {
-            let mut col = column![text(format!("Sector {:?}", id)).size(15)].spacing(2);
+            let mut col = column![text("Sector").size(15)].spacing(2);
             if let Some(s) = map.sectors.get(id) {
+                let special_label = match config.sector_special(s.special) {
+                    Some(name) => format!("{} - {}", s.special, name),
+                    None => format!("{} - (unknown)", s.special),
+                };
                 col = col.push(text(format!("Floor:   {}", s.floor_height)));
                 col = col.push(text(format!("Ceiling: {}", s.ceiling_height)));
                 col = col.push(text(format!("Light:   {}", s.light)));
-                col = col.push(text(format!("Special: {}", s.special)));
+                col = col.push(text(format!("Special: {special_label}")));
                 col = col.push(text(format!("Tag:     {}", s.tag)));
                 col = col.push(text(format!("Floor tex:   {}", s.floor_texture.as_str())));
                 col = col.push(text(format!("Ceil tex:    {}", s.ceiling_texture.as_str())));
@@ -530,12 +590,79 @@ fn vertical_separator() -> Element<'static, Message> {
         .into()
 }
 
+// ---- Menu items -----------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+struct MenuItem(&'static str);
+
+impl std::fmt::Display for MenuItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+const FILE_MENU_ITEMS: &[MenuItem] = &[MenuItem("Open WAD…"), MenuItem("Quit")];
+const EDIT_MENU_ITEMS: &[MenuItem] = &[MenuItem("Undo (n/a)"), MenuItem("Redo (n/a)")];
+const VIEW_MENU_ITEMS: &[MenuItem] = &[MenuItem("2D Mode"), MenuItem("3D Mode")];
+const TOOLS_MENU_ITEMS: &[MenuItem] = &[MenuItem("Map Statistics (n/a)")];
+const HELP_MENU_ITEMS: &[MenuItem] = &[MenuItem("About (n/a)")];
+
+fn dispatch_file(item: MenuItem) -> Message {
+    match item.0 {
+        "Open WAD…" => Message::OpenWadRequested,
+        "Quit" => Message::Quit,
+        _ => Message::Noop,
+    }
+}
+
+fn dispatch_edit(_item: MenuItem) -> Message {
+    Message::Noop
+}
+
+fn dispatch_view(item: MenuItem) -> Message {
+    match item.0 {
+        "2D Mode" => Message::Mode(Mode::View2D),
+        "3D Mode" => Message::Mode(Mode::View3D),
+        _ => Message::Noop,
+    }
+}
+
+fn dispatch_tools(_item: MenuItem) -> Message {
+    Message::Noop
+}
+
+fn dispatch_help(_item: MenuItem) -> Message {
+    Message::Noop
+}
+
+fn menu_picker(
+    label: &'static str,
+    items: &'static [MenuItem],
+    on_pick: fn(MenuItem) -> Message,
+) -> Element<'static, Message> {
+    pick_list(items, None::<MenuItem>, on_pick)
+        .placeholder(label)
+        .into()
+}
+
 fn mode_button(label: &str, target: Mode, current: Mode) -> Element<'static, Message> {
     let mut b = button(text(label.to_string()));
     if target != current {
         b = b.on_press(Message::Mode(target));
     }
     b.into()
+}
+
+fn menu_bar_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(Color::from_rgb(0.18, 0.18, 0.21))),
+        border: Border {
+            color: Color::from_rgb(0.05, 0.05, 0.06),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
 }
 
 fn panel_style(_theme: &Theme) -> container::Style {
