@@ -4,6 +4,9 @@
 mod directory;
 mod header;
 pub mod lumps;
+pub mod write;
+
+pub use write::{write_pwad, LumpEntry};
 
 pub use directory::DirEntry;
 pub use header::{WadHeader, WadKind};

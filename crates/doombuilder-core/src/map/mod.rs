@@ -3,9 +3,11 @@
 
 pub mod ids;
 mod load;
+mod save;
 
 pub use ids::{LinedefId, SectorId, SidedefId, ThingId, VertexId};
 pub use load::{detect_format, load_auto, load_doom, load_hexen, MapName};
+pub use save::{save_map_as_pwad, serialize_map};
 
 use slotmap::SlotMap;
 

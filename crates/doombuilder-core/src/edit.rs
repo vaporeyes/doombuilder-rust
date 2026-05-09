@@ -2,7 +2,7 @@
 // ABOUTME: can be applied or reverted in O(k) where k is the number of elements
 // ABOUTME: touched. Snapshot-of-Map is intentionally avoided to keep undo cheap.
 
-use crate::map::{Map, SidedefId, TextureName, VertexId};
+use crate::map::{Map, SectorId, SidedefId, TextureName, VertexId};
 
 #[derive(Debug, Clone)]
 pub struct VertexMove {
@@ -18,6 +18,12 @@ pub enum SidedefSlot {
     Lower,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectorSlot {
+    Floor,
+    Ceiling,
+}
+
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Translate one or more vertices by the given per-vertex deltas.
@@ -26,6 +32,13 @@ pub enum Command {
     SetSidedefTexture {
         id: SidedefId,
         slot: SidedefSlot,
+        old: TextureName,
+        new: TextureName,
+    },
+    /// Replace a sector's floor or ceiling flat name.
+    SetSectorTexture {
+        id: SectorId,
+        slot: SectorSlot,
         old: TextureName,
         new: TextureName,
     },
@@ -47,6 +60,11 @@ impl Command {
                     write_sidedef_slot(side, *slot, *new);
                 }
             }
+            Command::SetSectorTexture { id, slot, new, .. } => {
+                if let Some(sec) = map.sectors.get_mut(*id) {
+                    write_sector_slot(sec, *slot, *new);
+                }
+            }
         }
     }
 
@@ -65,6 +83,11 @@ impl Command {
                     write_sidedef_slot(side, *slot, *old);
                 }
             }
+            Command::SetSectorTexture { id, slot, old, .. } => {
+                if let Some(sec) = map.sectors.get_mut(*id) {
+                    write_sector_slot(sec, *slot, *old);
+                }
+            }
         }
     }
 }
@@ -74,6 +97,13 @@ fn write_sidedef_slot(side: &mut crate::map::MapSidedef, slot: SidedefSlot, valu
         SidedefSlot::Upper => side.upper_texture = value,
         SidedefSlot::Middle => side.middle_texture = value,
         SidedefSlot::Lower => side.lower_texture = value,
+    }
+}
+
+fn write_sector_slot(sec: &mut crate::map::MapSector, slot: SectorSlot, value: TextureName) {
+    match slot {
+        SectorSlot::Floor => sec.floor_texture = value,
+        SectorSlot::Ceiling => sec.ceiling_texture = value,
     }
 }
 

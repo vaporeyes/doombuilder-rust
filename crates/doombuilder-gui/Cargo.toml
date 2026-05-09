@@ -14,3 +14,4 @@ doombuilder-render.workspace = true
 rfd.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
+wgpu.workspace = true

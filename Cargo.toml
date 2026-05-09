@@ -29,6 +29,7 @@ rstar = "0.12"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 glam = { version = "0.32", features = ["bytemuck"] }
+wgpu = "27"
 doombuilder-core = { path = "crates/doombuilder-core" }
 doombuilder-render = { path = "crates/doombuilder-render" }
 doombuilder-gui = { path = "crates/doombuilder-gui" }

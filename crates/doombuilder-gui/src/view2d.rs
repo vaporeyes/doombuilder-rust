@@ -10,6 +10,7 @@ use doombuilder_render::{FloorMesh, Hit};
 use glam::Vec2;
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Canvas, Event, Frame, Geometry, Path, Program, Stroke};
+use iced::widget::image::Handle as ImageHandle;
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::camera::Camera2D;
@@ -44,14 +45,22 @@ impl From<Hit> for HighlightKind {
     }
 }
 
+#[derive(Clone)]
+pub struct FillTile {
+    pub handle: ImageHandle,
+    pub world_min: Vec2,
+    pub world_max: Vec2,
+}
+
 pub struct View2D {
     pub map: Arc<Map>,
-    pub meshes: Arc<Vec<FloorMesh>>,
+    pub meshes: Arc<Vec<(SectorId, FloorMesh)>>,
     pub camera: Camera2D,
     pub cache: Arc<Cache>,
     pub hover: Option<HighlightKind>,
     pub selection: Arc<HashSet<HighlightKind>>,
     pub drag_rect: Option<(Vec2, Vec2)>,
+    pub fills: Arc<Vec<FillTile>>,
 }
 
 impl View2D {
@@ -235,7 +244,19 @@ impl<Message> Program<Message> for View2DProgram<Message> {
         let geometry = self.inner.cache.draw(renderer, bounds.size(), |frame| {
             draw_background(frame, bounds);
             draw_grid(frame, &self.inner.camera, viewport);
-            draw_sector_fills(frame, &self.inner.meshes, &self.inner.camera, viewport);
+            if self.inner.fills.is_empty() {
+                draw_sector_fills_solid(frame, &self.inner.meshes, &self.inner.camera, viewport);
+            } else {
+                draw_sector_fills_textured(frame, &self.inner.fills, &self.inner.camera, viewport);
+            }
+            draw_sector_highlights(
+                frame,
+                &self.inner.meshes,
+                &self.inner.camera,
+                viewport,
+                self.inner.hover,
+                &self.inner.selection,
+            );
             draw_linedefs(
                 frame,
                 &self.inner.map,
@@ -366,14 +387,43 @@ fn grid_step(zoom: f32) -> f32 {
     2.0_f32.powf(exp).max(1.0)
 }
 
-fn draw_sector_fills(
+fn draw_sector_fills_textured(
     frame: &mut Frame,
-    meshes: &[FloorMesh],
+    fills: &[FillTile],
+    camera: &Camera2D,
+    viewport: Vec2,
+) {
+    for tile in fills {
+        // World max-y maps to screen top because the camera flips Y.
+        let tl = camera.world_to_screen(
+            Vec2::new(tile.world_min.x, tile.world_max.y),
+            viewport,
+        );
+        let br = camera.world_to_screen(
+            Vec2::new(tile.world_max.x, tile.world_min.y),
+            viewport,
+        );
+        let w = (br.x - tl.x).max(0.0);
+        let h = (br.y - tl.y).max(0.0);
+        if w == 0.0 || h == 0.0 {
+            continue;
+        }
+        // Skip tiles that are completely outside the viewport bounds.
+        if br.x < 0.0 || br.y < 0.0 || tl.x > viewport.x || tl.y > viewport.y {
+            continue;
+        }
+        frame.draw_image(Rectangle::new(Point::new(tl.x, tl.y), Size::new(w, h)), &tile.handle);
+    }
+}
+
+fn draw_sector_fills_solid(
+    frame: &mut Frame,
+    meshes: &[(SectorId, FloorMesh)],
     camera: &Camera2D,
     viewport: Vec2,
 ) {
     let fill = Color::from_rgba(0.15, 0.20, 0.30, 0.6);
-    for mesh in meshes {
+    for (_, mesh) in meshes {
         let mut tri_path = canvas::path::Builder::new();
         let mut i = 0;
         while i + 2 < mesh.indices.len() {
@@ -390,6 +440,46 @@ fn draw_sector_fills(
             i += 3;
         }
         frame.fill(&tri_path.build(), fill);
+    }
+}
+
+fn draw_sector_highlights(
+    frame: &mut Frame,
+    meshes: &[(SectorId, FloorMesh)],
+    camera: &Camera2D,
+    viewport: Vec2,
+    hover: Option<HighlightKind>,
+    selection: &HashSet<HighlightKind>,
+) {
+    let hover_sector = match hover {
+        Some(HighlightKind::Sector(s)) => Some(s),
+        _ => None,
+    };
+    let selected = Color::from_rgba(1.0, 0.3, 0.3, 0.35);
+    let hovered = Color::from_rgba(1.0, 0.78, 0.2, 0.28);
+    for (sid, mesh) in meshes {
+        let is_selected = selection.contains(&HighlightKind::Sector(*sid));
+        let is_hover = hover_sector == Some(*sid);
+        if !is_selected && !is_hover {
+            continue;
+        }
+        let color = if is_selected { selected } else { hovered };
+        let mut path = canvas::path::Builder::new();
+        let mut i = 0;
+        while i + 2 < mesh.indices.len() {
+            let a = mesh.positions[mesh.indices[i] as usize];
+            let b = mesh.positions[mesh.indices[i + 1] as usize];
+            let c = mesh.positions[mesh.indices[i + 2] as usize];
+            let pa = camera.world_to_screen(Vec2::new(a[0], a[1]), viewport);
+            let pb = camera.world_to_screen(Vec2::new(b[0], b[1]), viewport);
+            let pc = camera.world_to_screen(Vec2::new(c[0], c[1]), viewport);
+            path.move_to(Point::new(pa.x, pa.y));
+            path.line_to(Point::new(pb.x, pb.y));
+            path.line_to(Point::new(pc.x, pc.y));
+            path.close();
+            i += 3;
+        }
+        frame.fill(&path.build(), color);
     }
 }
 

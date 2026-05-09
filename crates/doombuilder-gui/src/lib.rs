@@ -4,6 +4,7 @@
 
 mod camera;
 mod view2d;
+mod view3d;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -11,13 +12,14 @@ use std::sync::Arc;
 
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
-use doombuilder_core::edit::{Command, SidedefSlot, UndoStack, VertexMove};
-use doombuilder_core::map::{Map, MapSidedef, SectorId, TextureName, VertexId};
+use doombuilder_core::edit::{Command, SectorSlot, SidedefSlot, UndoStack, VertexMove};
+use doombuilder_core::map::{save_map_as_pwad, Map, MapSidedef, SectorId, TextureName, VertexId};
 use doombuilder_core::textures::TextureSet;
 use doombuilder_core::wad::WadKind;
 use doombuilder_core::{load_auto, MapFormat, Wad};
 use doombuilder_render::{
-    build_walls, extract_sector_loops, triangulate_sector, FloorMesh, SpatialIndex, Wall,
+    build_walls, extract_sector_loops, rasterise_sector_fill, triangulate_sector, FloorMesh,
+    SpatialIndex, Wall,
 };
 use glam::Vec2;
 use iced::keyboard::{self, Modifiers};
@@ -30,7 +32,8 @@ use iced::widget::{
 use iced::{Border, Color, Element, Length, Subscription, Task, Theme};
 
 use camera::Camera2D;
-use view2d::{map_aabb, HighlightKind, View2D, View2DMessage};
+use view2d::{map_aabb, FillTile, HighlightKind, View2D, View2DMessage};
+use view3d::{build_geometry, world_aabb, Camera3D, View3D, View3DGeometry, View3DMessage};
 
 pub fn run() -> iced::Result {
     iced::application(App::default, App::update, App::view)
@@ -55,10 +58,14 @@ pub struct App {
     selected_map: Option<String>,
     map: Option<Arc<Map>>,
     map_stats: Option<MapStats>,
-    sector_meshes: Arc<Vec<FloorMesh>>,
+    sector_meshes: Arc<Vec<(SectorId, FloorMesh)>>,
     walls: Arc<Vec<Wall>>,
     spatial: Option<Arc<SpatialIndex>>,
+    sector_fills: Arc<Vec<FillTile>>,
+    show_textures: bool,
     camera2d: Camera2D,
+    camera3d: Camera3D,
+    geometry3d: Arc<View3DGeometry>,
     cache2d: Arc<Cache>,
     hover: Option<HighlightKind>,
     selection: Arc<HashSet<HighlightKind>>,
@@ -76,10 +83,17 @@ pub struct App {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct PickerTarget {
-    pub sidedef: doombuilder_core::map::SidedefId,
-    pub slot: SidedefSlot,
+pub enum PickerTarget {
+    Sidedef {
+        sidedef: doombuilder_core::map::SidedefId,
+        slot: SidedefSlot,
+    },
+    Sector {
+        sector: SectorId,
+        slot: SectorSlot,
+    },
 }
+
 
 #[derive(Debug)]
 enum DragMode {
@@ -104,7 +118,11 @@ impl Default for App {
             sector_meshes: Arc::new(Vec::new()),
             walls: Arc::new(Vec::new()),
             spatial: None,
+            sector_fills: Arc::new(Vec::new()),
+            show_textures: true,
             camera2d: Camera2D::default(),
+            camera3d: Camera3D::default(),
+            geometry3d: Arc::new(View3DGeometry::default()),
             cache2d: Arc::new(Cache::new()),
             hover: None,
             selection: Arc::new(HashSet::new()),
@@ -126,12 +144,17 @@ impl Default for App {
 #[derive(Debug, Clone)]
 pub enum Message {
     OpenWadRequested,
+    SaveMapRequested,
+    SaveMapPathPicked(Option<PathBuf>),
+    SaveMapDone(Result<PathBuf, String>),
     FilePicked(Option<PathBuf>),
     AssetLoaded(Result<AssetSummary, String>),
     MapSelected(String),
     MapLoaded(Result<MapPayload, String>),
     Mode(Mode),
+    ToggleTextures,
     View2D(View2DMessage),
+    View3D(View3DMessage),
     ModifiersChanged(Modifiers),
     KeyboardEsc,
     SelectAll,
@@ -164,14 +187,12 @@ pub struct MapStats {
     sidedefs: usize,
     sectors: usize,
     things: usize,
-    sector_meshes: usize,
-    walls: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct MapPayload {
     map: Arc<Map>,
-    sector_meshes: Arc<Vec<FloorMesh>>,
+    sector_meshes: Arc<Vec<(SectorId, FloorMesh)>>,
     walls: Arc<Vec<Wall>>,
     spatial: Arc<SpatialIndex>,
     stats: MapStats,
@@ -197,6 +218,37 @@ impl App {
             Message::OpenWadRequested => {
                 self.status = "Choose a WAD, PK3, or zip...".to_string();
                 Task::perform(pick_file(), Message::FilePicked)
+            }
+            Message::SaveMapRequested => {
+                if self.map.is_none() {
+                    self.status = "Open a map before saving.".into();
+                    return Task::none();
+                }
+                let suggested = self
+                    .selected_map
+                    .clone()
+                    .unwrap_or_else(|| "MAP".to_string());
+                Task::perform(pick_save_path(suggested), Message::SaveMapPathPicked)
+            }
+            Message::SaveMapPathPicked(None) => {
+                self.status = "Save cancelled.".into();
+                Task::none()
+            }
+            Message::SaveMapPathPicked(Some(path)) => {
+                let Some(map) = self.map.clone() else {
+                    self.status = "No map to save.".into();
+                    return Task::none();
+                };
+                self.status = format!("Saving {}...", path.display());
+                Task::perform(save_map_to_path(map, path), Message::SaveMapDone)
+            }
+            Message::SaveMapDone(Ok(path)) => {
+                self.status = format!("Saved {}", path.display());
+                Task::none()
+            }
+            Message::SaveMapDone(Err(err)) => {
+                self.status = format!("Save failed: {err}");
+                Task::none()
             }
             Message::FilePicked(None) => {
                 self.status = "Open cancelled.".to_string();
@@ -248,6 +300,11 @@ impl App {
                 if let Some((min, max)) = map_aabb(&payload.map) {
                     self.camera2d.frame_aabb(min, max, Vec2::new(800.0, 600.0));
                 }
+                self.rebuild_sector_fills();
+                self.rebuild_geometry3d();
+                if let Some((min, max)) = world_aabb(self.map.as_ref().unwrap(), &self.sector_meshes) {
+                    self.camera3d.frame_aabb(min, max);
+                }
                 Task::none()
             }
             Message::MapLoaded(Err(err)) => {
@@ -258,9 +315,18 @@ impl App {
                 self.mode = mode;
                 Task::none()
             }
+            Message::ToggleTextures => {
+                self.show_textures = !self.show_textures;
+                self.cache2d.clear();
+                Task::none()
+            }
             Message::View2D(msg) => {
                 self.handle_view2d(msg);
                 self.cache2d.clear();
+                Task::none()
+            }
+            Message::View3D(msg) => {
+                self.handle_view3d(msg);
                 Task::none()
             }
             Message::ModifiersChanged(m) => {
@@ -324,25 +390,51 @@ impl App {
             Message::PickTexture(name) => {
                 if let (Some(target), Some(map)) = (self.texture_picker.take(), self.map.as_mut()) {
                     let map_mut = Arc::make_mut(map);
-                    if let Some(side) = map_mut.sidedefs.get(target.sidedef) {
-                        let old = match target.slot {
-                            SidedefSlot::Upper => side.upper_texture,
-                            SidedefSlot::Middle => side.middle_texture,
-                            SidedefSlot::Lower => side.lower_texture,
-                        };
-                        let mut padded = [0u8; 8];
-                        let bytes = name.as_bytes();
-                        let len = bytes.len().min(8);
-                        padded[..len].copy_from_slice(&bytes[..len]);
-                        let new = TextureName(padded);
-                        let cmd = Command::SetSidedefTexture {
-                            id: target.sidedef,
-                            slot: target.slot,
-                            old,
-                            new,
-                        };
+                    let mut padded = [0u8; 8];
+                    let bytes = name.as_bytes();
+                    let len = bytes.len().min(8);
+                    padded[..len].copy_from_slice(&bytes[..len]);
+                    let new = TextureName(padded);
+
+                    let cmd = match target {
+                        PickerTarget::Sidedef { sidedef, slot } => map_mut
+                            .sidedefs
+                            .get(sidedef)
+                            .map(|s| {
+                                let old = match slot {
+                                    SidedefSlot::Upper => s.upper_texture,
+                                    SidedefSlot::Middle => s.middle_texture,
+                                    SidedefSlot::Lower => s.lower_texture,
+                                };
+                                Command::SetSidedefTexture {
+                                    id: sidedef,
+                                    slot,
+                                    old,
+                                    new,
+                                }
+                            }),
+                        PickerTarget::Sector { sector, slot } => map_mut
+                            .sectors
+                            .get(sector)
+                            .map(|s| {
+                                let old = match slot {
+                                    SectorSlot::Floor => s.floor_texture,
+                                    SectorSlot::Ceiling => s.ceiling_texture,
+                                };
+                                Command::SetSectorTexture {
+                                    id: sector,
+                                    slot,
+                                    old,
+                                    new,
+                                }
+                            }),
+                    };
+                    if let Some(cmd) = cmd {
                         cmd.apply(map_mut);
                         self.undo.push(cmd);
+                        // Sector flat changes invalidate the rasterised fill
+                        // images and 3D geometry; vertex-move-style rebuild.
+                        self.rebuild_geometry_indices();
                         self.cache2d.clear();
                     }
                 }
@@ -360,6 +452,7 @@ impl App {
         self.sector_meshes = Arc::new(Vec::new());
         self.walls = Arc::new(Vec::new());
         self.spatial = None;
+        self.sector_fills = Arc::new(Vec::new());
         self.cache2d = Arc::new(Cache::new());
         self.hover = None;
         self.selection = Arc::new(HashSet::new());
@@ -379,12 +472,36 @@ impl App {
                 }
                 keyboard::Key::Character("z") if modifiers.command() => Message::Undo,
                 keyboard::Key::Character("y") if modifiers.command() => Message::Redo,
+                keyboard::Key::Character("s") if modifiers.command() => Message::SaveMapRequested,
                 _ => Message::ModifiersChanged(modifiers),
             },
             keyboard::Event::KeyReleased { modifiers, .. } => {
                 Message::ModifiersChanged(modifiers)
             }
         })
+    }
+
+    fn handle_view3d(&mut self, msg: View3DMessage) {
+        match msg {
+            View3DMessage::OrbitBy { dx, dy } => {
+                self.camera3d.yaw -= dx * 0.005;
+                self.camera3d.pitch =
+                    (self.camera3d.pitch - dy * 0.005).clamp(0.05, std::f32::consts::FRAC_PI_2 - 0.05);
+            }
+            View3DMessage::Zoom { factor } => {
+                self.camera3d.distance =
+                    (self.camera3d.distance * factor).clamp(64.0, 50_000.0);
+            }
+        }
+    }
+
+    fn rebuild_geometry3d(&mut self) {
+        let (Some(map), Some(textures)) = (&self.map, &self.textures) else {
+            self.geometry3d = Arc::new(View3DGeometry::default());
+            return;
+        };
+        let geom = build_geometry(map, &self.sector_meshes, &self.walls, textures);
+        self.geometry3d = Arc::new(geom);
     }
 
     fn handle_view2d(&mut self, msg: View2DMessage) {
@@ -597,10 +714,39 @@ impl App {
         }
         let walls = build_walls(&map);
         let spatial = SpatialIndex::build(&map, meshes_with_id.clone());
-        let meshes: Vec<FloorMesh> = meshes_with_id.into_iter().map(|(_, m)| m).collect();
-        self.sector_meshes = Arc::new(meshes);
+        self.sector_meshes = Arc::new(meshes_with_id);
         self.walls = Arc::new(walls);
         self.spatial = Some(Arc::new(spatial));
+        self.rebuild_sector_fills();
+        self.rebuild_geometry3d();
+    }
+
+    fn rebuild_sector_fills(&mut self) {
+        let (Some(map), Some(textures)) = (&self.map, &self.textures) else {
+            self.sector_fills = Arc::new(Vec::new());
+            return;
+        };
+        let mut tiles: Vec<FillTile> = Vec::new();
+        for (sid, mesh) in self.sector_meshes.iter() {
+            let Some(fill) = rasterise_sector_fill(map, *sid, mesh, textures) else {
+                continue;
+            };
+            if fill.width == 0 || fill.height == 0 {
+                continue;
+            }
+            let handle = ImageHandle::from_rgba(fill.width, fill.height, fill.rgba);
+            let world_min = Vec2::new(fill.origin_world.0, fill.origin_world.1 - fill.height as f32);
+            let world_max = Vec2::new(
+                fill.origin_world.0 + fill.width as f32,
+                fill.origin_world.1,
+            );
+            tiles.push(FillTile {
+                handle,
+                world_min,
+                world_max,
+            });
+        }
+        self.sector_fills = Arc::new(tiles);
     }
 
     fn hit_test(&self, world: Vec2) -> Option<HighlightKind> {
@@ -668,6 +814,13 @@ impl App {
                 vertical_separator(),
                 mode_button("2D", Mode::View2D, self.mode),
                 mode_button("3D", Mode::View3D, self.mode),
+                vertical_separator(),
+                button(text(if self.show_textures {
+                    "Show textures: ON"
+                } else {
+                    "Show textures: OFF"
+                }))
+                .on_press(Message::ToggleTextures),
             ]
             .spacing(8)
             .padding(6)
@@ -695,10 +848,15 @@ impl App {
                     hover: self.hover,
                     selection: self.selection.clone(),
                     drag_rect: self.drag_rect,
+                    fills: if self.show_textures {
+                        self.sector_fills.clone()
+                    } else {
+                        Arc::new(Vec::new())
+                    },
                 };
                 view.into_widget(Message::View2D)
             }
-            (Mode::View3D, Some(_)) => self.view3d_placeholder(),
+            (Mode::View3D, Some(_)) => self.view3d_widget(),
         };
         container(body)
             .width(Length::Fill)
@@ -733,7 +891,7 @@ impl App {
             .width(Length::Fixed(320.0))
             .padding(10);
 
-        let (front_side, back_side) = match single {
+        let texture_panels: Element<'_, Message> = match single {
             Some(HighlightKind::Linedef(id)) => {
                 let line = map.linedefs.get(id);
                 let front = line
@@ -742,15 +900,26 @@ impl App {
                 let back = line
                     .and_then(|l| l.left)
                     .and_then(|sid| map.sidedefs.get(sid).map(|s| (sid, s)));
-                (front, back)
+                row![
+                    side_panel("Front Side", front, &self.texture_handles),
+                    side_panel("Back Side", back, &self.texture_handles),
+                ]
+                .spacing(10)
+                .into()
             }
-            _ => (None, None),
+            Some(HighlightKind::Sector(id)) => {
+                let sec = map.sectors.get(id);
+                row![sector_texture_panel(id, sec, &self.texture_handles)]
+                    .spacing(10)
+                    .into()
+            }
+            _ => row![
+                side_panel("Front Side", None, &self.texture_handles),
+                side_panel("Back Side", None, &self.texture_handles),
+            ]
+            .spacing(10)
+            .into(),
         };
-        let texture_panels = row![
-            side_panel("Front Side", front_side, &self.texture_handles),
-            side_panel("Back Side", back_side, &self.texture_handles),
-        ]
-        .spacing(10);
 
         Some(
             container(
@@ -920,23 +1089,17 @@ impl App {
             .into()
     }
 
-    fn view3d_placeholder(&self) -> Element<'_, Message> {
-        let stats = self
-            .map_stats
-            .as_ref()
-            .map(|s| {
-                format!(
-                    "3D data ready:\n  triangulated sectors: {}\n  wall quads: {}\n\n(wgpu pipeline lands next session)",
-                    s.sector_meshes, s.walls
-                )
-            })
-            .unwrap_or_else(|| "Load a map first.".into());
-        container(text(stats).size(14))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into()
+    fn view3d_widget(&self) -> Element<'_, Message> {
+        let textures = match &self.textures {
+            Some(t) => t.clone(),
+            None => Arc::new(TextureSet::empty(Vec::new())),
+        };
+        let view = View3D {
+            geometry: self.geometry3d.clone(),
+            textures,
+            camera: self.camera3d,
+        };
+        view.into_widget(Message::View3D)
     }
 }
 
@@ -1063,14 +1226,33 @@ fn side_panel<'a>(
 ) -> Element<'a, Message> {
     let slots: Element<'_, Message> = match side_with_id {
         Some((id, side)) => row![
-            texture_slot("Upper", side.upper_texture, handles, Some((id, SidedefSlot::Upper))),
+            texture_slot(
+                "Upper",
+                side.upper_texture,
+                handles,
+                Some(PickerTarget::Sidedef {
+                    sidedef: id,
+                    slot: SidedefSlot::Upper,
+                }),
+            ),
             texture_slot(
                 "Middle",
                 side.middle_texture,
                 handles,
-                Some((id, SidedefSlot::Middle))
+                Some(PickerTarget::Sidedef {
+                    sidedef: id,
+                    slot: SidedefSlot::Middle,
+                }),
             ),
-            texture_slot("Lower", side.lower_texture, handles, Some((id, SidedefSlot::Lower))),
+            texture_slot(
+                "Lower",
+                side.lower_texture,
+                handles,
+                Some(PickerTarget::Sidedef {
+                    sidedef: id,
+                    slot: SidedefSlot::Lower,
+                }),
+            ),
         ]
         .spacing(8)
         .into(),
@@ -1082,11 +1264,47 @@ fn side_panel<'a>(
         .into()
 }
 
+fn sector_texture_panel<'a>(
+    id: SectorId,
+    sector: Option<&doombuilder_core::map::MapSector>,
+    handles: &HashMap<String, ImageHandle>,
+) -> Element<'a, Message> {
+    let slots: Element<'_, Message> = match sector {
+        Some(sec) => row![
+            texture_slot(
+                "Floor",
+                sec.floor_texture,
+                handles,
+                Some(PickerTarget::Sector {
+                    sector: id,
+                    slot: SectorSlot::Floor,
+                }),
+            ),
+            texture_slot(
+                "Ceiling",
+                sec.ceiling_texture,
+                handles,
+                Some(PickerTarget::Sector {
+                    sector: id,
+                    slot: SectorSlot::Ceiling,
+                }),
+            ),
+        ]
+        .spacing(8)
+        .into(),
+        None => text("(none)").size(13).into(),
+    };
+    container(column![text("Sector flats").size(14), slots].spacing(6))
+        .padding(8)
+        .style(side_panel_style)
+        .into()
+}
+
 fn texture_slot<'a>(
     label: &'a str,
     name: TextureName,
     handles: &HashMap<String, ImageHandle>,
-    target: Option<(doombuilder_core::map::SidedefId, SidedefSlot)>,
+    target: Option<PickerTarget>,
 ) -> Element<'a, Message> {
     let displayed = name.as_str().to_ascii_uppercase();
     let is_missing = displayed.is_empty() || displayed == "-";
@@ -1121,14 +1339,11 @@ fn texture_slot<'a>(
             .into()
     };
 
-    let slot: Element<'_, Message> = if let Some((sid, kind)) = target {
+    let slot: Element<'_, Message> = if let Some(t) = target {
         button(body)
             .padding(0)
             .style(button::text)
-            .on_press(Message::OpenTexturePicker(PickerTarget {
-                sidedef: sid,
-                slot: kind,
-            }))
+            .on_press(Message::OpenTexturePicker(t))
             .into()
     } else {
         body
@@ -1158,7 +1373,8 @@ impl std::fmt::Display for MenuItem {
     }
 }
 
-const FILE_MENU_ITEMS: &[MenuItem] = &[MenuItem("Open WAD…"), MenuItem("Quit")];
+const FILE_MENU_ITEMS: &[MenuItem] =
+    &[MenuItem("Open WAD…"), MenuItem("Save Map As…"), MenuItem("Quit")];
 const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Undo"),
     MenuItem("Redo"),
@@ -1172,6 +1388,7 @@ const HELP_MENU_ITEMS: &[MenuItem] = &[MenuItem("About (n/a)")];
 fn dispatch_file(item: MenuItem) -> Message {
     match item.0 {
         "Open WAD…" => Message::OpenWadRequested,
+        "Save Map As…" => Message::SaveMapRequested,
         "Quit" => Message::Quit,
         _ => Message::Noop,
     }
@@ -1303,6 +1520,21 @@ fn separator_style(_theme: &Theme) -> container::Style {
     }
 }
 
+async fn pick_save_path(suggested_stem: String) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_file_name(format!("{suggested_stem}.wad"))
+        .add_filter("PWAD", &["wad"])
+        .save_file()
+        .await
+        .map(|h| h.path().to_path_buf())
+}
+
+async fn save_map_to_path(map: Arc<Map>, path: PathBuf) -> Result<PathBuf, String> {
+    let bytes = save_map_as_pwad(&map);
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 async fn pick_file() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
         .add_filter("Doom assets", &["wad", "pk3", "zip"])
@@ -1349,12 +1581,8 @@ async fn load_map_payload(wad: Wad, name: String) -> Result<MapPayload, String> 
             }
         }
     }
-    let triangulated = meshes_with_id.len();
-
     let walls = build_walls(&map);
     let spatial = SpatialIndex::build(&map, meshes_with_id.clone());
-
-    let meshes: Vec<FloorMesh> = meshes_with_id.into_iter().map(|(_, m)| m).collect();
 
     let stats = MapStats {
         name: map.name.clone(),
@@ -1364,13 +1592,11 @@ async fn load_map_payload(wad: Wad, name: String) -> Result<MapPayload, String> 
         sidedefs: map.sidedefs.len(),
         sectors: map.sectors.len(),
         things: map.things.len(),
-        sector_meshes: triangulated,
-        walls: walls.len(),
     };
 
     Ok(MapPayload {
         map: Arc::new(map),
-        sector_meshes: Arc::new(meshes),
+        sector_meshes: Arc::new(meshes_with_id),
         walls: Arc::new(walls),
         spatial: Arc::new(spatial),
         stats,

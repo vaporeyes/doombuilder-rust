@@ -2,7 +2,7 @@
 // ABOUTME: full-height wall; two-sided linedefs become up to three step quads
 // ABOUTME: (upper, middle/sky, lower) where neighbouring sector heights differ.
 
-use doombuilder_core::map::{Map, MapLinedef, SectorId};
+use doombuilder_core::map::{Map, MapLinedef, SectorId, SidedefId};
 
 #[derive(Debug, Clone, Copy)]
 pub enum WallKind {
@@ -19,6 +19,8 @@ pub struct Wall {
     pub kind: WallKind,
     /// Sector this wall faces into (used to pick light/colour).
     pub facing_sector: SectorId,
+    /// Sidedef the wall renders the texture of (slot is chosen by `kind`).
+    pub sidedef: SidedefId,
     /// World-space quad in (x, y, z) order: bottom-left, bottom-right,
     /// top-right, top-left. Ready to upload as two triangles.
     pub quad: [[f32; 3]; 4],
@@ -42,30 +44,32 @@ fn emit_walls_for_linedef(map: &Map, line: &MapLinedef, out: &mut Vec<Wall>) {
     let p1 = (v1.x as f32, v1.y as f32);
     let p2 = (v2.x as f32, v2.y as f32);
 
-    let right_sector = line
-        .right
+    let right_side = line.right;
+    let left_side = line.left;
+    let right_sector = right_side
         .and_then(|sid| map.sidedefs.get(sid))
         .map(|s| s.sector);
-    let left_sector = line
-        .left
+    let left_sector = left_side
         .and_then(|sid| map.sidedefs.get(sid))
         .map(|s| s.sector);
 
     match (right_sector, left_sector) {
         (Some(rs), None) => {
-            if let Some(sec) = map.sectors.get(rs) {
+            if let (Some(sec), Some(rside)) = (map.sectors.get(rs), right_side) {
                 out.push(Wall {
                     kind: WallKind::Solid,
                     facing_sector: rs,
+                    sidedef: rside,
                     quad: quad(p1, p2, sec.floor_height as f32, sec.ceiling_height as f32),
                 });
             }
         }
         (None, Some(ls)) => {
-            if let Some(sec) = map.sectors.get(ls) {
+            if let (Some(sec), Some(lside)) = (map.sectors.get(ls), left_side) {
                 out.push(Wall {
                     kind: WallKind::Solid,
                     facing_sector: ls,
+                    sidedef: lside,
                     quad: quad(p2, p1, sec.floor_height as f32, sec.ceiling_height as f32),
                 });
             }
@@ -74,33 +78,46 @@ fn emit_walls_for_linedef(map: &Map, line: &MapLinedef, out: &mut Vec<Wall>) {
             let (Some(rsec), Some(lsec)) = (map.sectors.get(rs), map.sectors.get(ls)) else {
                 return;
             };
-            // Lower: step where one sector's floor is higher than the other.
+            // Lower step: rendered on the side facing into the sector with the
+            // taller floor; the texture comes from that side's sidedef.
             if rsec.floor_height < lsec.floor_height {
-                out.push(Wall {
-                    kind: WallKind::Lower,
-                    facing_sector: ls,
-                    quad: quad(p2, p1, rsec.floor_height as f32, lsec.floor_height as f32),
-                });
+                if let Some(lside) = left_side {
+                    out.push(Wall {
+                        kind: WallKind::Lower,
+                        facing_sector: ls,
+                        sidedef: lside,
+                        quad: quad(p2, p1, rsec.floor_height as f32, lsec.floor_height as f32),
+                    });
+                }
             } else if lsec.floor_height < rsec.floor_height {
-                out.push(Wall {
-                    kind: WallKind::Lower,
-                    facing_sector: rs,
-                    quad: quad(p1, p2, lsec.floor_height as f32, rsec.floor_height as f32),
-                });
+                if let Some(rside) = right_side {
+                    out.push(Wall {
+                        kind: WallKind::Lower,
+                        facing_sector: rs,
+                        sidedef: rside,
+                        quad: quad(p1, p2, lsec.floor_height as f32, rsec.floor_height as f32),
+                    });
+                }
             }
-            // Upper: step where one sector's ceiling is lower than the other.
+            // Upper step.
             if rsec.ceiling_height > lsec.ceiling_height {
-                out.push(Wall {
-                    kind: WallKind::Upper,
-                    facing_sector: ls,
-                    quad: quad(p2, p1, lsec.ceiling_height as f32, rsec.ceiling_height as f32),
-                });
+                if let Some(lside) = left_side {
+                    out.push(Wall {
+                        kind: WallKind::Upper,
+                        facing_sector: ls,
+                        sidedef: lside,
+                        quad: quad(p2, p1, lsec.ceiling_height as f32, rsec.ceiling_height as f32),
+                    });
+                }
             } else if lsec.ceiling_height > rsec.ceiling_height {
-                out.push(Wall {
-                    kind: WallKind::Upper,
-                    facing_sector: rs,
-                    quad: quad(p1, p2, rsec.ceiling_height as f32, lsec.ceiling_height as f32),
-                });
+                if let Some(rside) = right_side {
+                    out.push(Wall {
+                        kind: WallKind::Upper,
+                        facing_sector: rs,
+                        sidedef: rside,
+                        quad: quad(p1, p2, rsec.ceiling_height as f32, lsec.ceiling_height as f32),
+                    });
+                }
             }
         }
         (None, None) => {}
