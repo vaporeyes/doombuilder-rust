@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
-use doombuilder_core::edit::{Command, SectorSlot, SidedefSlot, UndoStack, VertexMove};
+use doombuilder_core::edit::{
+    Command, SectorSlot, SidedefSlot, ThingMove, UndoStack, VertexMove,
+};
+use doombuilder_core::map::MapThing;
 use doombuilder_core::map::{
     save_map_as_pwad, Map, MapSidedef, SectorId, TextureName, ThingId, VertexId,
 };
@@ -73,6 +76,7 @@ pub struct App {
     selection: Arc<HashSet<HighlightKind>>,
     drag_rect: Option<(Vec2, Vec2)>,
     active_drag: Option<DragMode>,
+    cursor_world: Option<Vec2>,
     undo: UndoStack,
     modifiers: Modifiers,
     mode: Mode,
@@ -81,8 +85,15 @@ pub struct App {
     texture_handles: Arc<HashMap<String, ImageHandle>>,
     sprite_handles: Arc<HashMap<String, ImageHandle>>,
     sorted_texture_names: Arc<Vec<String>>,
-    texture_picker: Option<PickerTarget>,
-    texture_filter: String,
+    active_picker: Option<ActivePicker>,
+    picker_filter: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ActivePicker {
+    Texture(PickerTarget),
+    Action(doombuilder_core::map::LinedefId),
+    ThingKind(ThingId),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +115,9 @@ enum DragMode {
     MoveVertices {
         /// Original (x, y) for each vertex involved in the drag.
         originals: Vec<(VertexId, i32, i32)>,
+    },
+    MoveThings {
+        originals: Vec<(ThingId, i32, i32)>,
     },
 }
 
@@ -131,6 +145,7 @@ impl Default for App {
             selection: Arc::new(HashSet::new()),
             drag_rect: None,
             active_drag: None,
+            cursor_world: None,
             undo: UndoStack::new(),
             modifiers: Modifiers::default(),
             mode: Mode::default(),
@@ -139,8 +154,8 @@ impl Default for App {
             texture_handles: Arc::new(HashMap::new()),
             sprite_handles: Arc::new(HashMap::new()),
             sorted_texture_names: Arc::new(Vec::new()),
-            texture_picker: None,
-            texture_filter: String::new(),
+            active_picker: None,
+            picker_filter: String::new(),
         }
     }
 }
@@ -164,10 +179,16 @@ pub enum Message {
     SelectAll,
     Undo,
     Redo,
+    DeleteSelection,
+    InsertThing,
     OpenTexturePicker(PickerTarget),
-    CloseTexturePicker,
+    OpenActionPicker(doombuilder_core::map::LinedefId),
+    OpenThingKindPicker(ThingId),
+    ClosePicker,
     PickTexture(String),
-    TextureFilterChanged(String),
+    PickAction(u16),
+    PickThingKind(u16),
+    PickerFilterChanged(String),
     Quit,
     Noop,
 }
@@ -380,69 +401,185 @@ impl App {
                 Task::none()
             }
             Message::OpenTexturePicker(target) => {
-                self.texture_picker = Some(target);
-                self.texture_filter.clear();
+                self.active_picker = Some(ActivePicker::Texture(target));
+                self.picker_filter.clear();
                 Task::none()
             }
-            Message::CloseTexturePicker => {
-                self.texture_picker = None;
-                self.texture_filter.clear();
+            Message::OpenActionPicker(id) => {
+                self.active_picker = Some(ActivePicker::Action(id));
+                self.picker_filter.clear();
                 Task::none()
             }
-            Message::TextureFilterChanged(q) => {
-                self.texture_filter = q;
+            Message::OpenThingKindPicker(id) => {
+                self.active_picker = Some(ActivePicker::ThingKind(id));
+                self.picker_filter.clear();
+                Task::none()
+            }
+            Message::ClosePicker => {
+                self.active_picker = None;
+                self.picker_filter.clear();
+                Task::none()
+            }
+            Message::PickerFilterChanged(q) => {
+                self.picker_filter = q;
+                Task::none()
+            }
+            Message::PickAction(new_special) => {
+                if let Some(ActivePicker::Action(id)) = self.active_picker.take() {
+                    if let Some(map) = self.map.as_mut() {
+                        let map_mut = Arc::make_mut(map);
+                        if let Some(line) = map_mut.linedefs.get(id) {
+                            let old = line.special;
+                            if old != new_special {
+                                let mut cmd = Command::SetLinedefSpecial {
+                                    id,
+                                    old,
+                                    new: new_special,
+                                };
+                                cmd.apply(map_mut);
+                                self.undo.push(cmd);
+                                self.cache2d.clear();
+                            }
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::PickThingKind(new_kind) => {
+                if let Some(ActivePicker::ThingKind(id)) = self.active_picker.take() {
+                    if let Some(map) = self.map.as_mut() {
+                        let map_mut = Arc::make_mut(map);
+                        if let Some(t) = map_mut.things.get(id) {
+                            let old = t.kind;
+                            if old != new_kind {
+                                let mut cmd = Command::SetThingKind {
+                                    id,
+                                    old,
+                                    new: new_kind,
+                                };
+                                cmd.apply(map_mut);
+                                self.undo.push(cmd);
+                                self.rebuild_geometry_indices();
+                                self.cache2d.clear();
+                            }
+                        }
+                    }
+                }
                 Task::none()
             }
             Message::PickTexture(name) => {
-                if let (Some(target), Some(map)) = (self.texture_picker.take(), self.map.as_mut()) {
-                    let map_mut = Arc::make_mut(map);
-                    let mut padded = [0u8; 8];
-                    let bytes = name.as_bytes();
-                    let len = bytes.len().min(8);
-                    padded[..len].copy_from_slice(&bytes[..len]);
-                    let new = TextureName(padded);
+                if let Some(ActivePicker::Texture(target)) = self.active_picker.take() {
+                    if let Some(map) = self.map.as_mut() {
+                        let map_mut = Arc::make_mut(map);
+                        let mut padded = [0u8; 8];
+                        let bytes = name.as_bytes();
+                        let len = bytes.len().min(8);
+                        padded[..len].copy_from_slice(&bytes[..len]);
+                        let new = TextureName(padded);
 
-                    let cmd = match target {
-                        PickerTarget::Sidedef { sidedef, slot } => map_mut
-                            .sidedefs
-                            .get(sidedef)
-                            .map(|s| {
-                                let old = match slot {
-                                    SidedefSlot::Upper => s.upper_texture,
-                                    SidedefSlot::Middle => s.middle_texture,
-                                    SidedefSlot::Lower => s.lower_texture,
-                                };
-                                Command::SetSidedefTexture {
-                                    id: sidedef,
-                                    slot,
-                                    old,
-                                    new,
-                                }
-                            }),
-                        PickerTarget::Sector { sector, slot } => map_mut
-                            .sectors
-                            .get(sector)
-                            .map(|s| {
-                                let old = match slot {
-                                    SectorSlot::Floor => s.floor_texture,
-                                    SectorSlot::Ceiling => s.ceiling_texture,
-                                };
-                                Command::SetSectorTexture {
-                                    id: sector,
-                                    slot,
-                                    old,
-                                    new,
-                                }
-                            }),
-                    };
-                    if let Some(cmd) = cmd {
-                        cmd.apply(map_mut);
-                        self.undo.push(cmd);
-                        // Sector flat changes invalidate the rasterised fill
-                        // images and 3D geometry; vertex-move-style rebuild.
-                        self.rebuild_geometry_indices();
-                        self.cache2d.clear();
+                        let cmd = match target {
+                            PickerTarget::Sidedef { sidedef, slot } => map_mut
+                                .sidedefs
+                                .get(sidedef)
+                                .map(|s| {
+                                    let old = match slot {
+                                        SidedefSlot::Upper => s.upper_texture,
+                                        SidedefSlot::Middle => s.middle_texture,
+                                        SidedefSlot::Lower => s.lower_texture,
+                                    };
+                                    Command::SetSidedefTexture {
+                                        id: sidedef,
+                                        slot,
+                                        old,
+                                        new,
+                                    }
+                                }),
+                            PickerTarget::Sector { sector, slot } => map_mut
+                                .sectors
+                                .get(sector)
+                                .map(|s| {
+                                    let old = match slot {
+                                        SectorSlot::Floor => s.floor_texture,
+                                        SectorSlot::Ceiling => s.ceiling_texture,
+                                    };
+                                    Command::SetSectorTexture {
+                                        id: sector,
+                                        slot,
+                                        old,
+                                        new,
+                                    }
+                                }),
+                        };
+                        if let Some(mut cmd) = cmd {
+                            cmd.apply(map_mut);
+                            self.undo.push(cmd);
+                            self.rebuild_geometry_indices();
+                            self.cache2d.clear();
+                        }
                     }
+                }
+                Task::none()
+            }
+            Message::DeleteSelection => {
+                let thing_ids: Vec<ThingId> = self
+                    .selection
+                    .iter()
+                    .filter_map(|h| match h {
+                        HighlightKind::Thing(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                if !thing_ids.is_empty() {
+                    if let Some(map) = self.map.as_mut() {
+                        let map_mut = Arc::make_mut(map);
+                        let mut snapshots = Vec::with_capacity(thing_ids.len());
+                        for id in &thing_ids {
+                            if let Some(t) = map_mut.things.remove(*id) {
+                                snapshots.push(t);
+                            }
+                        }
+                        if !snapshots.is_empty() {
+                            self.undo.push(Command::DeleteThings {
+                                snapshots,
+                                current_ids: Vec::new(),
+                            });
+                            let mut sel = (*self.selection).clone();
+                            for id in &thing_ids {
+                                sel.remove(&HighlightKind::Thing(*id));
+                            }
+                            self.selection = Arc::new(sel);
+                            self.rebuild_geometry_indices();
+                            self.cache2d.clear();
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::InsertThing => {
+                let world = self.cursor_world.unwrap_or(self.camera2d.center);
+                if let Some(map) = self.map.as_mut() {
+                    let map_mut = Arc::make_mut(map);
+                    let snapshot = MapThing {
+                        x: world.x.round() as i32,
+                        y: world.y.round() as i32,
+                        angle: 0,
+                        kind: 1,
+                        flags: 7,
+                        tid: 0,
+                        z: 0,
+                        special: 0,
+                        args: [0; 5],
+                    };
+                    let id = map_mut.things.insert(snapshot.clone());
+                    self.undo.push(Command::CreateThing {
+                        id: Some(id),
+                        snapshot,
+                    });
+                    let mut sel = HashSet::new();
+                    sel.insert(HighlightKind::Thing(id));
+                    self.selection = Arc::new(sel);
+                    self.rebuild_geometry_indices();
+                    self.cache2d.clear();
                 }
                 Task::none()
             }
@@ -479,6 +616,12 @@ impl App {
                 keyboard::Key::Character("z") if modifiers.command() => Message::Undo,
                 keyboard::Key::Character("y") if modifiers.command() => Message::Redo,
                 keyboard::Key::Character("s") if modifiers.command() => Message::SaveMapRequested,
+                keyboard::Key::Named(keyboard::key::Named::Delete)
+                | keyboard::Key::Named(keyboard::key::Named::Backspace) => {
+                    Message::DeleteSelection
+                }
+                keyboard::Key::Named(keyboard::key::Named::Insert) => Message::InsertThing,
+                keyboard::Key::Character("i") if !modifiers.command() => Message::InsertThing,
                 _ => Message::ModifiersChanged(modifiers),
             },
             keyboard::Event::KeyReleased { modifiers, .. } => {
@@ -526,6 +669,7 @@ impl App {
                 viewport,
             } => self.camera2d.zoom_about(pivot, viewport, factor),
             View2DMessage::HoverAt(world) => {
+                self.cursor_world = Some(world);
                 let new_hover = self.hit_test(world);
                 if new_hover != self.hover {
                     self.hover = new_hover;
@@ -533,6 +677,7 @@ impl App {
             }
             View2DMessage::HoverCleared => {
                 self.hover = None;
+                self.cursor_world = None;
             }
             View2DMessage::ClickAt(world) => {
                 let hit = self.hit_test(world);
@@ -591,6 +736,21 @@ impl App {
                 // Drop sector fills until drag ends so they don't appear stale.
                 self.sector_meshes = Arc::new(Vec::new());
             }
+            Some(DragMode::MoveThings { originals }) => {
+                self.hover = None;
+                let dx = (current.x - start.x).round() as i32;
+                let dy = (current.y - start.y).round() as i32;
+                let originals = originals.clone();
+                if let Some(map) = self.map.as_mut() {
+                    let map = Arc::make_mut(map);
+                    for &(id, ox, oy) in &originals {
+                        if let Some(t) = map.things.get_mut(id) {
+                            t.x = ox.saturating_add(dx);
+                            t.y = oy.saturating_add(dy);
+                        }
+                    }
+                }
+            }
             None => {}
         }
     }
@@ -627,7 +787,6 @@ impl App {
                         .collect();
                     self.undo.push(Command::MoveVertices(moves));
                 } else {
-                    // Zero-length drag: revert any in-flight changes.
                     if let Some(map) = self.map.as_mut() {
                         let map = Arc::make_mut(map);
                         for &(id, ox, oy) in &originals {
@@ -640,34 +799,81 @@ impl App {
                 }
                 self.rebuild_geometry_indices();
             }
+            Some(DragMode::MoveThings { originals }) => {
+                let dx = (end.x - start.x).round() as i32;
+                let dy = (end.y - start.y).round() as i32;
+                if dx != 0 || dy != 0 {
+                    let moves: Vec<ThingMove> = originals
+                        .iter()
+                        .map(|&(id, _, _)| ThingMove { id, dx, dy })
+                        .collect();
+                    self.undo.push(Command::MoveThings(moves));
+                } else if let Some(map) = self.map.as_mut() {
+                    let map = Arc::make_mut(map);
+                    for &(id, ox, oy) in &originals {
+                        if let Some(t) = map.things.get_mut(id) {
+                            t.x = ox;
+                            t.y = oy;
+                        }
+                    }
+                }
+                self.rebuild_geometry_indices();
+            }
             None => {}
         }
     }
 
     fn begin_drag(&mut self, hit: Option<HighlightKind>, _start: Vec2) -> DragMode {
-        // If we pressed on a draggable element, switch the selection to it (or
-        // include it via shift) and start a vertex-translate drag.
-        let promote = match hit {
-            Some(HighlightKind::Vertex(_)) | Some(HighlightKind::Linedef(_)) => true,
-            _ => false,
-        };
-        if promote {
-            let h = hit.unwrap();
-            if self.modifiers.shift() {
-                let mut sel = (*self.selection).clone();
-                sel.insert(h);
-                self.selection = Arc::new(sel);
-            } else if !self.selection.contains(&h) {
-                let mut sel = HashSet::new();
-                sel.insert(h);
-                self.selection = Arc::new(sel);
+        match hit {
+            Some(h @ HighlightKind::Thing(_)) => {
+                // Promote to selection (replace or shift-add) before dragging.
+                if self.modifiers.shift() {
+                    let mut sel = (*self.selection).clone();
+                    sel.insert(h);
+                    self.selection = Arc::new(sel);
+                } else if !self.selection.contains(&h) {
+                    let mut sel = HashSet::new();
+                    sel.insert(h);
+                    self.selection = Arc::new(sel);
+                }
+                let originals = self.collect_drag_things();
+                if !originals.is_empty() {
+                    return DragMode::MoveThings { originals };
+                }
+                DragMode::Rect
             }
-            let originals = self.collect_drag_vertices();
-            if !originals.is_empty() {
-                return DragMode::MoveVertices { originals };
+            Some(h @ (HighlightKind::Vertex(_) | HighlightKind::Linedef(_))) => {
+                if self.modifiers.shift() {
+                    let mut sel = (*self.selection).clone();
+                    sel.insert(h);
+                    self.selection = Arc::new(sel);
+                } else if !self.selection.contains(&h) {
+                    let mut sel = HashSet::new();
+                    sel.insert(h);
+                    self.selection = Arc::new(sel);
+                }
+                let originals = self.collect_drag_vertices();
+                if !originals.is_empty() {
+                    return DragMode::MoveVertices { originals };
+                }
+                DragMode::Rect
             }
+            _ => DragMode::Rect,
         }
-        DragMode::Rect
+    }
+
+    fn collect_drag_things(&self) -> Vec<(ThingId, i32, i32)> {
+        let map = match &self.map {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        self.selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Thing(id) => map.things.get(*id).map(|t| (*id, t.x, t.y)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Vertices that should move with the current selection (vertex selections
@@ -699,17 +905,32 @@ impl App {
 
     fn cancel_active_drag(&mut self) {
         let mode = self.active_drag.take();
-        if let Some(DragMode::MoveVertices { originals }) = mode {
-            if let Some(map) = self.map.as_mut() {
-                let map = Arc::make_mut(map);
-                for &(id, ox, oy) in &originals {
-                    if let Some(v) = map.vertices.get_mut(id) {
-                        v.x = ox;
-                        v.y = oy;
+        match mode {
+            Some(DragMode::MoveVertices { originals }) => {
+                if let Some(map) = self.map.as_mut() {
+                    let map = Arc::make_mut(map);
+                    for &(id, ox, oy) in &originals {
+                        if let Some(v) = map.vertices.get_mut(id) {
+                            v.x = ox;
+                            v.y = oy;
+                        }
                     }
                 }
+                self.rebuild_geometry_indices();
             }
-            self.rebuild_geometry_indices();
+            Some(DragMode::MoveThings { originals }) => {
+                if let Some(map) = self.map.as_mut() {
+                    let map = Arc::make_mut(map);
+                    for &(id, ox, oy) in &originals {
+                        if let Some(t) = map.things.get_mut(id) {
+                            t.x = ox;
+                            t.y = oy;
+                        }
+                    }
+                }
+                self.rebuild_geometry_indices();
+            }
+            _ => {}
         }
         self.drag_rect = None;
     }
@@ -782,8 +1003,8 @@ impl App {
         }
         layout = layout.push(self.status_bar());
         let main: Element<'_, Message> = layout.into();
-        if self.texture_picker.is_some() {
-            stack![main, self.texture_picker_modal()].into()
+        if self.active_picker.is_some() {
+            stack![main, self.picker_modal()].into()
         } else {
             main
         }
@@ -995,16 +1216,23 @@ impl App {
         .into()
     }
 
-    fn texture_picker_modal(&self) -> Element<'_, Message> {
+    fn picker_modal(&self) -> Element<'_, Message> {
         let backdrop = mouse_area(
             container(Space::new().width(Length::Fill).height(Length::Fill))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .style(modal_backdrop_style),
         )
-        .on_press(Message::CloseTexturePicker);
+        .on_press(Message::ClosePicker);
 
-        let panel = container(self.texture_picker_panel())
+        let body: Element<'_, Message> = match self.active_picker {
+            Some(ActivePicker::Texture(_)) => self.texture_picker_panel(),
+            Some(ActivePicker::Action(_)) => self.action_picker_panel(),
+            Some(ActivePicker::ThingKind(_)) => self.thing_kind_picker_panel(),
+            None => Space::new().into(),
+        };
+
+        let panel = container(body)
             .width(Length::Fixed(760.0))
             .height(Length::Fixed(560.0))
             .style(modal_panel_style);
@@ -1022,17 +1250,17 @@ impl App {
         let title_row = row![
             text("Pick a texture").size(18),
             Space::new().width(Length::Fill),
-            button("Close").on_press(Message::CloseTexturePicker),
+            button("Close").on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
 
-        let search = text_input("Filter…", &self.texture_filter)
-            .on_input(Message::TextureFilterChanged)
+        let search = text_input("Filter…", &self.picker_filter)
+            .on_input(Message::PickerFilterChanged)
             .padding(6)
             .width(Length::Fill);
 
-        let q = self.texture_filter.to_ascii_uppercase();
+        let q = self.picker_filter.to_ascii_uppercase();
         let filtered: Vec<&String> = self
             .sorted_texture_names
             .iter()
@@ -1108,6 +1336,194 @@ impl App {
             .into()
     }
 
+    fn action_picker_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Pick a linedef action").size(18),
+            Space::new().width(Length::Fill),
+            button("Close").on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let search = text_input("Filter\u{2026}", &self.picker_filter)
+            .on_input(Message::PickerFilterChanged)
+            .padding(6)
+            .width(Length::Fill);
+
+        let q = self.picker_filter.to_ascii_lowercase();
+        let mut entries: Vec<&doombuilder_core::config::LinedefSpecial> =
+            self.config.linedef_specials.iter().collect();
+        entries.sort_by_key(|e| e.id);
+        let filtered: Vec<&doombuilder_core::config::LinedefSpecial> = entries
+            .into_iter()
+            .filter(|e| {
+                if q.is_empty() {
+                    return true;
+                }
+                e.title.to_ascii_lowercase().contains(&q)
+                    || e.category.to_ascii_lowercase().contains(&q)
+                    || e.id.to_string().contains(&q)
+            })
+            .collect();
+
+        let count_text = text(format!(
+            "{} of {} actions",
+            filtered.len(),
+            self.config.linedef_specials.len()
+        ))
+        .size(12);
+
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        let mut last_category: Option<&str> = None;
+        for entry in &filtered {
+            if last_category.map(|c| c != entry.category.as_str()).unwrap_or(true)
+                && !entry.category.is_empty()
+            {
+                last_category = Some(entry.category.as_str());
+                rows.push(
+                    text(entry.category.to_string())
+                        .size(13)
+                        .color(Color::from_rgb(0.7, 0.85, 1.0))
+                        .into(),
+                );
+            }
+            let label = if entry.prefix.is_empty() {
+                format!("{:>4} - {}", entry.id, entry.title)
+            } else {
+                format!("{:>4} - {} {}", entry.id, entry.prefix, entry.title)
+            };
+            let row_btn = button(text(label).size(13))
+                .padding(4)
+                .style(button::text)
+                .on_press(Message::PickAction(entry.id))
+                .width(Length::Fill);
+            rows.push(row_btn.into());
+        }
+
+        let list: Element<'_, Message> = if rows.is_empty() {
+            container(text("No actions match.").size(13))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
+        } else {
+            scrollable(column(rows).spacing(2).padding(4))
+                .height(Length::Fill)
+                .into()
+        };
+
+        column![title_row, search, count_text, list]
+            .spacing(8)
+            .padding(12)
+            .into()
+    }
+
+    fn thing_kind_picker_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Pick a thing type").size(18),
+            Space::new().width(Length::Fill),
+            button("Close").on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let search = text_input("Filter\u{2026}", &self.picker_filter)
+            .on_input(Message::PickerFilterChanged)
+            .padding(6)
+            .width(Length::Fill);
+
+        let q = self.picker_filter.to_ascii_lowercase();
+        let mut entries: Vec<&doombuilder_core::config::ThingType> =
+            self.config.thing_types.iter().collect();
+        entries.sort_by_key(|e| e.id);
+        let filtered: Vec<&doombuilder_core::config::ThingType> = entries
+            .into_iter()
+            .filter(|e| {
+                if q.is_empty() {
+                    return true;
+                }
+                e.title.to_ascii_lowercase().contains(&q)
+                    || e.category.to_ascii_lowercase().contains(&q)
+                    || e.id.to_string().contains(&q)
+            })
+            .collect();
+
+        let count_text = text(format!(
+            "{} of {} things",
+            filtered.len(),
+            self.config.thing_types.len()
+        ))
+        .size(12);
+
+        const COLS: usize = 5;
+        const TILE: f32 = 96.0;
+
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        let mut current_row: Vec<Element<'_, Message>> = Vec::with_capacity(COLS);
+        for entry in &filtered {
+            let preview: Element<'_, Message> = match find_sprite_handle(
+                &self.config,
+                &self.sprite_handles,
+                entry.id,
+            ) {
+                Some(handle) => container(
+                    image(handle.clone())
+                        .width(Length::Fixed(TILE))
+                        .height(Length::Fixed(TILE)),
+                )
+                .width(Length::Fixed(TILE))
+                .height(Length::Fixed(TILE))
+                .center_x(Length::Fixed(TILE))
+                .center_y(Length::Fixed(TILE))
+                .style(texture_slot_style)
+                .into(),
+                None => container(text(format!("kind {}", entry.id)).size(11))
+                    .width(Length::Fixed(TILE))
+                    .height(Length::Fixed(TILE))
+                    .center_x(Length::Fixed(TILE))
+                    .center_y(Length::Fixed(TILE))
+                    .style(texture_slot_style)
+                    .into(),
+            };
+            let label = format!("{} - {}", entry.id, entry.title);
+            let tile = column![preview, text(label).size(10)]
+                .spacing(2)
+                .align_x(iced::Alignment::Center);
+            let pickable: Element<'_, Message> = button(tile)
+                .padding(2)
+                .style(button::text)
+                .on_press(Message::PickThingKind(entry.id))
+                .into();
+            current_row.push(pickable);
+            if current_row.len() == COLS {
+                let r = std::mem::replace(&mut current_row, Vec::with_capacity(COLS));
+                rows.push(row(r).spacing(8).into());
+            }
+        }
+        if !current_row.is_empty() {
+            rows.push(row(current_row).spacing(8).into());
+        }
+
+        let grid: Element<'_, Message> = if rows.is_empty() {
+            container(text("No types match.").size(13))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
+        } else {
+            scrollable(column(rows).spacing(8).padding(8))
+                .height(Length::Fill)
+                .into()
+        };
+
+        column![title_row, search, count_text, grid]
+            .spacing(8)
+            .padding(12)
+            .into()
+    }
+
     fn view3d_widget(&self) -> Element<'_, Message> {
         let textures = match &self.textures {
             Some(t) => t.clone(),
@@ -1178,7 +1594,12 @@ fn selection_details<'a>(
                     Some(s) => format!("{} - {}", l.special, s.title),
                     None => format!("{} - (unknown)", l.special),
                 };
-                col = col.push(text(format!("Action:  {action_label}")));
+                col = col.push(
+                    button(text(format!("Action:  {action_label}")))
+                        .padding(0)
+                        .style(button::text)
+                        .on_press(Message::OpenActionPicker(id)),
+                );
                 col = col.push(text(format!("Length:  {length:.0}")));
                 col = col.push(text(format!("Tag:     {}", l.tag)));
                 col = col.push(text(format!(
@@ -1213,7 +1634,12 @@ fn selection_details<'a>(
                     Some(tt) => format!("{} - {}", t.kind, tt.title),
                     None => format!("{} - (unknown)", t.kind),
                 };
-                col = col.push(text(format!("Type:    {name}")));
+                col = col.push(
+                    button(text(format!("Type:    {name}")))
+                        .padding(0)
+                        .style(button::text)
+                        .on_press(Message::OpenThingKindPicker(id)),
+                );
                 col = col.push(text(format!("X:       {}", t.x)));
                 col = col.push(text(format!("Y:       {}", t.y)));
                 col = col.push(text(format!("Angle:   {}\u{00B0}", t.angle)));
@@ -1491,6 +1917,8 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Redo"),
     MenuItem("Select All"),
     MenuItem("Clear Selection"),
+    MenuItem("Delete Selection"),
+    MenuItem("Insert Thing"),
 ];
 const VIEW_MENU_ITEMS: &[MenuItem] = &[MenuItem("2D Mode"), MenuItem("3D Mode")];
 const TOOLS_MENU_ITEMS: &[MenuItem] = &[MenuItem("Map Statistics (n/a)")];
@@ -1511,6 +1939,8 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Redo" => Message::Redo,
         "Select All" => Message::SelectAll,
         "Clear Selection" => Message::KeyboardEsc,
+        "Delete Selection" => Message::DeleteSelection,
+        "Insert Thing" => Message::InsertThing,
         _ => Message::Noop,
     }
 }

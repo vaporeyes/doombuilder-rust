@@ -2,11 +2,18 @@
 // ABOUTME: can be applied or reverted in O(k) where k is the number of elements
 // ABOUTME: touched. Snapshot-of-Map is intentionally avoided to keep undo cheap.
 
-use crate::map::{Map, SectorId, SidedefId, TextureName, VertexId};
+use crate::map::{Map, MapThing, SectorId, SidedefId, TextureName, ThingId, VertexId, LinedefId};
 
 #[derive(Debug, Clone)]
 pub struct VertexMove {
     pub id: VertexId,
+    pub dx: i32,
+    pub dy: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThingMove {
+    pub id: ThingId,
     pub dx: i32,
     pub dy: i32,
 }
@@ -28,6 +35,8 @@ pub enum SectorSlot {
 pub enum Command {
     /// Translate one or more vertices by the given per-vertex deltas.
     MoveVertices(Vec<VertexMove>),
+    /// Translate one or more things by the given per-thing deltas.
+    MoveThings(Vec<ThingMove>),
     /// Replace one of a sidedef's three texture slot names.
     SetSidedefTexture {
         id: SidedefId,
@@ -42,16 +51,50 @@ pub enum Command {
         old: TextureName,
         new: TextureName,
     },
+    /// Insert a new thing. `id` tracks the slotmap key for redo cycles; it is
+    /// `Some` while the thing exists in the map and `None` after the create
+    /// has been undone.
+    CreateThing {
+        id: Option<ThingId>,
+        snapshot: MapThing,
+    },
+    /// Remove one or more things. Stores snapshots for re-insertion on undo;
+    /// `current_ids` holds the ids of currently-inserted snapshots (empty
+    /// after the delete has been applied).
+    DeleteThings {
+        snapshots: Vec<MapThing>,
+        current_ids: Vec<ThingId>,
+    },
+    /// Change a linedef's action (special) value.
+    SetLinedefSpecial {
+        id: LinedefId,
+        old: u16,
+        new: u16,
+    },
+    /// Change a thing's kind (type id).
+    SetThingKind {
+        id: ThingId,
+        old: u16,
+        new: u16,
+    },
 }
 
 impl Command {
-    pub fn apply(&self, map: &mut Map) {
+    pub fn apply(&mut self, map: &mut Map) {
         match self {
             Command::MoveVertices(moves) => {
-                for m in moves {
+                for m in moves.iter() {
                     if let Some(v) = map.vertices.get_mut(m.id) {
                         v.x = v.x.saturating_add(m.dx);
                         v.y = v.y.saturating_add(m.dy);
+                    }
+                }
+            }
+            Command::MoveThings(moves) => {
+                for m in moves.iter() {
+                    if let Some(t) = map.things.get_mut(m.id) {
+                        t.x = t.x.saturating_add(m.dx);
+                        t.y = t.y.saturating_add(m.dy);
                     }
                 }
             }
@@ -65,16 +108,47 @@ impl Command {
                     write_sector_slot(sec, *slot, *new);
                 }
             }
+            Command::CreateThing { id, snapshot } => {
+                if id.is_none() {
+                    *id = Some(map.things.insert(snapshot.clone()));
+                }
+            }
+            Command::DeleteThings {
+                snapshots: _,
+                current_ids,
+            } => {
+                for tid in current_ids.drain(..) {
+                    map.things.remove(tid);
+                }
+            }
+            Command::SetLinedefSpecial { id, new, .. } => {
+                if let Some(line) = map.linedefs.get_mut(*id) {
+                    line.special = *new;
+                }
+            }
+            Command::SetThingKind { id, new, .. } => {
+                if let Some(t) = map.things.get_mut(*id) {
+                    t.kind = *new;
+                }
+            }
         }
     }
 
-    pub fn revert(&self, map: &mut Map) {
+    pub fn revert(&mut self, map: &mut Map) {
         match self {
             Command::MoveVertices(moves) => {
-                for m in moves {
+                for m in moves.iter() {
                     if let Some(v) = map.vertices.get_mut(m.id) {
                         v.x = v.x.saturating_sub(m.dx);
                         v.y = v.y.saturating_sub(m.dy);
+                    }
+                }
+            }
+            Command::MoveThings(moves) => {
+                for m in moves.iter() {
+                    if let Some(t) = map.things.get_mut(m.id) {
+                        t.x = t.x.saturating_sub(m.dx);
+                        t.y = t.y.saturating_sub(m.dy);
                     }
                 }
             }
@@ -86,6 +160,31 @@ impl Command {
             Command::SetSectorTexture { id, slot, old, .. } => {
                 if let Some(sec) = map.sectors.get_mut(*id) {
                     write_sector_slot(sec, *slot, *old);
+                }
+            }
+            Command::CreateThing { id, .. } => {
+                if let Some(tid) = id.take() {
+                    map.things.remove(tid);
+                }
+            }
+            Command::DeleteThings {
+                snapshots,
+                current_ids,
+            } => {
+                current_ids.clear();
+                for snap in snapshots.iter() {
+                    let tid = map.things.insert(snap.clone());
+                    current_ids.push(tid);
+                }
+            }
+            Command::SetLinedefSpecial { id, old, .. } => {
+                if let Some(line) = map.linedefs.get_mut(*id) {
+                    line.special = *old;
+                }
+            }
+            Command::SetThingKind { id, old, .. } => {
+                if let Some(t) = map.things.get_mut(*id) {
+                    t.kind = *old;
                 }
             }
         }
@@ -134,7 +233,7 @@ impl UndoStack {
 
     pub fn undo(&mut self, map: &mut Map) -> bool {
         match self.past.pop() {
-            Some(cmd) => {
+            Some(mut cmd) => {
                 cmd.revert(map);
                 self.future.push(cmd);
                 true
@@ -145,7 +244,7 @@ impl UndoStack {
 
     pub fn redo(&mut self, map: &mut Map) -> bool {
         match self.future.pop() {
-            Some(cmd) => {
+            Some(mut cmd) => {
                 cmd.apply(map);
                 self.past.push(cmd);
                 true
@@ -175,7 +274,7 @@ mod tests {
     #[test]
     fn apply_then_revert_round_trips() {
         let (mut map, id) = map_with_vertex();
-        let cmd = Command::MoveVertices(vec![VertexMove { id, dx: 5, dy: -3 }]);
+        let mut cmd = Command::MoveVertices(vec![VertexMove { id, dx: 5, dy: -3 }]);
         cmd.apply(&mut map);
         assert_eq!(map.vertices[id].x, 15);
         assert_eq!(map.vertices[id].y, 17);
@@ -188,7 +287,7 @@ mod tests {
     fn undo_redo_chain() {
         let (mut map, id) = map_with_vertex();
         let mut stack = UndoStack::new();
-        let cmd = Command::MoveVertices(vec![VertexMove { id, dx: 5, dy: 0 }]);
+        let mut cmd = Command::MoveVertices(vec![VertexMove { id, dx: 5, dy: 0 }]);
         cmd.apply(&mut map);
         stack.push(cmd);
         assert_eq!(map.vertices[id].x, 15);
@@ -207,13 +306,13 @@ mod tests {
     fn push_clears_redo_branch() {
         let (mut map, id) = map_with_vertex();
         let mut stack = UndoStack::new();
-        let cmd_a = Command::MoveVertices(vec![VertexMove { id, dx: 5, dy: 0 }]);
+        let mut cmd_a = Command::MoveVertices(vec![VertexMove { id, dx: 5, dy: 0 }]);
         cmd_a.apply(&mut map);
         stack.push(cmd_a);
         stack.undo(&mut map);
         assert!(stack.can_redo());
 
-        let cmd_b = Command::MoveVertices(vec![VertexMove { id, dx: 0, dy: 7 }]);
+        let mut cmd_b = Command::MoveVertices(vec![VertexMove { id, dx: 0, dy: 7 }]);
         cmd_b.apply(&mut map);
         stack.push(cmd_b);
         assert!(!stack.can_redo());
