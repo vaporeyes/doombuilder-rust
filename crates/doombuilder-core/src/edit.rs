@@ -93,6 +93,9 @@ pub enum Command {
     /// Create a sector + per-linedef sidedef facing inward. Built from a
     /// closed loop of pre-existing linedefs that have no sides yet.
     MakeSector(Box<MakeSectorState>),
+    /// Insert a midpoint vertex into one or more linedefs and split each into
+    /// two. Sidedefs are cloned so both halves retain the same sectors.
+    SplitLinedefs(Box<SplitLinedefsState>),
     /// Change one of a sector's integer fields.
     SetSectorIntField {
         id: SectorId,
@@ -120,6 +123,56 @@ pub enum Command {
 pub enum SidedefSide {
     Right,
     Left,
+}
+
+#[derive(Debug, Clone)]
+pub struct SplitLine {
+    pub line: LinedefId,
+    /// v2 of the line before splitting; the split point becomes the new v2.
+    pub original_v2: VertexId,
+    pub new_v: Option<VertexId>,
+    pub new_line: Option<LinedefId>,
+    pub new_right: Option<SidedefId>,
+    pub new_left: Option<SidedefId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SplitLinedefsState {
+    pub splits: Vec<SplitLine>,
+}
+
+#[derive(Debug)]
+pub enum SplitError {
+    NoLines,
+    LineMissing,
+    VertexMissing,
+}
+
+/// Build a [`SplitLinedefsState`] for the given linedefs. Doesn't mutate the
+/// map; caller wraps in `Command::SplitLinedefs` and applies it.
+pub fn compute_split_lines(
+    map: &Map,
+    line_ids: &[LinedefId],
+) -> Result<SplitLinedefsState, SplitError> {
+    if line_ids.is_empty() {
+        return Err(SplitError::NoLines);
+    }
+    let mut splits = Vec::with_capacity(line_ids.len());
+    for lid in line_ids {
+        let line = map.linedefs.get(*lid).ok_or(SplitError::LineMissing)?;
+        if !map.vertices.contains_key(line.v1) || !map.vertices.contains_key(line.v2) {
+            return Err(SplitError::VertexMissing);
+        }
+        splits.push(SplitLine {
+            line: *lid,
+            original_v2: line.v2,
+            new_v: None,
+            new_line: None,
+            new_right: None,
+            new_left: None,
+        });
+    }
+    Ok(SplitLinedefsState { splits })
 }
 
 #[derive(Debug)]
@@ -491,6 +544,58 @@ impl Command {
                     map.vertices.remove(id);
                 }
             }
+            Command::SplitLinedefs(state) => {
+                for split in &mut state.splits {
+                    let Some(orig) = map.linedefs.get(split.line).cloned() else {
+                        continue;
+                    };
+                    let v1 = match map.vertices.get(orig.v1) {
+                        Some(v) => *v,
+                        None => continue,
+                    };
+                    let v2 = match map.vertices.get(split.original_v2) {
+                        Some(v) => *v,
+                        None => continue,
+                    };
+                    let mid = MapVertex {
+                        x: (v1.x + v2.x) / 2,
+                        y: (v1.y + v2.y) / 2,
+                    };
+                    let mid_id = map.vertices.insert(mid);
+                    split.new_v = Some(mid_id);
+
+                    // Clone sidedefs (each half keeps its own per-line offsets).
+                    let new_right = orig.right.and_then(|sid| {
+                        let s = map.sidedefs.get(sid)?.clone();
+                        Some(map.sidedefs.insert(s))
+                    });
+                    let new_left = orig.left.and_then(|sid| {
+                        let s = map.sidedefs.get(sid)?.clone();
+                        Some(map.sidedefs.insert(s))
+                    });
+                    split.new_right = new_right;
+                    split.new_left = new_left;
+
+                    let new_line = MapLinedef {
+                        v1: mid_id,
+                        v2: split.original_v2,
+                        flags: orig.flags,
+                        special: orig.special,
+                        args: orig.args,
+                        tag: orig.tag,
+                        right: new_right,
+                        left: new_left,
+                    };
+                    let new_lid = map.linedefs.insert(new_line);
+                    split.new_line = Some(new_lid);
+
+                    // Truncate the original.
+                    if let Some(line) = map.linedefs.get_mut(split.line) {
+                        line.v2 = mid_id;
+                    }
+                }
+                map.rebuild_sidedef_index();
+            }
             Command::MakeSector(state) => {
                 let new_sec = map.sectors.insert(state.sector_template.clone());
                 state.current_sec = Some(new_sec);
@@ -626,6 +731,26 @@ impl Command {
                 }
                 if let Some(sec) = state.current_sec.take() {
                     map.sectors.remove(sec);
+                }
+                map.rebuild_sidedef_index();
+            }
+            Command::SplitLinedefs(state) => {
+                for split in state.splits.iter_mut().rev() {
+                    if let Some(line) = map.linedefs.get_mut(split.line) {
+                        line.v2 = split.original_v2;
+                    }
+                    if let Some(lid) = split.new_line.take() {
+                        map.linedefs.remove(lid);
+                    }
+                    if let Some(sid) = split.new_right.take() {
+                        map.sidedefs.remove(sid);
+                    }
+                    if let Some(sid) = split.new_left.take() {
+                        map.sidedefs.remove(sid);
+                    }
+                    if let Some(vid) = split.new_v.take() {
+                        map.vertices.remove(vid);
+                    }
                 }
                 map.rebuild_sidedef_index();
             }
@@ -836,6 +961,66 @@ mod tests {
         assert!(stack.redo(&mut map));
         assert_eq!(map.vertices[id].x, 15);
         assert!(!stack.can_redo());
+    }
+
+    #[test]
+    fn split_linedef_inserts_midpoint_and_clones_sidedefs() {
+        use crate::map::{MapLinedef, MapSidedef, MapVertex, TextureName};
+        let mut map = Map::new("T", MapFormat::Doom);
+        let v0 = map.vertices.insert(MapVertex { x: 0, y: 0 });
+        let v1 = map.vertices.insert(MapVertex { x: 64, y: 0 });
+        let sec = map.sectors.insert(crate::map::MapSector {
+            floor_height: 0,
+            ceiling_height: 128,
+            floor_texture: TextureName([0; 8]),
+            ceiling_texture: TextureName([0; 8]),
+            light: 192,
+            special: 0,
+            tag: 0,
+            sidedefs: Vec::new(),
+        });
+        let s0 = map.sidedefs.insert(MapSidedef {
+            sector: sec,
+            x_offset: 0,
+            y_offset: 0,
+            upper_texture: TextureName([0; 8]),
+            lower_texture: TextureName([0; 8]),
+            middle_texture: TextureName(*b"WALL\0\0\0\0"),
+        });
+        let line = map.linedefs.insert(MapLinedef {
+            v1: v0,
+            v2: v1,
+            flags: 1,
+            special: 26,
+            args: [0; 5],
+            tag: 7,
+            right: Some(s0),
+            left: None,
+        });
+
+        let state = compute_split_lines(&map, &[line]).expect("state");
+        let mut cmd = Command::SplitLinedefs(Box::new(state));
+        cmd.apply(&mut map);
+
+        assert_eq!(map.vertices.len(), 3, "midpoint inserted");
+        assert_eq!(map.linedefs.len(), 2, "two halves");
+        assert_eq!(map.sidedefs.len(), 2, "right sidedef cloned");
+
+        // Both halves carry the original line's flags/special/tag.
+        for (_, l) in &map.linedefs {
+            assert_eq!(l.flags, 1);
+            assert_eq!(l.special, 26);
+            assert_eq!(l.tag, 7);
+            assert!(l.right.is_some(), "right preserved on both halves");
+            assert!(l.left.is_none());
+        }
+
+        cmd.revert(&mut map);
+        assert_eq!(map.vertices.len(), 2, "midpoint removed on undo");
+        assert_eq!(map.linedefs.len(), 1, "back to one line");
+        assert_eq!(map.sidedefs.len(), 1, "cloned sidedef removed");
+        let (_, l) = map.linedefs.iter().next().unwrap();
+        assert_eq!(l.v2, v1, "v2 restored to original");
     }
 
     #[test]

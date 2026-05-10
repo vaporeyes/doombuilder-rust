@@ -34,6 +34,12 @@ pub const TEXTURES: &str = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0
 
 pub const SETTINGS_GEAR: &str = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='2.5' fill='none' stroke='black' stroke-width='1.2'/><circle cx='8' cy='8' r='5' fill='none' stroke='black' stroke-width='1.2' stroke-dasharray='2 1.5'/></svg>"#;
 
+pub const UNDO: &str = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3 7 h7 a3 3 0 0 1 0 6 h-2' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round'/><polyline points='6,4 3,7 6,10' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/></svg>"#;
+
+pub const REDO: &str = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M13 7 h-7 a3 3 0 0 0 0 6 h2' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round'/><polyline points='10,4 13,7 10,10' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/></svg>"#;
+
+pub const SPLIT_LINE: &str = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='2' y1='13' x2='6' y2='8' stroke='black' stroke-width='1.6' stroke-linecap='round'/><line x1='10' y1='8' x2='14' y2='3' stroke='black' stroke-width='1.6' stroke-linecap='round'/><circle cx='8' cy='8' r='2' fill='black'/></svg>"#;
+
 fn handle(s: &'static str) -> Handle {
     Handle::from_memory(s.as_bytes().to_vec())
 }
@@ -53,7 +59,7 @@ pub fn icon_btn<'a, Msg: 'a + Clone + 'static>(
     pressed: bool,
 ) -> Element<'a, Msg> {
     let btn = button(icon_glyph(svg_str))
-        .padding(5)
+        .padding(2)
         .style(style::win32_toggle_button(pressed))
         .on_press(msg);
     wrap_tooltip(btn.into(), tip)
@@ -66,7 +72,7 @@ pub fn icon_cmd_btn<'a, Msg: 'a + Clone + 'static>(
     msg: Msg,
 ) -> Element<'a, Msg> {
     let btn = button(icon_glyph(svg_str))
-        .padding(5)
+        .padding(2)
         .style(style::win32_standard_button)
         .on_press(msg);
     wrap_tooltip(btn.into(), tip)

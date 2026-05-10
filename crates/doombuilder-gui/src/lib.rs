@@ -15,8 +15,9 @@ use std::sync::Arc;
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::edit::{
-    collect_and_delete, compute_make_sector, Command, LineEndpoint, LinedefChain, LinedefIntField,
-    SectorIntField, SectorSlot, SidedefSlot, ThingIntField, ThingMove, UndoStack, VertexMove,
+    collect_and_delete, compute_make_sector, compute_split_lines, Command, LineEndpoint,
+    LinedefChain, LinedefIntField, SectorIntField, SectorSlot, SidedefSlot, ThingIntField,
+    ThingMove, UndoStack, VertexMove,
 };
 use doombuilder_core::map::LinedefId;
 use doombuilder_core::map::MapThing;
@@ -368,6 +369,7 @@ pub enum Message {
     ToggleDrawing,
     CancelDrawing,
     MakeSector,
+    SplitLines,
     OpenTexturePicker(PickerTarget),
     OpenActionPicker(doombuilder_core::map::LinedefId),
     OpenThingKindPicker(ThingId),
@@ -1128,6 +1130,10 @@ impl App {
                 self.do_make_sector();
                 Task::none()
             }
+            Message::SplitLines => {
+                self.do_split_lines();
+                Task::none()
+            }
             Message::Quit => iced::exit(),
             Message::Noop => Task::none(),
         }
@@ -1484,6 +1490,46 @@ impl App {
             .collect()
     }
 
+    fn do_split_lines(&mut self) {
+        let line_ids: Vec<doombuilder_core::map::LinedefId> = self
+            .selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Linedef(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        if line_ids.is_empty() {
+            self.status = "Split: select one or more linedefs first.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else {
+            return;
+        };
+        match compute_split_lines(map, &line_ids) {
+            Ok(state) => {
+                let mut cmd = Command::SplitLinedefs(Box::new(state));
+                if let Some(map) = self.map.as_mut() {
+                    let map_mut = Arc::make_mut(map);
+                    cmd.apply(map_mut);
+                    self.undo.push(cmd);
+                    self.rebuild_geometry_indices();
+                    self.cache2d.clear();
+                    self.status = format!("Split {} linedef(s).", line_ids.len());
+                }
+            }
+            Err(doombuilder_core::edit::SplitError::NoLines) => {
+                self.status = "Split: no linedefs selected.".into();
+            }
+            Err(doombuilder_core::edit::SplitError::LineMissing) => {
+                self.status = "Split: a selected linedef no longer exists.".into();
+            }
+            Err(doombuilder_core::edit::SplitError::VertexMissing) => {
+                self.status = "Split: a selected linedef references a missing vertex.".into();
+            }
+        }
+    }
+
     fn do_make_sector(&mut self) {
         let line_ids: Vec<doombuilder_core::map::LinedefId> = self
             .selection
@@ -1788,13 +1834,14 @@ impl App {
             icons::icon_cmd_btn(icons::FOLDER_OPEN, "Open WAD\u{2026}", Message::OpenWadRequested),
             icons::icon_cmd_btn(icons::SAVE_DISK, "Save Map As\u{2026}", Message::SaveMapRequested),
             vertical_separator(),
-            text("Map:").size(13),
+            icons::icon_cmd_btn(icons::UNDO, "Undo (\u{2318}Z)", Message::Undo),
+            icons::icon_cmd_btn(icons::REDO, "Redo (\u{2318}\u{21E7}Z)", Message::Redo),
+            vertical_separator(),
             map_picker,
             vertical_separator(),
             icons::icon_btn(icons::VIEW_2D, "2D View", Message::Mode(Mode::View2D), self.mode == Mode::View2D),
             icons::icon_btn(icons::VIEW_3D, "3D View", Message::Mode(Mode::View3D), self.mode == Mode::View3D),
             vertical_separator(),
-            text("Game:").size(13),
             pick_list(
                 GameConfig::builtin_names()
                     .iter()
@@ -1811,11 +1858,12 @@ impl App {
             vertical_separator(),
             icons::icon_btn(icons::DRAW_PEN, "Draw lines (D)", Message::ToggleDrawing, self.drawing.is_some()),
             icons::icon_cmd_btn(icons::MAKE_SECTOR, "Make sector from selected lines (\u{2318}M)", Message::MakeSector),
+            icons::icon_cmd_btn(icons::SPLIT_LINE, "Split selected linedefs at midpoint", Message::SplitLines),
             icons::icon_btn(icons::TEXTURES, "Show sector textures", Message::ToggleTextures, self.settings.show_textures),
             icons::icon_cmd_btn(icons::SETTINGS_GEAR, "Settings\u{2026}", Message::OpenSettings),
         ]
-        .spacing(4)
-        .padding(6)
+        .spacing(2)
+        .padding(4)
         .align_y(iced::Alignment::Center);
 
         container(
@@ -3023,7 +3071,8 @@ fn texture_slot<'a>(
 
 fn vertical_separator() -> Element<'static, Message> {
     container(Space::new().width(Length::Fixed(1.0)))
-        .height(Length::Fixed(20.0))
+        .height(Length::Fixed(22.0))
+        .padding([2, 4])
         .style(separator_style)
         .into()
 }
@@ -3049,6 +3098,7 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Delete Selection"),
     MenuItem("Insert Thing"),
     MenuItem("Make Sector"),
+    MenuItem("Split Linedefs"),
     MenuItem("Toggle Draw Mode"),
 ];
 const VIEW_MENU_ITEMS: &[MenuItem] =
@@ -3074,6 +3124,7 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Delete Selection" => Message::DeleteSelection,
         "Insert Thing" => Message::InsertThing,
         "Make Sector" => Message::MakeSector,
+        "Split Linedefs" => Message::SplitLines,
         "Toggle Draw Mode" => Message::ToggleDrawing,
         _ => Message::Noop,
     }
