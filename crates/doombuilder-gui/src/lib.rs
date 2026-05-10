@@ -15,9 +15,10 @@ use std::sync::Arc;
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::edit::{
-    collect_and_delete, compute_make_sector, compute_split_lines, Command, LineEndpoint,
-    LinedefChain, LinedefIntField, SectorIntField, SectorSlot, SidedefSlot, ThingIntField,
-    ThingMove, UndoStack, VertexMove,
+    collect_and_delete, compute_insert_vertex_on_line, compute_make_sector, compute_split_lines,
+    compute_vertex_merge, Command,
+    LineEndpoint, LinedefChain, LinedefIntField, SectorIntField, SectorSlot, SidedefSlot,
+    ThingIntField, ThingMove, UndoStack, VertexMove,
 };
 use doombuilder_core::map::LinedefId;
 use doombuilder_core::map::MapThing;
@@ -166,7 +167,7 @@ pub enum ActivePicker {
     Settings,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default = "default_true")]
     pub show_textures: bool,
@@ -178,7 +179,36 @@ pub struct Settings {
     pub show_things: bool,
     #[serde(default)]
     pub always_show_vertices: bool,
+    #[serde(default = "default_true")]
+    pub snap_to_grid: bool,
+    /// Fixed grid spacing in map units, or `None` for the zoom-derived
+    /// power-of-two auto step. Cycled by the `G` / `Shift+G` hotkeys.
+    #[serde(default)]
+    pub grid_size: Option<u32>,
+    /// Most-recently opened paths, newest first, capped at MAX_RECENT.
+    #[serde(default)]
+    pub recent_files: Vec<PathBuf>,
+    /// Doom engine binary used by "Test Map" (chocolate-doom, gzdoom, etc.).
+    #[serde(default)]
+    pub engine_path: Option<PathBuf>,
+    /// IWAD passed to the engine alongside the saved test PWAD.
+    #[serde(default)]
+    pub iwad_path: Option<PathBuf>,
 }
+
+/// Fixed grid sizes a user can cycle through (None = auto / zoom-derived).
+const GRID_STEPS: &[Option<u32>] = &[
+    None,
+    Some(8),
+    Some(16),
+    Some(32),
+    Some(64),
+    Some(128),
+    Some(256),
+    Some(512),
+];
+
+const MAX_RECENT: usize = 8;
 
 fn default_true() -> bool {
     true
@@ -192,6 +222,11 @@ impl Default for Settings {
             show_grid: true,
             show_things: true,
             always_show_vertices: false,
+            snap_to_grid: true,
+            grid_size: None,
+            recent_files: Vec::new(),
+            engine_path: None,
+            iwad_path: None,
         }
     }
 }
@@ -216,6 +251,13 @@ impl Settings {
         serde_json::from_str(&text).unwrap_or_default()
     }
 
+    /// Move `path` to the front of `recent_files`, dedupe, and cap at MAX_RECENT.
+    pub fn push_recent(&mut self, path: PathBuf) {
+        self.recent_files.retain(|p| p != &path);
+        self.recent_files.insert(0, path);
+        self.recent_files.truncate(MAX_RECENT);
+    }
+
     pub fn save(&self) -> Result<(), String> {
         let Some(path) = Self::config_path() else {
             return Err("no settings directory available".into());
@@ -236,6 +278,7 @@ pub enum SettingKey {
     ShowGrid,
     ShowThings,
     AlwaysShowVertices,
+    SnapToGrid,
 }
 
 impl SettingKey {
@@ -246,6 +289,7 @@ impl SettingKey {
             SettingKey::ShowGrid => "Show grid",
             SettingKey::ShowThings => "Show things",
             SettingKey::AlwaysShowVertices => "Always show vertex dots",
+            SettingKey::SnapToGrid => "Snap to grid (drawing + vertex drag)",
         }
     }
 
@@ -256,6 +300,7 @@ impl SettingKey {
             SettingKey::ShowGrid => s.show_grid,
             SettingKey::ShowThings => s.show_things,
             SettingKey::AlwaysShowVertices => s.always_show_vertices,
+            SettingKey::SnapToGrid => s.snap_to_grid,
         }
     }
 
@@ -266,6 +311,7 @@ impl SettingKey {
             SettingKey::ShowGrid => s.show_grid = v,
             SettingKey::ShowThings => s.show_things = v,
             SettingKey::AlwaysShowVertices => s.always_show_vertices = v,
+            SettingKey::SnapToGrid => s.snap_to_grid = v,
         }
     }
 }
@@ -344,6 +390,11 @@ impl Default for App {
 #[derive(Debug, Clone)]
 pub enum Message {
     OpenWadRequested,
+    LoadResourcesRequested,
+    OpenRecent(usize),
+    ResourcesFilePicked(Option<PathBuf>),
+    ResourcesLoaded(Result<AssetSummary, String>),
+    NewMap(MapFormat),
     SaveMapRequested,
     SaveMapPathPicked(Option<PathBuf>),
     SaveMapDone(Result<PathBuf, String>),
@@ -368,8 +419,16 @@ pub enum Message {
     InsertThing,
     ToggleDrawing,
     CancelDrawing,
+    CycleGridStep(i32),
+    TestMap,
+    PickEngineRequested,
+    EnginePathPicked(Option<PathBuf>),
+    PickIwadRequested,
+    IwadPathPicked(Option<PathBuf>),
     MakeSector,
     SplitLines,
+    MergeVertices,
+    FlipLines,
     OpenTexturePicker(PickerTarget),
     OpenActionPicker(doombuilder_core::map::LinedefId),
     OpenThingKindPicker(ThingId),
@@ -534,6 +593,53 @@ impl App {
                 self.status = "Choose a WAD, PK3, or zip...".to_string();
                 Task::perform(pick_file(), Message::FilePicked)
             }
+            Message::LoadResourcesRequested => {
+                self.status = "Choose an IWAD/PWAD to load textures + sprites from...".into();
+                Task::perform(pick_file(), Message::ResourcesFilePicked)
+            }
+            Message::OpenRecent(idx) => {
+                let Some(path) = self.settings.recent_files.get(idx).cloned() else {
+                    return Task::none();
+                };
+                self.status = format!("Loading {}...", path.display());
+                Task::perform(load_asset(path), Message::AssetLoaded)
+            }
+            Message::ResourcesFilePicked(None) => {
+                self.status = "Resource load cancelled.".into();
+                Task::none()
+            }
+            Message::ResourcesFilePicked(Some(path)) => {
+                self.status = format!("Loading resources from {}...", path.display());
+                Task::perform(load_asset(path), Message::ResourcesLoaded)
+            }
+            Message::ResourcesLoaded(Ok(asset)) => {
+                self.settings.push_recent(asset.path.clone());
+                self.persist_settings();
+                // Merge textures/sprites only; preserve current map, wad list,
+                // and selection. Lets the user keep a new-map-from-scratch
+                // session and still pick floor/wall textures.
+                let mut sorted: Vec<String> =
+                    asset.texture_handles.keys().cloned().collect();
+                sorted.sort();
+                self.sorted_texture_names = Arc::new(sorted);
+                self.texture_handles = asset.texture_handles;
+                self.sprite_handles = asset.sprite_handles;
+                self.sprite_dims = asset.sprite_dims;
+                self.textures = asset.textures;
+                // Re-rasterise sector fills with the freshly-loaded textures.
+                self.rebuild_sector_fills();
+                self.cache2d.clear();
+                self.status = format!("Loaded resources from {}", asset.path.display());
+                Task::none()
+            }
+            Message::ResourcesLoaded(Err(err)) => {
+                self.status = format!("Resource load failed: {err}");
+                Task::none()
+            }
+            Message::NewMap(format) => {
+                self.do_new_map(format);
+                Task::none()
+            }
             Message::SaveMapRequested => {
                 if self.map.is_none() {
                     self.status = "Open a map before saving.".into();
@@ -575,6 +681,8 @@ impl App {
             }
             Message::AssetLoaded(Ok(asset)) => {
                 self.status = format!("Loaded {}", asset.path.display());
+                self.settings.push_recent(asset.path.clone());
+                self.persist_settings();
                 self.wad_path = Some(asset.path);
                 self.wad = asset.wad;
                 self.textures = asset.textures;
@@ -1126,6 +1234,32 @@ impl App {
                 self.cache2d.clear();
                 Task::none()
             }
+            Message::CycleGridStep(delta) => {
+                self.cycle_grid_step(delta);
+                Task::none()
+            }
+            Message::TestMap => {
+                self.test_map();
+                Task::none()
+            }
+            Message::PickEngineRequested => {
+                Task::perform(pick_executable(), Message::EnginePathPicked)
+            }
+            Message::EnginePathPicked(None) => Task::none(),
+            Message::EnginePathPicked(Some(path)) => {
+                self.settings.engine_path = Some(path.clone());
+                self.persist_settings();
+                self.status = format!("Engine set: {}", path.display());
+                Task::none()
+            }
+            Message::PickIwadRequested => Task::perform(pick_file(), Message::IwadPathPicked),
+            Message::IwadPathPicked(None) => Task::none(),
+            Message::IwadPathPicked(Some(path)) => {
+                self.settings.iwad_path = Some(path.clone());
+                self.persist_settings();
+                self.status = format!("IWAD set: {}", path.display());
+                Task::none()
+            }
             Message::MakeSector => {
                 self.do_make_sector();
                 Task::none()
@@ -1134,9 +1268,61 @@ impl App {
                 self.do_split_lines();
                 Task::none()
             }
+            Message::MergeVertices => {
+                self.do_merge_vertices();
+                Task::none()
+            }
+            Message::FlipLines => {
+                self.do_flip_lines();
+                Task::none()
+            }
             Message::Quit => iced::exit(),
             Message::Noop => Task::none(),
         }
+    }
+
+    /// Discard any loaded map and start a brand-new empty map of the given
+    /// format. The user can save it with any name via Save As (the default
+    /// name is `MAP01`). No WAD context is required; this also clears any
+    /// previously selected map so the inspector starts fresh.
+    fn do_new_map(&mut self, format: MapFormat) {
+        self.reset_map_state();
+        let mut map = doombuilder_core::map::Map::new("MAP01", format);
+        // Auto-insert a Player 1 start at the origin so a freshly saved WAD
+        // loads in an engine without an immediate "no player start" error.
+        // Kind 1 = Player 1 start; flags 7 = easy+medium+hard.
+        map.things.insert(doombuilder_core::map::MapThing {
+            x: 0,
+            y: 0,
+            angle: 0,
+            kind: 1,
+            flags: 7,
+            tid: 0,
+            z: 0,
+            special: 0,
+            args: [0; 5],
+        });
+        self.map_stats = Some(MapStats {
+            name: map.name.clone(),
+            format: map.format,
+            vertices: 0,
+            linedefs: 0,
+            sidedefs: 0,
+            sectors: 0,
+            things: map.things.len(),
+        });
+        self.selected_map = Some(map.name.clone());
+        self.map = Some(Arc::new(map));
+        // Empty derived caches; geometry rebuild will populate them as the
+        // user draws. Frame a 1024-unit window so they have visible grid.
+        self.rebuild_geometry_indices();
+        self.camera2d
+            .frame_aabb(Vec2::new(-512.0, -512.0), Vec2::new(512.0, 512.0), Vec2::new(800.0, 600.0));
+        let label = match format {
+            MapFormat::Doom => "Doom",
+            MapFormat::Hexen => "Hexen",
+        };
+        self.status = format!("New {label}-format map (MAP01). Press D to draw.");
     }
 
     fn reset_map_state(&mut self) {
@@ -1175,6 +1361,9 @@ impl App {
                 keyboard::Key::Character("i") if !modifiers.command() => Message::InsertThing,
                 keyboard::Key::Character("d") if !modifiers.command() => Message::ToggleDrawing,
                 keyboard::Key::Character("m") if modifiers.command() => Message::MakeSector,
+                keyboard::Key::Character("g") if modifiers.shift() => Message::CycleGridStep(-1),
+                keyboard::Key::Character("g") if !modifiers.command() => Message::CycleGridStep(1),
+                keyboard::Key::Named(keyboard::key::Named::F5) => Message::TestMap,
                 keyboard::Key::Character("1") if !modifiers.command() => {
                     Message::SetEditMode(EditMode::Vertices)
                 }
@@ -1249,6 +1438,17 @@ impl App {
                     self.drawing_click(world);
                 } else {
                     let hit = self.hit_test(world);
+                    // Vertex mode + click on empty space near a linedef =>
+                    // insert a vertex on that linedef. Falls through to normal
+                    // selection behavior on any miss.
+                    if hit.is_none()
+                        && self.edit_mode == EditMode::Vertices
+                        && !self.modifiers.shift()
+                    {
+                        if self.try_insert_vertex_on_line(world) {
+                            return;
+                        }
+                    }
                     let additive = self.modifiers.shift();
                     let mut sel: HashSet<HighlightKind> = (*self.selection).clone();
                     match (hit, additive) {
@@ -1276,6 +1476,47 @@ impl App {
         }
     }
 
+    /// Active grid spacing in world units: respects the fixed-size override
+    /// in settings, falling back to the camera's zoom-derived auto step.
+    fn effective_grid_step(&self) -> f32 {
+        match self.settings.grid_size {
+            Some(n) if n > 0 => n as f32,
+            _ => self.camera2d.grid_step(),
+        }
+    }
+
+    /// Cycle the fixed grid size by `delta` positions through `GRID_STEPS`.
+    fn cycle_grid_step(&mut self, delta: i32) {
+        let current = GRID_STEPS
+            .iter()
+            .position(|s| *s == self.settings.grid_size)
+            .unwrap_or(0);
+        let n = GRID_STEPS.len() as i32;
+        let idx = ((current as i32 + delta).rem_euclid(n)) as usize;
+        self.settings.grid_size = GRID_STEPS[idx];
+        self.persist_settings();
+        self.cache2d.clear();
+        self.status = match self.settings.grid_size {
+            Some(n) => format!("Grid: {n} map units"),
+            None => "Grid: auto (follows zoom)".into(),
+        };
+    }
+
+    /// Snap a drag delta to the current grid step when grid snapping is on.
+    /// Returns the integer (dx, dy) to apply to original vertex positions.
+    fn snap_drag_delta(&self, start: Vec2, current: Vec2) -> (i32, i32) {
+        let raw_dx = current.x - start.x;
+        let raw_dy = current.y - start.y;
+        if self.settings.snap_to_grid {
+            let step = self.effective_grid_step().max(1.0);
+            let dx = (raw_dx / step).round() * step;
+            let dy = (raw_dy / step).round() * step;
+            (dx.round() as i32, dy.round() as i32)
+        } else {
+            (raw_dx.round() as i32, raw_dy.round() as i32)
+        }
+    }
+
     fn handle_drag_moved(&mut self, start: Vec2, current: Vec2) {
         // First DragMoved decides the drag mode based on what the press hit.
         if self.active_drag.is_none() {
@@ -1290,8 +1531,7 @@ impl App {
             }
             Some(DragMode::MoveVertices { originals }) => {
                 self.hover = None;
-                let dx = (current.x - start.x).round() as i32;
-                let dy = (current.y - start.y).round() as i32;
+                let (dx, dy) = self.snap_drag_delta(start, current);
                 let originals = originals.clone();
                 if let Some(map) = self.map.as_mut() {
                     let map = Arc::make_mut(map);
@@ -1307,8 +1547,7 @@ impl App {
             }
             Some(DragMode::MoveThings { originals }) => {
                 self.hover = None;
-                let dx = (current.x - start.x).round() as i32;
-                let dy = (current.y - start.y).round() as i32;
+                let (dx, dy) = self.snap_drag_delta(start, current);
                 let originals = originals.clone();
                 if let Some(map) = self.map.as_mut() {
                     let map = Arc::make_mut(map);
@@ -1365,8 +1604,7 @@ impl App {
                 }
             }
             Some(DragMode::MoveVertices { originals }) => {
-                let dx = (end.x - start.x).round() as i32;
-                let dy = (end.y - start.y).round() as i32;
+                let (dx, dy) = self.snap_drag_delta(start, end);
                 if dx != 0 || dy != 0 {
                     let moves: Vec<VertexMove> = originals
                         .iter()
@@ -1387,8 +1625,7 @@ impl App {
                 self.rebuild_geometry_indices();
             }
             Some(DragMode::MoveThings { originals }) => {
-                let dx = (end.x - start.x).round() as i32;
-                let dy = (end.y - start.y).round() as i32;
+                let (dx, dy) = self.snap_drag_delta(start, end);
                 if dx != 0 || dy != 0 {
                     let moves: Vec<ThingMove> = originals
                         .iter()
@@ -1490,6 +1727,48 @@ impl App {
             .collect()
     }
 
+    fn do_merge_vertices(&mut self) {
+        let vertex_ids: Vec<doombuilder_core::map::VertexId> = self
+            .selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Vertex(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        if vertex_ids.len() < 2 {
+            self.status = "Merge: select at least two vertices first.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else {
+            return;
+        };
+        match compute_vertex_merge(map, &vertex_ids) {
+            Ok(state) => {
+                let survivor = state.survivor;
+                let mut cmd = Command::MergeVertices(Box::new(state));
+                if let Some(map) = self.map.as_mut() {
+                    let map_mut = Arc::make_mut(map);
+                    cmd.apply(map_mut);
+                    self.undo.push(cmd);
+                    // Selection collapses to just the survivor.
+                    let mut sel = HashSet::new();
+                    sel.insert(HighlightKind::Vertex(survivor));
+                    self.selection = Arc::new(sel);
+                    self.rebuild_geometry_indices();
+                    self.cache2d.clear();
+                    self.status = format!("Merged {} vertices.", vertex_ids.len());
+                }
+            }
+            Err(doombuilder_core::edit::MergeError::NotEnoughVertices) => {
+                self.status = "Merge: select at least two vertices.".into();
+            }
+            Err(doombuilder_core::edit::MergeError::VertexMissing) => {
+                self.status = "Merge: a selected vertex no longer exists.".into();
+            }
+        }
+    }
+
     fn do_split_lines(&mut self) {
         let line_ids: Vec<doombuilder_core::map::LinedefId> = self
             .selection
@@ -1527,6 +1806,67 @@ impl App {
             Err(doombuilder_core::edit::SplitError::VertexMissing) => {
                 self.status = "Split: a selected linedef references a missing vertex.".into();
             }
+        }
+    }
+
+    /// Save the current map to a temp PWAD and launch the configured engine
+    /// with `-iwad <iwad> -file <pwad> -warp ...`. Prompts for engine/IWAD if
+    /// either is unset. Spawns detached; engine stdout is not captured.
+    fn test_map(&mut self) {
+        let Some(map) = self.map.clone() else {
+            self.status = "Test: no map to test.".into();
+            return;
+        };
+        let Some(engine) = self.settings.engine_path.clone() else {
+            self.status = "Test: set engine path in View > Settings first.".into();
+            return;
+        };
+        let Some(iwad) = self.settings.iwad_path.clone() else {
+            self.status = "Test: set IWAD path in View > Settings first.".into();
+            return;
+        };
+        // Stash the test PWAD in the OS temp dir; engines accept absolute paths.
+        let pwad_path = std::env::temp_dir().join("doombuilder-test.wad");
+        let bytes = doombuilder_core::map::save_map_as_pwad(&map);
+        if let Err(e) = std::fs::write(&pwad_path, &bytes) {
+            self.status = format!("Test: failed to write temp WAD: {e}");
+            return;
+        }
+        let mut cmd = std::process::Command::new(&engine);
+        cmd.arg("-iwad").arg(&iwad).arg("-file").arg(&pwad_path);
+        if let Some(warp) = warp_args_for(&map.name) {
+            for a in warp {
+                cmd.arg(a);
+            }
+        }
+        match cmd.spawn() {
+            Ok(_) => self.status = format!("Launched engine on {}", map.name),
+            Err(e) => self.status = format!("Test: launch failed: {e}"),
+        }
+    }
+
+    fn do_flip_lines(&mut self) {
+        let line_ids: Vec<doombuilder_core::map::LinedefId> = self
+            .selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Linedef(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        if line_ids.is_empty() {
+            self.status = "Flip: select one or more linedefs first.".into();
+            return;
+        }
+        let count = line_ids.len();
+        let mut cmd = Command::FlipLinedefs(line_ids);
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            cmd.apply(map_mut);
+            self.undo.push(cmd);
+            self.rebuild_geometry_indices();
+            self.cache2d.clear();
+            self.status = format!("Flipped {} linedef(s).", count);
         }
     }
 
@@ -1576,6 +1916,9 @@ impl App {
     }
 
     fn drawing_click(&mut self, world: Vec2) {
+        // Snapshot non-mutable values before borrowing `self.drawing`/`self.map`.
+        let snap_grid_on = self.settings.snap_to_grid;
+        let grid_step = self.effective_grid_step().max(1.0);
         let Some(drawing) = self.drawing.as_mut() else {
             return;
         };
@@ -1585,18 +1928,46 @@ impl App {
         let map_mut = Arc::make_mut(map);
 
         // Snap to nearest existing vertex within ~8 px (world units / zoom).
+        // The spatial index reflects state before drawing began, so it never
+        // includes the in-progress chain's own new vertices. We scan those
+        // separately so the user can close a loop onto a vertex they just
+        // placed (without this, "close the loop" inserts a duplicate vertex
+        // and the chain ends up open).
         let snap_world = (8.0_f32 / self.camera2d.zoom.max(1e-6)).max(2.0);
-        let snapped = self
+        let snap_sq = snap_world * snap_world;
+        let mut snapped = self
             .spatial
             .as_ref()
             .and_then(|sp| sp.nearest_vertex(world.x, world.y, snap_world));
+        if snapped.is_none() {
+            let mut best: Option<(f32, doombuilder_core::map::VertexId)> = None;
+            for vid in &drawing.chain.current_v {
+                if let Some(v) = map_mut.vertices.get(*vid) {
+                    let dx = v.x as f32 - world.x;
+                    let dy = v.y as f32 - world.y;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 <= snap_sq && best.map(|(bd, _)| d2 < bd).unwrap_or(true) {
+                        best = Some((d2, *vid));
+                    }
+                }
+            }
+            snapped = best.map(|(_, id)| id);
+        }
 
         let (target_vid, target_endpoint) = match snapped {
             Some(vid) => (vid, LineEndpoint::Existing(vid)),
             None => {
+                let placed = if snap_grid_on {
+                    Vec2::new(
+                        (world.x / grid_step).round() * grid_step,
+                        (world.y / grid_step).round() * grid_step,
+                    )
+                } else {
+                    world
+                };
                 let vsnap = MapVertex {
-                    x: world.x.round() as i32,
-                    y: world.y.round() as i32,
+                    x: placed.x.round() as i32,
+                    y: placed.y.round() as i32,
                 };
                 let new_vid = map_mut.vertices.insert(vsnap);
                 drawing.chain.vertex_inserts.push(vsnap);
@@ -1763,6 +2134,47 @@ impl App {
         self.sector_fills = Arc::new(tiles);
     }
 
+    /// In vertex mode: if `world` is within hit-radius of a linedef, split
+    /// that linedef at the click position and return true. Returns false
+    /// when no linedef is near.
+    fn try_insert_vertex_on_line(&mut self, world: Vec2) -> bool {
+        let Some(spatial) = self.spatial.as_ref() else {
+            return false;
+        };
+        let zoom = self.camera2d.zoom.max(1e-6);
+        let radius = 8.0 / zoom;
+        let Some(line_id) = spatial.nearest_linedef(world.x, world.y, radius) else {
+            return false;
+        };
+        let Some(map) = self.map.as_ref() else {
+            return false;
+        };
+        let snapped = if self.settings.snap_to_grid {
+            let step = self.effective_grid_step().max(1.0);
+            Vec2::new(
+                (world.x / step).round() * step,
+                (world.y / step).round() * step,
+            )
+        } else {
+            world
+        };
+        match compute_insert_vertex_on_line(map, line_id, snapped.x, snapped.y) {
+            Ok(state) => {
+                let mut cmd = Command::SplitLinedefs(Box::new(state));
+                if let Some(map) = self.map.as_mut() {
+                    let map_mut = Arc::make_mut(map);
+                    cmd.apply(map_mut);
+                    self.undo.push(cmd);
+                    self.rebuild_geometry_indices();
+                    self.cache2d.clear();
+                    self.status = "Inserted vertex on linedef.".into();
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     fn hit_test(&self, world: Vec2) -> Option<HighlightKind> {
         let spatial = self.spatial.as_ref()?;
         let zoom = self.camera2d.zoom.max(1e-6);
@@ -1800,21 +2212,54 @@ impl App {
     }
 
     fn menu_bar(&self) -> Element<'_, Message> {
-        container(
-            row![
-                menu_picker("File", FILE_MENU_ITEMS, dispatch_file),
-                menu_picker("Edit", EDIT_MENU_ITEMS, dispatch_edit),
-                menu_picker("View", VIEW_MENU_ITEMS, dispatch_view),
-                menu_picker("Tools", TOOLS_MENU_ITEMS, dispatch_tools),
-                menu_picker("Help", HELP_MENU_ITEMS, dispatch_help),
-            ]
-            .spacing(2)
-            .padding(2)
-            .align_y(iced::Alignment::Center),
-        )
-        .style(menu_bar_style)
-        .width(Length::Fill)
-        .into()
+        let mut bar = row![
+            menu_picker("File", FILE_MENU_ITEMS, dispatch_file),
+            menu_picker("Edit", EDIT_MENU_ITEMS, dispatch_edit),
+            menu_picker("View", VIEW_MENU_ITEMS, dispatch_view),
+            menu_picker("Tools", TOOLS_MENU_ITEMS, dispatch_tools),
+            menu_picker("Help", HELP_MENU_ITEMS, dispatch_help),
+        ]
+        .spacing(2)
+        .padding(2)
+        .align_y(iced::Alignment::Center);
+        if !self.settings.recent_files.is_empty() {
+            bar = bar.push(self.recent_files_picker());
+        }
+        container(bar)
+            .style(menu_bar_style)
+            .width(Length::Fill)
+            .into()
+    }
+
+    fn recent_files_picker(&self) -> Element<'_, Message> {
+        // Use a struct that carries the index so dispatch is O(1) and unique
+        // even when two paths have the same filename.
+        #[derive(Debug, Clone, PartialEq)]
+        struct RecentEntry {
+            idx: usize,
+            label: String,
+        }
+        impl std::fmt::Display for RecentEntry {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.label)
+            }
+        }
+        let entries: Vec<RecentEntry> = self
+            .settings
+            .recent_files
+            .iter()
+            .enumerate()
+            .map(|(idx, p)| {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.display().to_string());
+                RecentEntry { idx, label: name }
+            })
+            .collect();
+        pick_list(entries, None::<RecentEntry>, |e| Message::OpenRecent(e.idx))
+            .placeholder("Recent")
+            .into()
     }
 
     fn toolbar(&self) -> Element<'_, Message> {
@@ -1831,8 +2276,11 @@ impl App {
         };
 
         let toolbar_row = row![
+            icons::icon_cmd_btn(icons::NEW_DOC, "New map (Doom format)", Message::NewMap(MapFormat::Doom)),
             icons::icon_cmd_btn(icons::FOLDER_OPEN, "Open WAD\u{2026}", Message::OpenWadRequested),
+            icons::icon_cmd_btn(icons::LOAD_RESOURCES, "Load resource WAD (textures + sprites only)\u{2026}", Message::LoadResourcesRequested),
             icons::icon_cmd_btn(icons::SAVE_DISK, "Save Map As\u{2026}", Message::SaveMapRequested),
+            icons::icon_cmd_btn(icons::PLAY_TRIANGLE, "Test map in engine (F5)", Message::TestMap),
             vertical_separator(),
             icons::icon_cmd_btn(icons::UNDO, "Undo (\u{2318}Z)", Message::Undo),
             icons::icon_cmd_btn(icons::REDO, "Redo (\u{2318}\u{21E7}Z)", Message::Redo),
@@ -1859,6 +2307,8 @@ impl App {
             icons::icon_btn(icons::DRAW_PEN, "Draw lines (D)", Message::ToggleDrawing, self.drawing.is_some()),
             icons::icon_cmd_btn(icons::MAKE_SECTOR, "Make sector from selected lines (\u{2318}M)", Message::MakeSector),
             icons::icon_cmd_btn(icons::SPLIT_LINE, "Split selected linedefs at midpoint", Message::SplitLines),
+            icons::icon_cmd_btn(icons::MERGE_VERTS, "Merge selected vertices", Message::MergeVertices),
+            icons::icon_cmd_btn(icons::FLIP_LINE, "Flip selected linedefs (swap front/back)", Message::FlipLines),
             icons::icon_btn(icons::TEXTURES, "Show sector textures", Message::ToggleTextures, self.settings.show_textures),
             icons::icon_cmd_btn(icons::SETTINGS_GEAR, "Settings\u{2026}", Message::OpenSettings),
         ]
@@ -1906,7 +2356,7 @@ impl App {
                     edit_mode: self.edit_mode,
                     sprite_handles: self.sprite_handles.clone(),
                     sprite_dims: self.sprite_dims.clone(),
-                    settings: self.settings,
+                    settings: self.settings.clone(),
                 };
                 view.into_widget(Message::View2D)
             }
@@ -2018,7 +2468,12 @@ impl App {
                 )
             })
             .unwrap_or_else(|| self.status.clone());
-        let grid = self.camera2d.grid_step();
+        let grid = self.effective_grid_step();
+        let grid_label = if self.settings.grid_size.is_some() {
+            format!("{grid:.0}")
+        } else {
+            format!("{grid:.0} (auto)")
+        };
         let zoom = self.camera2d.zoom;
         let right = if self.map.is_some() {
             let sel = self.selection.len();
@@ -2027,7 +2482,7 @@ impl App {
             } else {
                 String::new()
             };
-            format!("{sel_part}Grid: {grid:.0}   Zoom: {zoom:.3}")
+            format!("{sel_part}Grid: {grid_label}   Zoom: {zoom:.3}")
         } else {
             String::new()
         };
@@ -2267,6 +2722,7 @@ impl App {
             SettingKey::ShowGrid,
             SettingKey::ShowThings,
             SettingKey::AlwaysShowVertices,
+            SettingKey::SnapToGrid,
         ];
 
         let rows: Vec<Element<'_, Message>> = keys
@@ -2281,10 +2737,48 @@ impl App {
             })
             .collect();
 
+        let engine_label = self
+            .settings
+            .engine_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(not set)".into());
+        let iwad_label = self
+            .settings
+            .iwad_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(not set)".into());
+        let test_section = column![
+            text("Test Map (F5)").size(14),
+            row![
+                text("Engine: ").size(12),
+                text(engine_label).size(12),
+                Space::new().width(Length::Fill),
+                button("Pick\u{2026}")
+                    .style(style::win32_standard_button)
+                    .on_press(Message::PickEngineRequested),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            row![
+                text("IWAD: ").size(12),
+                text(iwad_label).size(12),
+                Space::new().width(Length::Fill),
+                button("Pick\u{2026}")
+                    .style(style::win32_standard_button)
+                    .on_press(Message::PickIwadRequested),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(6);
+
         column![
             title_row,
             text("2D viewport display").size(14),
             column(rows).spacing(6),
+            test_section,
         ]
         .spacing(12)
         .padding(16)
@@ -3088,8 +3582,14 @@ impl std::fmt::Display for MenuItem {
     }
 }
 
-const FILE_MENU_ITEMS: &[MenuItem] =
-    &[MenuItem("Open WAD…"), MenuItem("Save Map As…"), MenuItem("Quit")];
+const FILE_MENU_ITEMS: &[MenuItem] = &[
+    MenuItem("New Map (Doom)"),
+    MenuItem("New Map (Hexen)"),
+    MenuItem("Open WAD…"),
+    MenuItem("Load Resource WAD…"),
+    MenuItem("Save Map As…"),
+    MenuItem("Quit"),
+];
 const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Undo"),
     MenuItem("Redo"),
@@ -3099,6 +3599,8 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Insert Thing"),
     MenuItem("Make Sector"),
     MenuItem("Split Linedefs"),
+    MenuItem("Merge Vertices"),
+    MenuItem("Flip Linedefs"),
     MenuItem("Toggle Draw Mode"),
 ];
 const VIEW_MENU_ITEMS: &[MenuItem] =
@@ -3108,7 +3610,10 @@ const HELP_MENU_ITEMS: &[MenuItem] = &[MenuItem("About (n/a)")];
 
 fn dispatch_file(item: MenuItem) -> Message {
     match item.0 {
+        "New Map (Doom)" => Message::NewMap(MapFormat::Doom),
+        "New Map (Hexen)" => Message::NewMap(MapFormat::Hexen),
         "Open WAD…" => Message::OpenWadRequested,
+        "Load Resource WAD…" => Message::LoadResourcesRequested,
         "Save Map As…" => Message::SaveMapRequested,
         "Quit" => Message::Quit,
         _ => Message::Noop,
@@ -3125,6 +3630,8 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Insert Thing" => Message::InsertThing,
         "Make Sector" => Message::MakeSector,
         "Split Linedefs" => Message::SplitLines,
+        "Merge Vertices" => Message::MergeVertices,
+        "Flip Linedefs" => Message::FlipLines,
         "Toggle Draw Mode" => Message::ToggleDrawing,
         _ => Message::Noop,
     }
@@ -3314,6 +3821,35 @@ async fn pick_file() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
         .add_filter("Doom assets", &["wad", "pk3", "zip"])
         .add_filter("All files", &["*"])
+        .pick_file()
+        .await
+        .map(|h| h.path().to_path_buf())
+}
+
+/// Decode a map name into `-warp` arguments. Vanilla engines take:
+///   * `-warp E M` for E#M# (Doom 1, Heretic)
+///   * `-warp NN` for MAPNN (Doom 2, Hexen)
+/// Returns None for unrecognised names; engine launches at title.
+fn warp_args_for(name: &str) -> Option<Vec<String>> {
+    let up = name.to_ascii_uppercase();
+    // E#M#
+    if up.len() == 4 && up.as_bytes()[0] == b'E' && up.as_bytes()[2] == b'M' {
+        let e = (up.as_bytes()[1] as char).to_digit(10)?;
+        let m = (up.as_bytes()[3] as char).to_digit(10)?;
+        return Some(vec!["-warp".into(), e.to_string(), m.to_string()]);
+    }
+    // MAPNN
+    if let Some(rest) = up.strip_prefix("MAP") {
+        if let Ok(n) = rest.parse::<u32>() {
+            return Some(vec!["-warp".into(), n.to_string()]);
+        }
+    }
+    None
+}
+
+async fn pick_executable() -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Choose Doom engine binary")
         .pick_file()
         .await
         .map(|h| h.path().to_path_buf())

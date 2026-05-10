@@ -96,6 +96,13 @@ pub enum Command {
     /// Insert a midpoint vertex into one or more linedefs and split each into
     /// two. Sidedefs are cloned so both halves retain the same sectors.
     SplitLinedefs(Box<SplitLinedefsState>),
+    /// Merge a set of vertices into one. Survivor moves to the centroid;
+    /// linedef references are redirected; degenerate linedefs (v1==v2 after
+    /// merge) and their sidedefs are removed.
+    MergeVertices(Box<VertexMergeState>),
+    /// Flip one or more linedefs: swap v1 <-> v2 and right <-> left sidedefs.
+    /// Self-inverse, so apply and revert do the same work.
+    FlipLinedefs(Vec<LinedefId>),
     /// Change one of a sector's integer fields.
     SetSectorIntField {
         id: SectorId,
@@ -134,6 +141,10 @@ pub struct SplitLine {
     pub new_line: Option<LinedefId>,
     pub new_right: Option<SidedefId>,
     pub new_left: Option<SidedefId>,
+    /// Explicit split coordinates. When `None`, the apply step splits at the
+    /// linedef midpoint. Used by "insert vertex on line" to place the new
+    /// vertex at the user's click position projected onto the line.
+    pub override_pos: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -146,6 +157,125 @@ pub enum SplitError {
     NoLines,
     LineMissing,
     VertexMissing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointSide {
+    V1,
+    V2,
+}
+
+#[derive(Debug)]
+pub enum MergeError {
+    NotEnoughVertices,
+    VertexMissing,
+}
+
+#[derive(Debug, Clone)]
+pub struct VertexMergeState {
+    pub survivor: VertexId,
+    pub survivor_old_pos: (i32, i32),
+    pub survivor_new_pos: (i32, i32),
+    /// Doomed vertices (excluded survivor), captured before mutation.
+    pub removed_vertex_data: Vec<(VertexId, MapVertex)>,
+    /// Linedefs that survive but had one endpoint redirected to the survivor.
+    /// Stores (line, which side, the doomed vertex it used to point at).
+    pub redirected: Vec<(LinedefId, EndpointSide, VertexId)>,
+    /// Linedefs that became degenerate (v1 == v2 after redirect) and were
+    /// removed entirely.
+    pub removed_line_data: Vec<(LinedefId, MapLinedef)>,
+    /// Sidedefs of removed linedefs.
+    pub removed_side_data: Vec<(SidedefId, MapSidedef)>,
+    /// After most recent revert: parallel lists of NEW slot-map ids assigned
+    /// when the snapshots were re-inserted. Empty after a fresh apply.
+    pub current_v: Vec<VertexId>,
+    pub current_l: Vec<LinedefId>,
+    pub current_s: Vec<SidedefId>,
+}
+
+/// Compute the merge state without mutating the map.
+pub fn compute_vertex_merge(
+    map: &Map,
+    vertex_ids: &[VertexId],
+) -> Result<VertexMergeState, MergeError> {
+    if vertex_ids.len() < 2 {
+        return Err(MergeError::NotEnoughVertices);
+    }
+    for v in vertex_ids {
+        if !map.vertices.contains_key(*v) {
+            return Err(MergeError::VertexMissing);
+        }
+    }
+
+    let survivor = vertex_ids[0];
+    let removed: HashSet<VertexId> = vertex_ids.iter().skip(1).copied().collect();
+
+    // Centroid of all selected vertices.
+    let mut sum_x = 0_i64;
+    let mut sum_y = 0_i64;
+    for v in vertex_ids {
+        let p = &map.vertices[*v];
+        sum_x += p.x as i64;
+        sum_y += p.y as i64;
+    }
+    let n = vertex_ids.len() as i64;
+    let new_pos = ((sum_x / n) as i32, (sum_y / n) as i32);
+    let old_pos = {
+        let p = &map.vertices[survivor];
+        (p.x, p.y)
+    };
+
+    let removed_vertex_data: Vec<(VertexId, MapVertex)> = removed
+        .iter()
+        .map(|vid| (*vid, *map.vertices.get(*vid).unwrap()))
+        .collect();
+
+    let mut redirected: Vec<(LinedefId, EndpointSide, VertexId)> = Vec::new();
+    let mut removed_line_data: Vec<(LinedefId, MapLinedef)> = Vec::new();
+    let mut removed_side_data: Vec<(SidedefId, MapSidedef)> = Vec::new();
+
+    for (lid, line) in &map.linedefs {
+        let v1_doomed = removed.contains(&line.v1);
+        let v2_doomed = removed.contains(&line.v2);
+        if !v1_doomed && !v2_doomed {
+            continue;
+        }
+        let post_v1 = if v1_doomed { survivor } else { line.v1 };
+        let post_v2 = if v2_doomed { survivor } else { line.v2 };
+        if post_v1 == post_v2 {
+            removed_line_data.push((lid, line.clone()));
+            if let Some(sid) = line.right {
+                if let Some(s) = map.sidedefs.get(sid) {
+                    removed_side_data.push((sid, s.clone()));
+                }
+            }
+            if let Some(sid) = line.left {
+                if let Some(s) = map.sidedefs.get(sid) {
+                    removed_side_data.push((sid, s.clone()));
+                }
+            }
+        } else {
+            if v1_doomed {
+                redirected.push((lid, EndpointSide::V1, line.v1));
+            }
+            if v2_doomed {
+                redirected.push((lid, EndpointSide::V2, line.v2));
+            }
+        }
+    }
+
+    Ok(VertexMergeState {
+        survivor,
+        survivor_old_pos: old_pos,
+        survivor_new_pos: new_pos,
+        removed_vertex_data,
+        redirected,
+        removed_line_data,
+        removed_side_data,
+        current_v: Vec::new(),
+        current_l: Vec::new(),
+        current_s: Vec::new(),
+    })
 }
 
 /// Build a [`SplitLinedefsState`] for the given linedefs. Doesn't mutate the
@@ -170,8 +300,48 @@ pub fn compute_split_lines(
             new_line: None,
             new_right: None,
             new_left: None,
+            override_pos: None,
         });
     }
+    Ok(SplitLinedefsState { splits })
+}
+
+/// Build a one-element [`SplitLinedefsState`] that inserts a vertex on `line`
+/// at the point on the segment nearest to `(wx, wy)`. Caller wraps in
+/// `Command::SplitLinedefs` and applies it.
+pub fn compute_insert_vertex_on_line(
+    map: &Map,
+    line: LinedefId,
+    wx: f32,
+    wy: f32,
+) -> Result<SplitLinedefsState, SplitError> {
+    let l = map.linedefs.get(line).ok_or(SplitError::LineMissing)?;
+    let v1 = map.vertices.get(l.v1).ok_or(SplitError::VertexMissing)?;
+    let v2 = map.vertices.get(l.v2).ok_or(SplitError::VertexMissing)?;
+    // Project (wx, wy) onto segment v1..v2, clamped to (0, 1) so a near-miss
+    // outside the segment still lands on the line itself.
+    let dx = (v2.x - v1.x) as f32;
+    let dy = (v2.y - v1.y) as f32;
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 < 1e-6 {
+        0.5
+    } else {
+        let tt = ((wx - v1.x as f32) * dx + (wy - v1.y as f32) * dy) / len2;
+        // Bias the clamp inward by a hair so we never produce a zero-length
+        // half-line on either side.
+        tt.clamp(0.05, 0.95)
+    };
+    let px = (v1.x as f32 + t * dx).round() as i32;
+    let py = (v1.y as f32 + t * dy).round() as i32;
+    let splits = vec![SplitLine {
+        line,
+        original_v2: l.v2,
+        new_v: None,
+        new_line: None,
+        new_right: None,
+        new_left: None,
+        override_pos: Some((px, py)),
+    }];
     Ok(SplitLinedefsState { splits })
 }
 
@@ -544,6 +714,73 @@ impl Command {
                     map.vertices.remove(id);
                 }
             }
+            Command::MergeVertices(state) => {
+                // Build remaps from snapshot (original) ids → current map ids.
+                // After a fresh apply these are identity (data still has the
+                // original ids). After undo+redo the current_* vectors hold
+                // the new ids assigned during revert.
+                let mut remap_v: HashMap<VertexId, VertexId> = HashMap::new();
+                if state.current_v.len() == state.removed_vertex_data.len() {
+                    for (i, (orig, _)) in state.removed_vertex_data.iter().enumerate() {
+                        remap_v.insert(*orig, state.current_v[i]);
+                    }
+                }
+                let mut remap_l: HashMap<LinedefId, LinedefId> = HashMap::new();
+                if state.current_l.len() == state.removed_line_data.len() {
+                    for (i, (orig, _)) in state.removed_line_data.iter().enumerate() {
+                        remap_l.insert(*orig, state.current_l[i]);
+                    }
+                }
+
+                // 1. Redirect surviving lines' endpoints to the survivor.
+                for (lid, side, _orig_v) in &state.redirected {
+                    let cur_lid = *remap_l.get(lid).unwrap_or(lid);
+                    if let Some(line) = map.linedefs.get_mut(cur_lid) {
+                        match side {
+                            EndpointSide::V1 => line.v1 = state.survivor,
+                            EndpointSide::V2 => line.v2 = state.survivor,
+                        }
+                    }
+                }
+                // 2. Remove sidedefs of degenerate lines.
+                let cur_s_ids: Vec<SidedefId> = if state.current_s.len()
+                    == state.removed_side_data.len()
+                {
+                    state.current_s.clone()
+                } else {
+                    state.removed_side_data.iter().map(|(id, _)| *id).collect()
+                };
+                for sid in &cur_s_ids {
+                    map.sidedefs.remove(*sid);
+                }
+                // 3. Remove degenerate lines.
+                let cur_l_ids: Vec<LinedefId> = if !remap_l.is_empty() {
+                    state.current_l.clone()
+                } else {
+                    state.removed_line_data.iter().map(|(id, _)| *id).collect()
+                };
+                for lid in &cur_l_ids {
+                    map.linedefs.remove(*lid);
+                }
+                // 4. Remove doomed vertices.
+                let cur_v_ids: Vec<VertexId> = if !remap_v.is_empty() {
+                    state.current_v.clone()
+                } else {
+                    state.removed_vertex_data.iter().map(|(id, _)| *id).collect()
+                };
+                for vid in &cur_v_ids {
+                    map.vertices.remove(*vid);
+                }
+                state.current_v.clear();
+                state.current_l.clear();
+                state.current_s.clear();
+                // 5. Move survivor to centroid.
+                if let Some(s) = map.vertices.get_mut(state.survivor) {
+                    s.x = state.survivor_new_pos.0;
+                    s.y = state.survivor_new_pos.1;
+                }
+                map.rebuild_sidedef_index();
+            }
             Command::SplitLinedefs(state) => {
                 for split in &mut state.splits {
                     let Some(orig) = map.linedefs.get(split.line).cloned() else {
@@ -557,9 +794,12 @@ impl Command {
                         Some(v) => *v,
                         None => continue,
                     };
-                    let mid = MapVertex {
-                        x: (v1.x + v2.x) / 2,
-                        y: (v1.y + v2.y) / 2,
+                    let mid = match split.override_pos {
+                        Some((x, y)) => MapVertex { x, y },
+                        None => MapVertex {
+                            x: (v1.x + v2.x) / 2,
+                            y: (v1.y + v2.y) / 2,
+                        },
                     };
                     let mid_id = map.vertices.insert(mid);
                     split.new_v = Some(mid_id);
@@ -653,6 +893,14 @@ impl Command {
                     write_thing_int(t, *field, *new);
                 }
             }
+            Command::FlipLinedefs(ids) => {
+                for id in ids.iter() {
+                    if let Some(line) = map.linedefs.get_mut(*id) {
+                        std::mem::swap(&mut line.v1, &mut line.v2);
+                        std::mem::swap(&mut line.right, &mut line.left);
+                    }
+                }
+            }
         }
     }
 
@@ -731,6 +979,56 @@ impl Command {
                 }
                 if let Some(sec) = state.current_sec.take() {
                     map.sectors.remove(sec);
+                }
+                map.rebuild_sidedef_index();
+            }
+            Command::MergeVertices(state) => {
+                // 1. Re-insert removed vertices, build remap.
+                let mut remap_v: HashMap<VertexId, VertexId> = HashMap::new();
+                state.current_v.clear();
+                for (orig_id, v) in &state.removed_vertex_data {
+                    let new_id = map.vertices.insert(*v);
+                    remap_v.insert(*orig_id, new_id);
+                    state.current_v.push(new_id);
+                }
+                // 2. Re-insert removed sidedefs (sectors weren't deleted, so
+                //    the sector ref in each MapSidedef is still valid).
+                let mut remap_s: HashMap<SidedefId, SidedefId> = HashMap::new();
+                state.current_s.clear();
+                for (orig_id, s) in &state.removed_side_data {
+                    let new_id = map.sidedefs.insert(s.clone());
+                    remap_s.insert(*orig_id, new_id);
+                    state.current_s.push(new_id);
+                }
+                // 3. Re-insert removed lines, patching v1/v2 + sidedef refs.
+                state.current_l.clear();
+                for (_orig_id, l) in &state.removed_line_data {
+                    let mut nl = l.clone();
+                    if let Some(nv) = remap_v.get(&nl.v1) {
+                        nl.v1 = *nv;
+                    }
+                    if let Some(nv) = remap_v.get(&nl.v2) {
+                        nl.v2 = *nv;
+                    }
+                    nl.right = nl.right.and_then(|s| remap_s.get(&s).copied());
+                    nl.left = nl.left.and_then(|s| remap_s.get(&s).copied());
+                    let new_id = map.linedefs.insert(nl);
+                    state.current_l.push(new_id);
+                }
+                // 4. Patch redirected linedefs back to their original endpoint.
+                for (lid, side, orig_v) in &state.redirected {
+                    let new_v = *remap_v.get(orig_v).unwrap_or(orig_v);
+                    if let Some(line) = map.linedefs.get_mut(*lid) {
+                        match side {
+                            EndpointSide::V1 => line.v1 = new_v,
+                            EndpointSide::V2 => line.v2 = new_v,
+                        }
+                    }
+                }
+                // 5. Restore survivor's old position.
+                if let Some(s) = map.vertices.get_mut(state.survivor) {
+                    s.x = state.survivor_old_pos.0;
+                    s.y = state.survivor_old_pos.1;
                 }
                 map.rebuild_sidedef_index();
             }
@@ -815,6 +1113,14 @@ impl Command {
             Command::SetThingIntField { id, field, old, .. } => {
                 if let Some(t) = map.things.get_mut(*id) {
                     write_thing_int(t, *field, *old);
+                }
+            }
+            Command::FlipLinedefs(ids) => {
+                for id in ids.iter() {
+                    if let Some(line) = map.linedefs.get_mut(*id) {
+                        std::mem::swap(&mut line.v1, &mut line.v2);
+                        std::mem::swap(&mut line.right, &mut line.left);
+                    }
                 }
             }
         }
@@ -961,6 +1267,65 @@ mod tests {
         assert!(stack.redo(&mut map));
         assert_eq!(map.vertices[id].x, 15);
         assert!(!stack.can_redo());
+    }
+
+    #[test]
+    fn merge_two_vertices_redirects_lines_and_collapses_degenerate() {
+        use crate::map::{MapLinedef, MapVertex};
+        let mut map = Map::new("T", MapFormat::Doom);
+        // Three vertices, two lines: (v0-v1), (v1-v2). Merge v0 and v1.
+        // Line (v0-v1) becomes (survivor=v0, survivor=v0) → degenerate, removed.
+        // Line (v1-v2) becomes (survivor=v0, v2) → kept, v1 redirected.
+        let v0 = map.vertices.insert(MapVertex { x: 0, y: 0 });
+        let v1 = map.vertices.insert(MapVertex { x: 16, y: 0 });
+        let v2 = map.vertices.insert(MapVertex { x: 32, y: 0 });
+        let l0 = map.linedefs.insert(MapLinedef {
+            v1: v0,
+            v2: v1,
+            flags: 0,
+            special: 0,
+            args: [0; 5],
+            tag: 0,
+            right: None,
+            left: None,
+        });
+        let l1 = map.linedefs.insert(MapLinedef {
+            v1: v1,
+            v2: v2,
+            flags: 0,
+            special: 0,
+            args: [0; 5],
+            tag: 0,
+            right: None,
+            left: None,
+        });
+
+        let state = compute_vertex_merge(&map, &[v0, v1]).expect("state");
+        assert_eq!(state.removed_vertex_data.len(), 1, "v1 marked removed");
+        assert_eq!(state.removed_line_data.len(), 1, "l0 degenerate");
+        assert_eq!(state.redirected.len(), 1, "l1 redirected");
+
+        let mut cmd = Command::MergeVertices(Box::new(state));
+        cmd.apply(&mut map);
+
+        assert_eq!(map.vertices.len(), 2, "v1 removed");
+        assert_eq!(map.linedefs.len(), 1, "l0 removed");
+        assert!(map.linedefs.get(l0).is_none());
+        // Surviving line points at survivor + v2 with survivor at midpoint of v0/v1.
+        let l1_now = &map.linedefs[l1];
+        assert_eq!(l1_now.v1, v0, "v1 redirected to survivor v0");
+        assert_eq!(l1_now.v2, v2);
+        assert_eq!(map.vertices[v0].x, 8, "survivor moved to centroid x");
+
+        // Undo restores everything.
+        cmd.revert(&mut map);
+        assert_eq!(map.vertices.len(), 3);
+        assert_eq!(map.linedefs.len(), 2);
+        assert_eq!(map.vertices[v0].x, 0, "survivor pos restored");
+        let restored_l1 = &map.linedefs[l1];
+        // l1.v1 should be remapped to whatever new id v1 got.
+        assert!(map.vertices.contains_key(restored_l1.v1));
+        assert_ne!(restored_l1.v1, v0, "redirected endpoint reverted");
     }
 
     #[test]
@@ -1191,5 +1556,64 @@ mod tests {
         cmd_b.apply(&mut map);
         stack.push(cmd_b);
         assert!(!stack.can_redo());
+    }
+
+    #[test]
+    fn flip_linedef_swaps_endpoints_and_sides_and_round_trips() {
+        use crate::map::{MapLinedef, MapSidedef, MapVertex, TextureName};
+        let mut map = Map::new("T", MapFormat::Doom);
+        let v0 = map.vertices.insert(MapVertex { x: 0, y: 0 });
+        let v1 = map.vertices.insert(MapVertex { x: 100, y: 0 });
+        let sec = map.sectors.insert(crate::map::MapSector {
+            floor_height: 0,
+            ceiling_height: 128,
+            floor_texture: TextureName([0; 8]),
+            ceiling_texture: TextureName([0; 8]),
+            light: 160,
+            special: 0,
+            tag: 0,
+            sidedefs: Vec::new(),
+        });
+        let s_right = map.sidedefs.insert(MapSidedef {
+            sector: sec,
+            x_offset: 0,
+            y_offset: 0,
+            upper_texture: TextureName([0; 8]),
+            lower_texture: TextureName([0; 8]),
+            middle_texture: TextureName(*b"R\0\0\0\0\0\0\0"),
+        });
+        let s_left = map.sidedefs.insert(MapSidedef {
+            sector: sec,
+            x_offset: 0,
+            y_offset: 0,
+            upper_texture: TextureName([0; 8]),
+            lower_texture: TextureName([0; 8]),
+            middle_texture: TextureName(*b"L\0\0\0\0\0\0\0"),
+        });
+        let line = map.linedefs.insert(MapLinedef {
+            v1: v0,
+            v2: v1,
+            flags: 0,
+            special: 0,
+            args: [0; 5],
+            tag: 0,
+            right: Some(s_right),
+            left: Some(s_left),
+        });
+
+        let mut cmd = Command::FlipLinedefs(vec![line]);
+        cmd.apply(&mut map);
+        let l = map.linedefs.get(line).unwrap();
+        assert_eq!(l.v1, v1);
+        assert_eq!(l.v2, v0);
+        assert_eq!(l.right, Some(s_left));
+        assert_eq!(l.left, Some(s_right));
+
+        cmd.revert(&mut map);
+        let l = map.linedefs.get(line).unwrap();
+        assert_eq!(l.v1, v0);
+        assert_eq!(l.v2, v1);
+        assert_eq!(l.right, Some(s_right));
+        assert_eq!(l.left, Some(s_left));
     }
 }

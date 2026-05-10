@@ -257,11 +257,12 @@ impl<Message> Program<Message> for View2DProgram<Message> {
     ) -> Vec<Geometry> {
         let viewport = Vec2::new(bounds.width, bounds.height);
         let mode = self.inner.edit_mode;
-        let settings = self.inner.settings;
+        let settings = self.inner.settings.clone();
         let geometry = self.inner.cache.draw(renderer, bounds.size(), |frame| {
             draw_background(frame, bounds);
             if settings.show_grid {
-                draw_grid(frame, &self.inner.camera, viewport);
+                let override_step = settings.grid_size.map(|n| n as f32);
+                draw_grid(frame, &self.inner.camera, viewport, override_step);
             }
             let fill_alpha = if mode == EditMode::Sectors { 1.0 } else { 0.55 };
             if self.inner.fills.is_empty() {
@@ -379,8 +380,10 @@ fn draw_background(frame: &mut Frame, bounds: Rectangle) {
     );
 }
 
-fn draw_grid(frame: &mut Frame, camera: &Camera2D, viewport: Vec2) {
-    let major_world = grid_step(camera.zoom);
+fn draw_grid(frame: &mut Frame, camera: &Camera2D, viewport: Vec2, override_step: Option<f32>) {
+    let major_world = override_step
+        .filter(|s| *s > 0.0)
+        .unwrap_or_else(|| grid_step(camera.zoom));
     let minor_world = major_world * 0.25;
 
     let world_min = camera.screen_to_world(Vec2::new(0.0, viewport.y), viewport);

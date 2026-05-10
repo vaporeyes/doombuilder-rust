@@ -1,6 +1,6 @@
-// ABOUTME: Serialize a Map back to Doom or Hexen format lumps. Empty BSP lumps
-// ABOUTME: (SEGS / SSECTORS / NODES / REJECT / BLOCKMAP) are emitted so the
-// ABOUTME: file is structurally valid; node-builder regeneration is downstream.
+// ABOUTME: Serialize a Map back to Doom or Hexen format lumps. BSP lumps
+// ABOUTME: (SEGS / SSECTORS / NODES / REJECT / BLOCKMAP) are produced by
+// ABOUTME: `map::nodes::build_nodes` so output is engine-playable.
 
 use std::collections::HashMap;
 
@@ -29,10 +29,16 @@ pub fn serialize_map(map: &Map) -> Vec<LumpEntry<'_>> {
         .map(|(i, (id, _))| (id, i as u16))
         .collect();
 
+    let nodes = crate::map::nodes::build_nodes(map);
+
     let things = serialize_things(map);
     let linedefs = serialize_linedefs(map, &vertex_idx, &sidedef_idx);
     let sidedefs = serialize_sidedefs(map, &sector_idx);
-    let vertexes = serialize_vertexes(map);
+    let mut vertexes = serialize_vertexes(map);
+    for (x, y) in &nodes.extra_vertices {
+        vertexes.extend_from_slice(&x.to_le_bytes());
+        vertexes.extend_from_slice(&y.to_le_bytes());
+    }
     let sectors = serialize_sectors(map);
 
     let mut lumps: Vec<LumpEntry<'_>> = Vec::new();
@@ -44,13 +50,12 @@ pub fn serialize_map(map: &Map) -> Vec<LumpEntry<'_>> {
     lumps.push(LumpEntry { name: "LINEDEFS", data: linedefs });
     lumps.push(LumpEntry { name: "SIDEDEFS", data: sidedefs });
     lumps.push(LumpEntry { name: "VERTEXES", data: vertexes });
-    // Empty BSP-derived lumps. Node builders regenerate these.
-    lumps.push(LumpEntry { name: "SEGS", data: Vec::new() });
-    lumps.push(LumpEntry { name: "SSECTORS", data: Vec::new() });
-    lumps.push(LumpEntry { name: "NODES", data: Vec::new() });
+    lumps.push(LumpEntry { name: "SEGS", data: nodes.segs });
+    lumps.push(LumpEntry { name: "SSECTORS", data: nodes.ssectors });
+    lumps.push(LumpEntry { name: "NODES", data: nodes.nodes });
     lumps.push(LumpEntry { name: "SECTORS", data: sectors });
-    lumps.push(LumpEntry { name: "REJECT", data: Vec::new() });
-    lumps.push(LumpEntry { name: "BLOCKMAP", data: Vec::new() });
+    lumps.push(LumpEntry { name: "REJECT", data: nodes.reject });
+    lumps.push(LumpEntry { name: "BLOCKMAP", data: nodes.blockmap });
     if map.format == MapFormat::Hexen {
         lumps.push(LumpEntry { name: "BEHAVIOR", data: Vec::new() });
     }
