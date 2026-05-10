@@ -113,6 +113,11 @@ pub enum SectorIntField {
 pub enum LinedefIntField {
     Flags,
     Tag,
+    Arg0,
+    Arg1,
+    Arg2,
+    Arg3,
+    Arg4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,6 +284,11 @@ fn write_linedef_int(l: &mut crate::map::MapLinedef, field: LinedefIntField, val
     match field {
         LinedefIntField::Flags => l.flags = value.clamp(0, u16::MAX as i32) as u16,
         LinedefIntField::Tag => l.tag = value.clamp(0, u16::MAX as i32) as u16,
+        LinedefIntField::Arg0 => l.args[0] = value.clamp(0, 255) as u8,
+        LinedefIntField::Arg1 => l.args[1] = value.clamp(0, 255) as u8,
+        LinedefIntField::Arg2 => l.args[2] = value.clamp(0, 255) as u8,
+        LinedefIntField::Arg3 => l.args[3] = value.clamp(0, 255) as u8,
+        LinedefIntField::Arg4 => l.args[4] = value.clamp(0, 255) as u8,
     }
 }
 

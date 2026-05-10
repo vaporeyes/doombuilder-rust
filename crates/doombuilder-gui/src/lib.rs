@@ -3,6 +3,7 @@
 // ABOUTME: viewport, bottom inspector with texture slots, status bar.
 
 mod camera;
+mod style;
 mod view2d;
 mod view3d;
 
@@ -35,7 +36,7 @@ use iced::widget::{
     button, column, container, image, mouse_area, pick_list, row, scrollable, stack, text,
     text_input, Space,
 };
-use iced::{Border, Color, Element, Length, Subscription, Task, Theme};
+use iced::{Color, Element, Length, Subscription, Task, Theme};
 
 use camera::Camera2D;
 use view2d::{map_aabb, FillTile, HighlightKind, View2D, View2DMessage};
@@ -45,6 +46,7 @@ pub fn run() -> iced::Result {
     iced::application(App::default, App::update, App::view)
         .title(App::window_title)
         .subscription(App::subscription)
+        .theme(App::theme)
         .run()
 }
 
@@ -115,6 +117,8 @@ pub struct App {
     active_picker: Option<ActivePicker>,
     picker_filter: String,
     sector_buffers: Option<SectorBuffers>,
+    linedef_buffers: Option<LinedefBuffers>,
+    thing_buffers: Option<ThingBuffers>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +128,19 @@ struct SectorBuffers {
     ceiling: String,
     light: String,
     tag: String,
+}
+
+#[derive(Debug, Clone)]
+struct LinedefBuffers {
+    line: doombuilder_core::map::LinedefId,
+    tag: String,
+    args: [String; 5],
+}
+
+#[derive(Debug, Clone)]
+struct ThingBuffers {
+    thing: ThingId,
+    angle: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -196,6 +213,8 @@ impl Default for App {
             active_picker: None,
             picker_filter: String::new(),
             sector_buffers: None,
+            linedef_buffers: None,
+            thing_buffers: None,
         }
     }
 }
@@ -236,6 +255,10 @@ pub enum Message {
     ToggleThingFlag { id: ThingId, bit: u16 },
     SectorFieldChanged { field: SectorIntField, text: String },
     SectorFieldSubmit(SectorIntField),
+    LinedefFieldChanged { field: LinedefIntField, text: String },
+    LinedefFieldSubmit(LinedefIntField),
+    ThingFieldChanged { field: ThingIntField, text: String },
+    ThingFieldSubmit(ThingIntField),
     Quit,
     Noop,
 }
@@ -272,6 +295,10 @@ pub struct MapPayload {
 }
 
 impl App {
+    fn theme(&self) -> Theme {
+        Theme::Light
+    }
+
     fn window_title(&self) -> String {
         let mut t = String::from("DoomBuilder");
         if let Some(path) = self.wad_path.as_ref().and_then(|p| p.file_name()) {
@@ -288,35 +315,80 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle_message(message);
-        self.refresh_sector_buffers();
+        self.refresh_inspector_buffers();
         task
     }
 
-    fn refresh_sector_buffers(&mut self) {
-        let single_sector: Option<SectorId> = if self.selection.len() == 1 {
-            self.selection.iter().next().and_then(|h| match h {
-                HighlightKind::Sector(id) => Some(*id),
-                _ => None,
-            })
+    fn refresh_inspector_buffers(&mut self) {
+        let single = if self.selection.len() == 1 {
+            self.selection.iter().next().copied()
         } else {
             None
         };
-        match (single_sector, &self.sector_buffers) {
+        let map = self.map.as_ref();
+
+        // Sector
+        let want_sector = match single {
+            Some(HighlightKind::Sector(id)) => Some(id),
+            _ => None,
+        };
+        match (want_sector, &self.sector_buffers) {
             (Some(id), Some(b)) if b.sector == id => {}
             (Some(id), _) => {
-                if let Some(map) = &self.map {
-                    if let Some(s) = map.sectors.get(id) {
-                        self.sector_buffers = Some(SectorBuffers {
-                            sector: id,
-                            floor: s.floor_height.to_string(),
-                            ceiling: s.ceiling_height.to_string(),
-                            light: s.light.to_string(),
-                            tag: s.tag.to_string(),
-                        });
-                    }
+                if let Some(s) = map.and_then(|m| m.sectors.get(id)) {
+                    self.sector_buffers = Some(SectorBuffers {
+                        sector: id,
+                        floor: s.floor_height.to_string(),
+                        ceiling: s.ceiling_height.to_string(),
+                        light: s.light.to_string(),
+                        tag: s.tag.to_string(),
+                    });
                 }
             }
             (None, _) => self.sector_buffers = None,
+        }
+
+        // Linedef
+        let want_line = match single {
+            Some(HighlightKind::Linedef(id)) => Some(id),
+            _ => None,
+        };
+        match (want_line, &self.linedef_buffers) {
+            (Some(id), Some(b)) if b.line == id => {}
+            (Some(id), _) => {
+                if let Some(l) = map.and_then(|m| m.linedefs.get(id)) {
+                    self.linedef_buffers = Some(LinedefBuffers {
+                        line: id,
+                        tag: l.tag.to_string(),
+                        args: [
+                            l.args[0].to_string(),
+                            l.args[1].to_string(),
+                            l.args[2].to_string(),
+                            l.args[3].to_string(),
+                            l.args[4].to_string(),
+                        ],
+                    });
+                }
+            }
+            (None, _) => self.linedef_buffers = None,
+        }
+
+        // Thing
+        let want_thing = match single {
+            Some(HighlightKind::Thing(id)) => Some(id),
+            _ => None,
+        };
+        match (want_thing, &self.thing_buffers) {
+            (Some(id), Some(b)) if b.thing == id => {}
+            (Some(id), _) => {
+                if let Some(t) = map.and_then(|m| m.things.get(id)) {
+                    self.thing_buffers = Some(ThingBuffers {
+                        thing: id,
+                        angle: t.angle.to_string(),
+                    });
+                }
+            }
+            (None, _) => self.thing_buffers = None,
         }
     }
 
@@ -783,6 +855,84 @@ impl App {
                             // Heights affect 3D geometry; light affects 3D shading;
                             // either way rebuild keeps both views consistent.
                             self.rebuild_geometry_indices();
+                            self.cache2d.clear();
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::LinedefFieldChanged { field, text } => {
+                if let Some(b) = self.linedef_buffers.as_mut() {
+                    if let Some(slot) = linedef_buffer_field_mut(b, field) {
+                        slot.clear();
+                        slot.push_str(&text);
+                    }
+                }
+                Task::none()
+            }
+            Message::LinedefFieldSubmit(field) => {
+                let Some(b) = self.linedef_buffers.clone() else {
+                    return Task::none();
+                };
+                let parsed: Option<i32> = linedef_buffer_field(&b, field).trim().parse().ok();
+                if let (Some(new), Some(map)) = (parsed, self.map.as_mut()) {
+                    let map_mut = Arc::make_mut(map);
+                    if let Some(line) = map_mut.linedefs.get(b.line) {
+                        let old = match field {
+                            LinedefIntField::Flags => line.flags as i32,
+                            LinedefIntField::Tag => line.tag as i32,
+                            LinedefIntField::Arg0 => line.args[0] as i32,
+                            LinedefIntField::Arg1 => line.args[1] as i32,
+                            LinedefIntField::Arg2 => line.args[2] as i32,
+                            LinedefIntField::Arg3 => line.args[3] as i32,
+                            LinedefIntField::Arg4 => line.args[4] as i32,
+                        };
+                        if old != new {
+                            let mut cmd = Command::SetLinedefIntField {
+                                id: b.line,
+                                field,
+                                old,
+                                new,
+                            };
+                            cmd.apply(map_mut);
+                            self.undo.push(cmd);
+                            self.cache2d.clear();
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::ThingFieldChanged { field, text } => {
+                if let Some(b) = self.thing_buffers.as_mut() {
+                    if let Some(slot) = thing_buffer_field_mut(b, field) {
+                        slot.clear();
+                        slot.push_str(&text);
+                    }
+                }
+                Task::none()
+            }
+            Message::ThingFieldSubmit(field) => {
+                let Some(b) = self.thing_buffers.clone() else {
+                    return Task::none();
+                };
+                let parsed: Option<i32> = thing_buffer_field(&b, field).trim().parse().ok();
+                if let (Some(new), Some(map)) = (parsed, self.map.as_mut()) {
+                    let map_mut = Arc::make_mut(map);
+                    if let Some(t) = map_mut.things.get(b.thing) {
+                        let old = match field {
+                            ThingIntField::Angle => t.angle as i32,
+                            ThingIntField::Flags => t.flags as i32,
+                        };
+                        if old != new {
+                            let mut cmd = Command::SetThingIntField {
+                                id: b.thing,
+                                field,
+                                old,
+                                new,
+                            };
+                            cmd.apply(map_mut);
+                            self.undo.push(cmd);
+                            // Angle changes affect 2D arrow direction; cache only.
                             self.cache2d.clear();
                         }
                     }
@@ -1304,6 +1454,7 @@ impl App {
                 } else {
                     "Show textures: OFF"
                 }))
+                .style(style::win32_standard_button)
                 .on_press(Message::ToggleTextures),
             ]
             .spacing(8)
@@ -1512,7 +1663,7 @@ impl App {
         let title_row = row![
             text("Pick a texture").size(18),
             Space::new().width(Length::Fill),
-            button("Close").on_press(Message::ClosePicker),
+            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -1520,6 +1671,7 @@ impl App {
         let search = text_input("Filter…", &self.picker_filter)
             .on_input(Message::PickerFilterChanged)
             .padding(6)
+            .style(style::win32_text_input)
             .width(Length::Fill);
 
         let q = self.picker_filter.to_ascii_uppercase();
@@ -1566,7 +1718,7 @@ impl App {
             .align_x(iced::Alignment::Center);
             let pickable: Element<'_, Message> = button(tile)
                 .padding(2)
-                .style(button::text)
+                .style(style::win32_toolbar_button)
                 .on_press(Message::PickTexture((*name).clone()))
                 .into();
             current_row.push(pickable);
@@ -1602,7 +1754,7 @@ impl App {
         let title_row = row![
             text("Pick a linedef action").size(18),
             Space::new().width(Length::Fill),
-            button("Close").on_press(Message::ClosePicker),
+            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -1610,6 +1762,7 @@ impl App {
         let search = text_input("Filter\u{2026}", &self.picker_filter)
             .on_input(Message::PickerFilterChanged)
             .padding(6)
+            .style(style::win32_text_input)
             .width(Length::Fill);
 
         let q = self.picker_filter.to_ascii_lowercase();
@@ -1656,7 +1809,7 @@ impl App {
             };
             let row_btn = button(text(label).size(13))
                 .padding(4)
-                .style(button::text)
+                .style(style::win32_toolbar_button)
                 .on_press(Message::PickAction(entry.id))
                 .width(Length::Fill);
             rows.push(row_btn.into());
@@ -1685,7 +1838,7 @@ impl App {
         let title_row = row![
             text("Pick a sector special").size(18),
             Space::new().width(Length::Fill),
-            button("Close").on_press(Message::ClosePicker),
+            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -1693,6 +1846,7 @@ impl App {
         let search = text_input("Filter\u{2026}", &self.picker_filter)
             .on_input(Message::PickerFilterChanged)
             .padding(6)
+            .style(style::win32_text_input)
             .width(Length::Fill);
 
         let q = self.picker_filter.to_ascii_lowercase();
@@ -1725,7 +1879,7 @@ impl App {
             let label = format!("{:>4} - {}", id, name);
             let row_btn = button(text(label).size(13))
                 .padding(4)
-                .style(button::text)
+                .style(style::win32_toolbar_button)
                 .on_press(Message::PickSectorSpecial(*id))
                 .width(Length::Fill);
             rows.push(row_btn.into());
@@ -1754,7 +1908,7 @@ impl App {
         let title_row = row![
             text("Pick a thing type").size(18),
             Space::new().width(Length::Fill),
-            button("Close").on_press(Message::ClosePicker),
+            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -1762,6 +1916,7 @@ impl App {
         let search = text_input("Filter\u{2026}", &self.picker_filter)
             .on_input(Message::PickerFilterChanged)
             .padding(6)
+            .style(style::win32_text_input)
             .width(Length::Fill);
 
         let q = self.picker_filter.to_ascii_lowercase();
@@ -1823,7 +1978,7 @@ impl App {
                 .align_x(iced::Alignment::Center);
             let pickable: Element<'_, Message> = button(tile)
                 .padding(2)
-                .style(button::text)
+                .style(style::win32_toolbar_button)
                 .on_press(Message::PickThingKind(entry.id))
                 .into();
             current_row.push(pickable);
@@ -1863,6 +2018,9 @@ impl App {
         let Some(line) = map.linedefs.get(id) else {
             return text("(missing linedef)").into();
         };
+        let Some(buf) = self.linedef_buffers.as_ref() else {
+            return text("Loading...").into();
+        };
         let length = match (map.vertices.get(line.v1), map.vertices.get(line.v2)) {
             (Some(a), Some(b)) => {
                 let dx = (b.x - a.x) as f32;
@@ -1893,34 +2051,111 @@ impl App {
             Message::ToggleLinedefFlag { id, bit }
         });
 
-        column![
+        let row_input = |label: &'static str, val: String, field: LinedefIntField| {
+            row![
+                container(text(label).size(13)).width(Length::Fixed(72.0)),
+                text_input("0", &val)
+                    .on_input(move |t| Message::LinedefFieldChanged { field, text: t })
+                    .on_submit(Message::LinedefFieldSubmit(field))
+                    .padding(4)
+            .style(style::win32_text_input)
+                    .width(Length::Fixed(80.0)),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+        };
+
+        let mut col = column![
             text("Linedef").size(15),
             button(text(format!("Action:  {action_label}")).size(13))
                 .padding(0)
-                .style(button::text)
+                .style(style::win32_toolbar_button)
                 .on_press(Message::OpenActionPicker(id)),
             text(format!("Length:  {length:.0}")).size(13),
-            text(format!("Tag:     {}", line.tag)).size(13),
+            row_input("Tag:", buf.tag.clone(), LinedefIntField::Tag),
             text("Flags:").size(13),
             flags,
+        ]
+        .spacing(4);
+
+        if map.format == MapFormat::Hexen {
+            col = col.push(text("Args:").size(13));
+            col = col.push(
+                row![
+                    text_input("0", &buf.args[0])
+                        .on_input(|t| Message::LinedefFieldChanged {
+                            field: LinedefIntField::Arg0,
+                            text: t,
+                        })
+                        .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg0))
+                        .padding(4)
+            .style(style::win32_text_input)
+                        .width(Length::Fixed(56.0)),
+                    text_input("0", &buf.args[1])
+                        .on_input(|t| Message::LinedefFieldChanged {
+                            field: LinedefIntField::Arg1,
+                            text: t,
+                        })
+                        .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg1))
+                        .padding(4)
+            .style(style::win32_text_input)
+                        .width(Length::Fixed(56.0)),
+                    text_input("0", &buf.args[2])
+                        .on_input(|t| Message::LinedefFieldChanged {
+                            field: LinedefIntField::Arg2,
+                            text: t,
+                        })
+                        .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg2))
+                        .padding(4)
+            .style(style::win32_text_input)
+                        .width(Length::Fixed(56.0)),
+                    text_input("0", &buf.args[3])
+                        .on_input(|t| Message::LinedefFieldChanged {
+                            field: LinedefIntField::Arg3,
+                            text: t,
+                        })
+                        .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg3))
+                        .padding(4)
+            .style(style::win32_text_input)
+                        .width(Length::Fixed(56.0)),
+                    text_input("0", &buf.args[4])
+                        .on_input(|t| Message::LinedefFieldChanged {
+                            field: LinedefIntField::Arg4,
+                            text: t,
+                        })
+                        .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg4))
+                        .padding(4)
+            .style(style::win32_text_input)
+                        .width(Length::Fixed(56.0)),
+                ]
+                .spacing(4),
+            );
+        }
+
+        col = col.push(
             text(format!(
                 "Front Sector: {}    Back Sector: {}",
                 sector_label(front_sec),
                 sector_label(back_sec)
             ))
             .size(13),
+        );
+        col = col.push(
             text(format!(
                 "Front Height: {fh}/{ch}    Back Height: {bfh}/{bch}"
             ))
             .size(13),
-        ]
-        .spacing(4)
-        .into()
+        );
+
+        col.into()
     }
 
     fn thing_inspector(&self, map: &Map, id: ThingId) -> Element<'_, Message> {
         let Some(t) = map.things.get(id) else {
             return text("(missing thing)").into();
+        };
+        let Some(buf) = self.thing_buffers.as_ref() else {
+            return text("Loading...").into();
         };
         let name = match self.config.thing_type(t.kind) {
             Some(tt) => format!("{} - {}", t.kind, tt.title),
@@ -1930,15 +2165,31 @@ impl App {
             Message::ToggleThingFlag { id, bit }
         });
 
+        let angle_row = row![
+            container(text("Angle:").size(13)).width(Length::Fixed(72.0)),
+            text_input("0", &buf.angle)
+                .on_input(|t| Message::ThingFieldChanged {
+                    field: ThingIntField::Angle,
+                    text: t,
+                })
+                .on_submit(Message::ThingFieldSubmit(ThingIntField::Angle))
+                .padding(4)
+            .style(style::win32_text_input)
+                .width(Length::Fixed(80.0)),
+            text("\u{00B0}").size(13),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+
         column![
             text("Thing").size(15),
             button(text(format!("Type:    {name}")).size(13))
                 .padding(0)
-                .style(button::text)
+                .style(style::win32_toolbar_button)
                 .on_press(Message::OpenThingKindPicker(id)),
             text(format!("X:       {}", t.x)).size(13),
             text(format!("Y:       {}", t.y)).size(13),
-            text(format!("Angle:   {}\u{00B0}", t.angle)).size(13),
+            angle_row,
             text("Flags:").size(13),
             flags,
         ]
@@ -1965,6 +2216,7 @@ impl App {
                     .on_input(move |t| Message::SectorFieldChanged { field, text: t })
                     .on_submit(Message::SectorFieldSubmit(field))
                     .padding(4)
+            .style(style::win32_text_input)
                     .width(Length::Fixed(120.0)),
             ]
             .spacing(6)
@@ -1984,7 +2236,7 @@ impl App {
             row_input("Tag:", buf.tag.clone(), SectorIntField::Tag),
             button(text(format!("Special: {special_label}")).size(13))
                 .padding(0)
-                .style(button::text)
+                .style(style::win32_toolbar_button)
                 .on_press(Message::OpenSectorSpecialPicker(id)),
             text(format!("Sidedefs: {}", sec.sidedefs.len())).size(13),
         ]
@@ -2065,7 +2317,7 @@ fn selection_details<'a>(
                 col = col.push(
                     button(text(format!("Action:  {action_label}")))
                         .padding(0)
-                        .style(button::text)
+                        .style(style::win32_toolbar_button)
                         .on_press(Message::OpenActionPicker(id)),
                 );
                 col = col.push(text(format!("Length:  {length:.0}")));
@@ -2105,7 +2357,7 @@ fn selection_details<'a>(
                 col = col.push(
                     button(text(format!("Type:    {name}")))
                         .padding(0)
-                        .style(button::text)
+                        .style(style::win32_toolbar_button)
                         .on_press(Message::OpenThingKindPicker(id)),
                 );
                 col = col.push(text(format!("X:       {}", t.x)));
@@ -2347,7 +2599,7 @@ fn texture_slot<'a>(
     let slot: Element<'_, Message> = if let Some(t) = target {
         button(body)
             .padding(0)
-            .style(button::text)
+            .style(style::win32_toolbar_button)
             .on_press(Message::OpenTexturePicker(t))
             .into()
     } else {
@@ -2456,10 +2708,9 @@ where
         .into_iter()
         .map(|(bit, label)| {
             let on = (flags & bit) != 0;
-            let style = if on { button::primary } else { button::secondary };
             button(text(label).size(11))
                 .padding(4)
-                .style(style)
+                .style(style::win32_toggle_button(on))
                 .on_press(on_toggle(bit))
                 .into()
         })
@@ -2467,6 +2718,50 @@ where
     column![row(cells).spacing(4).wrap()]
         .spacing(2)
         .into()
+}
+
+fn linedef_buffer_field(b: &LinedefBuffers, field: LinedefIntField) -> &str {
+    match field {
+        LinedefIntField::Tag => &b.tag,
+        LinedefIntField::Arg0 => &b.args[0],
+        LinedefIntField::Arg1 => &b.args[1],
+        LinedefIntField::Arg2 => &b.args[2],
+        LinedefIntField::Arg3 => &b.args[3],
+        LinedefIntField::Arg4 => &b.args[4],
+        LinedefIntField::Flags => "",
+    }
+}
+
+fn linedef_buffer_field_mut<'a>(
+    b: &'a mut LinedefBuffers,
+    field: LinedefIntField,
+) -> Option<&'a mut String> {
+    match field {
+        LinedefIntField::Tag => Some(&mut b.tag),
+        LinedefIntField::Arg0 => Some(&mut b.args[0]),
+        LinedefIntField::Arg1 => Some(&mut b.args[1]),
+        LinedefIntField::Arg2 => Some(&mut b.args[2]),
+        LinedefIntField::Arg3 => Some(&mut b.args[3]),
+        LinedefIntField::Arg4 => Some(&mut b.args[4]),
+        LinedefIntField::Flags => None,
+    }
+}
+
+fn thing_buffer_field(b: &ThingBuffers, field: ThingIntField) -> &str {
+    match field {
+        ThingIntField::Angle => &b.angle,
+        ThingIntField::Flags => "",
+    }
+}
+
+fn thing_buffer_field_mut<'a>(
+    b: &'a mut ThingBuffers,
+    field: ThingIntField,
+) -> Option<&'a mut String> {
+    match field {
+        ThingIntField::Angle => Some(&mut b.angle),
+        ThingIntField::Flags => None,
+    }
 }
 
 fn sector_buffer_field(b: &SectorBuffers, field: SectorIntField) -> &str {
@@ -2503,101 +2798,53 @@ fn edit_mode_matches(mode: EditMode, h: HighlightKind) -> bool {
 }
 
 fn edit_mode_button(target: EditMode, current: EditMode) -> Element<'static, Message> {
-    let mut b = button(text(target.label()));
-    if target != current {
+    let active = target == current;
+    let mut b = button(text(target.label())).style(style::win32_toggle_button(active));
+    if !active {
         b = b.on_press(Message::SetEditMode(target));
     }
     b.into()
 }
 
 fn mode_button(label: &str, target: Mode, current: Mode) -> Element<'static, Message> {
-    let mut b = button(text(label.to_string()));
-    if target != current {
+    let active = target == current;
+    let mut b = button(text(label.to_string())).style(style::win32_toggle_button(active));
+    if !active {
         b = b.on_press(Message::Mode(target));
     }
     b.into()
 }
 
-fn menu_bar_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb(0.18, 0.18, 0.21))),
-        border: Border {
-            color: Color::from_rgb(0.05, 0.05, 0.06),
-            width: 1.0,
-            radius: 0.0.into(),
-        },
-        ..Default::default()
-    }
+fn menu_bar_style(theme: &Theme) -> container::Style {
+    style::win32_menu(theme)
 }
 
-fn panel_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb(0.13, 0.13, 0.15))),
-        border: Border {
-            color: Color::from_rgb(0.05, 0.05, 0.06),
-            width: 1.0,
-            radius: 0.0.into(),
-        },
-        ..Default::default()
-    }
+fn panel_style(theme: &Theme) -> container::Style {
+    style::win32_panel(theme)
 }
 
-fn status_bar_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb(0.10, 0.10, 0.12))),
-        text_color: Some(Color::from_rgb(0.7, 0.7, 0.75)),
-        ..Default::default()
-    }
+fn status_bar_style(theme: &Theme) -> container::Style {
+    style::win32_status_bar(theme)
 }
 
-fn side_panel_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb(0.16, 0.16, 0.18))),
-        border: Border {
-            color: Color::from_rgb(0.05, 0.05, 0.06),
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..Default::default()
-    }
+fn side_panel_style(theme: &Theme) -> container::Style {
+    style::win32_side_panel(theme)
 }
 
-fn modal_backdrop_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
-        ..Default::default()
-    }
+fn modal_backdrop_style(theme: &Theme) -> container::Style {
+    style::win32_modal_backdrop(theme)
 }
 
-fn modal_panel_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb(0.16, 0.16, 0.18))),
-        border: Border {
-            color: Color::from_rgb(0.40, 0.40, 0.44),
-            width: 1.0,
-            radius: 6.0.into(),
-        },
-        ..Default::default()
-    }
+fn modal_panel_style(theme: &Theme) -> container::Style {
+    style::win32_modal_panel(theme)
 }
 
-fn texture_slot_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb(0.08, 0.08, 0.10))),
-        border: Border {
-            color: Color::from_rgb(0.30, 0.30, 0.32),
-            width: 1.0,
-            radius: 2.0.into(),
-        },
-        ..Default::default()
-    }
+fn texture_slot_style(theme: &Theme) -> container::Style {
+    style::win32_well(theme)
 }
 
-fn separator_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb(0.30, 0.30, 0.34))),
-        ..Default::default()
-    }
+fn separator_style(theme: &Theme) -> container::Style {
+    style::win32_separator(theme)
 }
 
 async fn pick_save_path(suggested_stem: String) -> Option<PathBuf> {
