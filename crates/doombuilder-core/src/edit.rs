@@ -77,6 +77,21 @@ pub enum Command {
         old: u16,
         new: u16,
     },
+    /// Change one of a sector's integer fields (floor / ceiling / light / tag).
+    SetSectorIntField {
+        id: SectorId,
+        field: SectorIntField,
+        old: i32,
+        new: i32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectorIntField {
+    FloorHeight,
+    CeilingHeight,
+    Light,
+    Tag,
 }
 
 impl Command {
@@ -129,6 +144,11 @@ impl Command {
             Command::SetThingKind { id, new, .. } => {
                 if let Some(t) = map.things.get_mut(*id) {
                     t.kind = *new;
+                }
+            }
+            Command::SetSectorIntField { id, field, new, .. } => {
+                if let Some(s) = map.sectors.get_mut(*id) {
+                    write_sector_int(s, *field, *new);
                 }
             }
         }
@@ -187,7 +207,23 @@ impl Command {
                     t.kind = *old;
                 }
             }
+            Command::SetSectorIntField { id, field, old, .. } => {
+                if let Some(s) = map.sectors.get_mut(*id) {
+                    write_sector_int(s, *field, *old);
+                }
+            }
         }
+    }
+}
+
+fn write_sector_int(s: &mut crate::map::MapSector, field: SectorIntField, value: i32) {
+    match field {
+        SectorIntField::FloorHeight => s.floor_height = value.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        SectorIntField::CeilingHeight => {
+            s.ceiling_height = value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        }
+        SectorIntField::Light => s.light = value.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        SectorIntField::Tag => s.tag = value.clamp(0, u16::MAX as i32) as u16,
     }
 }
 

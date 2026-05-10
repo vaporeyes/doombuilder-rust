@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::map::{LinedefId, Map, SectorId, ThingId, VertexId};
+
+use crate::EditMode;
 use doombuilder_render::{FloorMesh, Hit};
 use glam::Vec2;
 use iced::mouse;
@@ -65,6 +67,7 @@ pub struct View2D {
     pub drag_rect: Option<(Vec2, Vec2)>,
     pub fills: Arc<Vec<FillTile>>,
     pub config: Arc<GameConfig>,
+    pub edit_mode: EditMode,
 }
 
 impl View2D {
@@ -245,13 +248,27 @@ impl<Message> Program<Message> for View2DProgram<Message> {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let viewport = Vec2::new(bounds.width, bounds.height);
+        let mode = self.inner.edit_mode;
         let geometry = self.inner.cache.draw(renderer, bounds.size(), |frame| {
             draw_background(frame, bounds);
             draw_grid(frame, &self.inner.camera, viewport);
+            let fill_alpha = if mode == EditMode::Sectors { 1.0 } else { 0.55 };
             if self.inner.fills.is_empty() {
-                draw_sector_fills_solid(frame, &self.inner.meshes, &self.inner.camera, viewport);
+                draw_sector_fills_solid(
+                    frame,
+                    &self.inner.meshes,
+                    &self.inner.camera,
+                    viewport,
+                    fill_alpha,
+                );
             } else {
-                draw_sector_fills_textured(frame, &self.inner.fills, &self.inner.camera, viewport);
+                draw_sector_fills_textured(
+                    frame,
+                    &self.inner.fills,
+                    &self.inner.camera,
+                    viewport,
+                    fill_alpha,
+                );
             }
             draw_sector_highlights(
                 frame,
@@ -268,15 +285,31 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                 viewport,
                 self.inner.hover,
                 &self.inner.selection,
+                mode,
             );
-            draw_vertices(
-                frame,
-                &self.inner.map,
-                &self.inner.camera,
-                viewport,
-                self.inner.hover,
-                &self.inner.selection,
-            );
+            // Vertices are only emphasised in Vertices mode; skip the per-vertex
+            // dot pass otherwise (selected/hovered vertices still render).
+            if mode == EditMode::Vertices {
+                draw_vertices(
+                    frame,
+                    &self.inner.map,
+                    &self.inner.camera,
+                    viewport,
+                    self.inner.hover,
+                    &self.inner.selection,
+                    1.0,
+                );
+            } else {
+                draw_vertices_only_highlights(
+                    frame,
+                    &self.inner.map,
+                    &self.inner.camera,
+                    viewport,
+                    self.inner.hover,
+                    &self.inner.selection,
+                );
+            }
+            let things_alpha = if mode == EditMode::Things { 1.0 } else { 0.55 };
             draw_things(
                 frame,
                 &self.inner.map,
@@ -285,6 +318,7 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                 &self.inner.config,
                 self.inner.hover,
                 &self.inner.selection,
+                things_alpha,
             );
             if let Some((start, end)) = self.inner.drag_rect {
                 draw_drag_rect(frame, &self.inner.camera, viewport, start, end);
@@ -405,6 +439,7 @@ fn draw_sector_fills_textured(
     fills: &[FillTile],
     camera: &Camera2D,
     viewport: Vec2,
+    alpha: f32,
 ) {
     for tile in fills {
         // World max-y maps to screen top because the camera flips Y.
@@ -425,7 +460,8 @@ fn draw_sector_fills_textured(
         if br.x < 0.0 || br.y < 0.0 || tl.x > viewport.x || tl.y > viewport.y {
             continue;
         }
-        frame.draw_image(Rectangle::new(Point::new(tl.x, tl.y), Size::new(w, h)), &tile.handle);
+        let img = canvas::Image::new(tile.handle.clone()).opacity(alpha);
+        frame.draw_image(Rectangle::new(Point::new(tl.x, tl.y), Size::new(w, h)), img);
     }
 }
 
@@ -434,8 +470,9 @@ fn draw_sector_fills_solid(
     meshes: &[(SectorId, FloorMesh)],
     camera: &Camera2D,
     viewport: Vec2,
+    alpha: f32,
 ) {
-    let fill = Color::from_rgba(0.15, 0.20, 0.30, 0.6);
+    let fill = Color::from_rgba(0.15, 0.20, 0.30, 0.6 * alpha);
     for (_, mesh) in meshes {
         let mut tri_path = canvas::path::Builder::new();
         let mut i = 0;
@@ -503,12 +540,18 @@ fn draw_linedefs(
     viewport: Vec2,
     hover: Option<HighlightKind>,
     selection: &HashSet<HighlightKind>,
+    mode: EditMode,
 ) {
+    let active_alpha = if mode == EditMode::Linedefs || mode == EditMode::Sectors {
+        1.0
+    } else {
+        0.55
+    };
     let one_sided = Stroke::default()
-        .with_color(Color::from_rgb(0.85, 0.85, 0.90))
+        .with_color(Color::from_rgba(0.85, 0.85, 0.90, active_alpha))
         .with_width(1.2);
     let two_sided = Stroke::default()
-        .with_color(Color::from_rgba(0.55, 0.65, 0.80, 0.9))
+        .with_color(Color::from_rgba(0.55, 0.65, 0.80, 0.9 * active_alpha))
         .with_width(1.0);
     let hovered = Stroke::default()
         .with_color(Color::from_rgb(1.0, 0.7, 0.2))
@@ -540,6 +583,29 @@ fn draw_linedefs(
     }
 }
 
+fn draw_vertices_only_highlights(
+    frame: &mut Frame,
+    map: &Map,
+    camera: &Camera2D,
+    viewport: Vec2,
+    hover: Option<HighlightKind>,
+    selection: &HashSet<HighlightKind>,
+) {
+    let hovered = Color::from_rgb(1.0, 0.55, 0.1);
+    let selected = Color::from_rgb(1.0, 0.2, 0.2);
+    let radius = (camera.zoom * 0.6).clamp(2.5, 4.0);
+    for (id, v) in &map.vertices {
+        let is_sel = selection.contains(&HighlightKind::Vertex(id));
+        let is_hov = matches!(hover, Some(HighlightKind::Vertex(x)) if x == id);
+        if !is_sel && !is_hov {
+            continue;
+        }
+        let s = camera.world_to_screen(Vec2::new(v.x as f32, v.y as f32), viewport);
+        let color = if is_sel { selected } else { hovered };
+        frame.fill(&Path::circle(Point::new(s.x, s.y), radius), color);
+    }
+}
+
 fn draw_vertices(
     frame: &mut Frame,
     map: &Map,
@@ -547,6 +613,7 @@ fn draw_vertices(
     viewport: Vec2,
     hover: Option<HighlightKind>,
     selection: &HashSet<HighlightKind>,
+    _alpha: f32,
 ) {
     let visible = camera.zoom >= 0.15;
     let base = Color::from_rgb(1.0, 0.85, 0.3);
@@ -581,6 +648,7 @@ fn draw_things(
     config: &GameConfig,
     hover: Option<HighlightKind>,
     selection: &HashSet<HighlightKind>,
+    alpha: f32,
 ) {
     let radius_world = 16.0_f32;
     for (id, t) in &map.things {
@@ -592,20 +660,20 @@ fn draw_things(
         let rad = (t.angle as f32).to_radians();
         let dx = rad.cos();
         let dy = rad.sin();
-        // Translate world-space arrow into screen by sampling two world points;
-        // this naturally honours the camera's Y-flip.
         let arrow_world = Vec2::new(world_x + dx * radius_world, world_y + dy * radius_world);
         let arrow_end = camera.world_to_screen(arrow_world, viewport);
 
         let base = thing_color(config, t.kind);
+        let base = with_alpha(base, alpha);
         let is_selected = selection.contains(&HighlightKind::Thing(id));
         let is_hover = matches!(hover, Some(HighlightKind::Thing(h)) if h == id);
+        // Highlights stay full-opacity even when the things layer is dimmed.
         let (fill, ring_color, ring_width) = if is_selected {
-            (base, Color::from_rgb(1.0, 0.25, 0.25), 2.5)
+            (with_alpha(base, 1.0), Color::from_rgb(1.0, 0.25, 0.25), 2.5)
         } else if is_hover {
-            (base, Color::from_rgb(1.0, 0.75, 0.2), 2.0)
+            (with_alpha(base, 1.0), Color::from_rgb(1.0, 0.75, 0.2), 2.0)
         } else {
-            (base, Color::from_rgba(0.0, 0.0, 0.0, 0.85), 1.0)
+            (base, Color::from_rgba(0.0, 0.0, 0.0, 0.85 * alpha), 1.0)
         };
 
         frame.fill(&Path::circle(Point::new(center.x, center.y), radius_px), fill);
@@ -621,10 +689,14 @@ fn draw_things(
         frame.stroke(
             &arrow,
             Stroke::default()
-                .with_color(Color::from_rgba(0.0, 0.0, 0.0, 0.95))
+                .with_color(Color::from_rgba(0.0, 0.0, 0.0, 0.95 * alpha))
                 .with_width(2.0),
         );
     }
+}
+
+fn with_alpha(c: Color, a: f32) -> Color {
+    Color::from_rgba(c.r, c.g, c.b, c.a * a)
 }
 
 fn thing_color(config: &GameConfig, kind: u16) -> Color {

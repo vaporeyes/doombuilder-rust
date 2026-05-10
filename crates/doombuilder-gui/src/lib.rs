@@ -13,7 +13,7 @@ use std::sync::Arc;
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::edit::{
-    Command, SectorSlot, SidedefSlot, ThingMove, UndoStack, VertexMove,
+    Command, SectorIntField, SectorSlot, SidedefSlot, ThingMove, UndoStack, VertexMove,
 };
 use doombuilder_core::map::MapThing;
 use doombuilder_core::map::{
@@ -54,6 +54,31 @@ pub enum Mode {
     View3D,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditMode {
+    Vertices,
+    Linedefs,
+    Sectors,
+    Things,
+}
+
+impl Default for EditMode {
+    fn default() -> Self {
+        EditMode::Linedefs
+    }
+}
+
+impl EditMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            EditMode::Vertices => "Vertices",
+            EditMode::Linedefs => "Linedefs",
+            EditMode::Sectors => "Sectors",
+            EditMode::Things => "Things",
+        }
+    }
+}
+
 pub struct App {
     status: String,
     wad: Option<Wad>,
@@ -80,6 +105,7 @@ pub struct App {
     undo: UndoStack,
     modifiers: Modifiers,
     mode: Mode,
+    edit_mode: EditMode,
     config: Arc<GameConfig>,
     textures: Option<Arc<TextureSet>>,
     texture_handles: Arc<HashMap<String, ImageHandle>>,
@@ -87,6 +113,16 @@ pub struct App {
     sorted_texture_names: Arc<Vec<String>>,
     active_picker: Option<ActivePicker>,
     picker_filter: String,
+    sector_buffers: Option<SectorBuffers>,
+}
+
+#[derive(Debug, Clone)]
+struct SectorBuffers {
+    sector: SectorId,
+    floor: String,
+    ceiling: String,
+    light: String,
+    tag: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -149,6 +185,7 @@ impl Default for App {
             undo: UndoStack::new(),
             modifiers: Modifiers::default(),
             mode: Mode::default(),
+            edit_mode: EditMode::default(),
             config: Arc::new(GameConfig::vanilla_doom()),
             textures: None,
             texture_handles: Arc::new(HashMap::new()),
@@ -156,6 +193,7 @@ impl Default for App {
             sorted_texture_names: Arc::new(Vec::new()),
             active_picker: None,
             picker_filter: String::new(),
+            sector_buffers: None,
         }
     }
 }
@@ -171,6 +209,7 @@ pub enum Message {
     MapSelected(String),
     MapLoaded(Result<MapPayload, String>),
     Mode(Mode),
+    SetEditMode(EditMode),
     ToggleTextures,
     View2D(View2DMessage),
     View3D(View3DMessage),
@@ -189,6 +228,8 @@ pub enum Message {
     PickAction(u16),
     PickThingKind(u16),
     PickerFilterChanged(String),
+    SectorFieldChanged { field: SectorIntField, text: String },
+    SectorFieldSubmit(SectorIntField),
     Quit,
     Noop,
 }
@@ -240,6 +281,40 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle_message(message);
+        self.refresh_sector_buffers();
+        task
+    }
+
+    fn refresh_sector_buffers(&mut self) {
+        let single_sector: Option<SectorId> = if self.selection.len() == 1 {
+            self.selection.iter().next().and_then(|h| match h {
+                HighlightKind::Sector(id) => Some(*id),
+                _ => None,
+            })
+        } else {
+            None
+        };
+        match (single_sector, &self.sector_buffers) {
+            (Some(id), Some(b)) if b.sector == id => {}
+            (Some(id), _) => {
+                if let Some(map) = &self.map {
+                    if let Some(s) = map.sectors.get(id) {
+                        self.sector_buffers = Some(SectorBuffers {
+                            sector: id,
+                            floor: s.floor_height.to_string(),
+                            ceiling: s.ceiling_height.to_string(),
+                            light: s.light.to_string(),
+                            tag: s.tag.to_string(),
+                        });
+                    }
+                }
+            }
+            (None, _) => self.sector_buffers = None,
+        }
+    }
+
+    fn handle_message(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::OpenWadRequested => {
                 self.status = "Choose a WAD, PK3, or zip...".to_string();
@@ -342,6 +417,19 @@ impl App {
                 self.mode = mode;
                 Task::none()
             }
+            Message::SetEditMode(em) => {
+                if self.edit_mode != em {
+                    self.edit_mode = em;
+                    // Drop selection elements that aren't compatible with the
+                    // new mode, then drop the hover too.
+                    let mut sel = (*self.selection).clone();
+                    sel.retain(|h| edit_mode_matches(em, *h));
+                    self.selection = Arc::new(sel);
+                    self.hover = None;
+                    self.cache2d.clear();
+                }
+                Task::none()
+            }
             Message::ToggleTextures => {
                 self.show_textures = !self.show_textures;
                 self.cache2d.clear();
@@ -389,12 +477,16 @@ impl App {
             }
             Message::SelectAll => {
                 if let Some(map) = &self.map {
-                    let all: HashSet<HighlightKind> = map
-                        .vertices
-                        .keys()
-                        .map(HighlightKind::Vertex)
-                        .chain(map.linedefs.keys().map(HighlightKind::Linedef))
-                        .collect();
+                    let all: HashSet<HighlightKind> = match self.edit_mode {
+                        EditMode::Vertices => {
+                            map.vertices.keys().map(HighlightKind::Vertex).collect()
+                        }
+                        EditMode::Linedefs => {
+                            map.linedefs.keys().map(HighlightKind::Linedef).collect()
+                        }
+                        EditMode::Sectors => map.sectors.keys().map(HighlightKind::Sector).collect(),
+                        EditMode::Things => map.things.keys().map(HighlightKind::Thing).collect(),
+                    };
                     self.selection = Arc::new(all);
                     self.cache2d.clear();
                 }
@@ -583,6 +675,45 @@ impl App {
                 }
                 Task::none()
             }
+            Message::SectorFieldChanged { field, text } => {
+                if let Some(b) = self.sector_buffers.as_mut() {
+                    sector_buffer_field_mut(b, field).clear();
+                    sector_buffer_field_mut(b, field).push_str(&text);
+                }
+                Task::none()
+            }
+            Message::SectorFieldSubmit(field) => {
+                let Some(b) = self.sector_buffers.clone() else {
+                    return Task::none();
+                };
+                let parsed: Option<i32> = sector_buffer_field(&b, field).trim().parse().ok();
+                if let (Some(new), Some(map)) = (parsed, self.map.as_mut()) {
+                    let map_mut = Arc::make_mut(map);
+                    if let Some(sec) = map_mut.sectors.get(b.sector) {
+                        let old = match field {
+                            SectorIntField::FloorHeight => sec.floor_height as i32,
+                            SectorIntField::CeilingHeight => sec.ceiling_height as i32,
+                            SectorIntField::Light => sec.light as i32,
+                            SectorIntField::Tag => sec.tag as i32,
+                        };
+                        if old != new {
+                            let mut cmd = Command::SetSectorIntField {
+                                id: b.sector,
+                                field,
+                                old,
+                                new,
+                            };
+                            cmd.apply(map_mut);
+                            self.undo.push(cmd);
+                            // Heights affect 3D geometry; light affects 3D shading;
+                            // either way rebuild keeps both views consistent.
+                            self.rebuild_geometry_indices();
+                            self.cache2d.clear();
+                        }
+                    }
+                }
+                Task::none()
+            }
             Message::Quit => iced::exit(),
             Message::Noop => Task::none(),
         }
@@ -622,6 +753,18 @@ impl App {
                 }
                 keyboard::Key::Named(keyboard::key::Named::Insert) => Message::InsertThing,
                 keyboard::Key::Character("i") if !modifiers.command() => Message::InsertThing,
+                keyboard::Key::Character("1") if !modifiers.command() => {
+                    Message::SetEditMode(EditMode::Vertices)
+                }
+                keyboard::Key::Character("2") if !modifiers.command() => {
+                    Message::SetEditMode(EditMode::Linedefs)
+                }
+                keyboard::Key::Character("3") if !modifiers.command() => {
+                    Message::SetEditMode(EditMode::Sectors)
+                }
+                keyboard::Key::Character("4") if !modifiers.command() => {
+                    Message::SetEditMode(EditMode::Things)
+                }
                 _ => Message::ModifiersChanged(modifiers),
             },
             keyboard::Event::KeyReleased { modifiers, .. } => {
@@ -760,7 +903,7 @@ impl App {
         match mode {
             Some(DragMode::Rect) => {
                 self.drag_rect = None;
-                if let Some(spatial) = &self.spatial {
+                if let (Some(spatial), Some(map)) = (&self.spatial, self.map.as_ref()) {
                     let min = [start.x.min(end.x), start.y.min(end.y)];
                     let max = [start.x.max(end.x), start.y.max(end.y)];
                     let mut sel: HashSet<HighlightKind> = if self.modifiers.shift() {
@@ -768,11 +911,29 @@ impl App {
                     } else {
                         HashSet::new()
                     };
-                    for v in spatial.vertices_in_rect(min, max) {
-                        sel.insert(HighlightKind::Vertex(v));
-                    }
-                    for l in spatial.linedefs_in_rect(min, max) {
-                        sel.insert(HighlightKind::Linedef(l));
+                    match self.edit_mode {
+                        EditMode::Vertices => {
+                            for v in spatial.vertices_in_rect(min, max) {
+                                sel.insert(HighlightKind::Vertex(v));
+                            }
+                        }
+                        EditMode::Linedefs => {
+                            for l in spatial.linedefs_in_rect(min, max) {
+                                sel.insert(HighlightKind::Linedef(l));
+                            }
+                        }
+                        EditMode::Things => {
+                            for (id, t) in &map.things {
+                                let tx = t.x as f32;
+                                let ty = t.y as f32;
+                                if tx >= min[0] && tx <= max[0] && ty >= min[1] && ty <= max[1] {
+                                    sel.insert(HighlightKind::Thing(id));
+                                }
+                            }
+                        }
+                        EditMode::Sectors => {
+                            // No bulk rect-select for sectors; UDB matches.
+                        }
                     }
                     self.selection = Arc::new(sel);
                 }
@@ -988,9 +1149,18 @@ impl App {
         let zoom = self.camera2d.zoom.max(1e-6);
         let vertex_radius = 8.0 / zoom;
         let linedef_radius = 5.0 / zoom;
-        spatial
-            .hit_test(world.x, world.y, vertex_radius, linedef_radius)
-            .map(HighlightKind::from)
+        match self.edit_mode {
+            EditMode::Vertices => spatial
+                .nearest_vertex(world.x, world.y, vertex_radius)
+                .map(HighlightKind::Vertex),
+            EditMode::Linedefs => spatial
+                .nearest_linedef(world.x, world.y, linedef_radius)
+                .map(HighlightKind::Linedef),
+            EditMode::Sectors => spatial.sector_at(world.x, world.y).map(HighlightKind::Sector),
+            EditMode::Things => spatial
+                .nearest_thing(world.x, world.y, 24.0)
+                .map(HighlightKind::Thing),
+        }
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -1049,6 +1219,11 @@ impl App {
                 mode_button("2D", Mode::View2D, self.mode),
                 mode_button("3D", Mode::View3D, self.mode),
                 vertical_separator(),
+                edit_mode_button(EditMode::Vertices, self.edit_mode),
+                edit_mode_button(EditMode::Linedefs, self.edit_mode),
+                edit_mode_button(EditMode::Sectors, self.edit_mode),
+                edit_mode_button(EditMode::Things, self.edit_mode),
+                vertical_separator(),
                 button(text(if self.show_textures {
                     "Show textures: ON"
                 } else {
@@ -1088,6 +1263,7 @@ impl App {
                         Arc::new(Vec::new())
                     },
                     config: self.config.clone(),
+                    edit_mode: self.edit_mode,
                 };
                 view.into_widget(Message::View2D)
             }
@@ -1118,7 +1294,10 @@ impl App {
             .spacing(2)
             .into()
         } else if let Some(h) = single {
-            selection_details(map, &self.config, h)
+            match h {
+                HighlightKind::Sector(_) => self.sector_inspector(map, h),
+                _ => selection_details(map, &self.config, h),
+            }
         } else {
             multi_select_summary(&self.selection)
         };
@@ -1184,8 +1363,13 @@ impl App {
                     MapFormat::Hexen => "Hexen",
                 };
                 format!(
-                    "{fmt} | {} verts | {} lines | {} sides | {} sectors | {} things",
-                    s.vertices, s.linedefs, s.sidedefs, s.sectors, s.things
+                    "{fmt} | mode: {} | {} verts | {} lines | {} sides | {} sectors | {} things",
+                    self.edit_mode.label(),
+                    s.vertices,
+                    s.linedefs,
+                    s.sidedefs,
+                    s.sectors,
+                    s.things
                 )
             })
             .unwrap_or_else(|| self.status.clone());
@@ -1522,6 +1706,49 @@ impl App {
             .spacing(8)
             .padding(12)
             .into()
+    }
+
+    fn sector_inspector(&self, map: &Map, highlight: HighlightKind) -> Element<'_, Message> {
+        let id = match highlight {
+            HighlightKind::Sector(id) => id,
+            _ => return text("(internal: not a sector)").into(),
+        };
+        let Some(sec) = map.sectors.get(id) else {
+            return text("(missing sector)").into();
+        };
+        let Some(buf) = self.sector_buffers.as_ref() else {
+            return text("Loading...").into();
+        };
+
+        let row_input = |label: &'static str, val: String, field: SectorIntField| {
+            row![
+                container(text(label).size(13)).width(Length::Fixed(72.0)),
+                text_input("0", &val)
+                    .on_input(move |t| Message::SectorFieldChanged { field, text: t })
+                    .on_submit(Message::SectorFieldSubmit(field))
+                    .padding(4)
+                    .width(Length::Fixed(120.0)),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+        };
+
+        let special_label = match self.config.sector_special(sec.special) {
+            Some(name) => format!("{} - {}", sec.special, name),
+            None => format!("{} - (unknown)", sec.special),
+        };
+
+        column![
+            text("Sector").size(15),
+            row_input("Floor:", buf.floor.clone(), SectorIntField::FloorHeight),
+            row_input("Ceiling:", buf.ceiling.clone(), SectorIntField::CeilingHeight),
+            row_input("Light:", buf.light.clone(), SectorIntField::Light),
+            row_input("Tag:", buf.tag.clone(), SectorIntField::Tag),
+            text(format!("Special: {special_label}")).size(13),
+            text(format!("Sidedefs: {}", sec.sidedefs.len())).size(13),
+        ]
+        .spacing(4)
+        .into()
     }
 
     fn view3d_widget(&self) -> Element<'_, Message> {
@@ -1969,6 +2196,42 @@ fn menu_picker(
     pick_list(items, None::<MenuItem>, on_pick)
         .placeholder(label)
         .into()
+}
+
+fn sector_buffer_field(b: &SectorBuffers, field: SectorIntField) -> &str {
+    match field {
+        SectorIntField::FloorHeight => &b.floor,
+        SectorIntField::CeilingHeight => &b.ceiling,
+        SectorIntField::Light => &b.light,
+        SectorIntField::Tag => &b.tag,
+    }
+}
+
+fn sector_buffer_field_mut(b: &mut SectorBuffers, field: SectorIntField) -> &mut String {
+    match field {
+        SectorIntField::FloorHeight => &mut b.floor,
+        SectorIntField::CeilingHeight => &mut b.ceiling,
+        SectorIntField::Light => &mut b.light,
+        SectorIntField::Tag => &mut b.tag,
+    }
+}
+
+fn edit_mode_matches(mode: EditMode, h: HighlightKind) -> bool {
+    matches!(
+        (mode, h),
+        (EditMode::Vertices, HighlightKind::Vertex(_))
+            | (EditMode::Linedefs, HighlightKind::Linedef(_))
+            | (EditMode::Sectors, HighlightKind::Sector(_))
+            | (EditMode::Things, HighlightKind::Thing(_))
+    )
+}
+
+fn edit_mode_button(target: EditMode, current: EditMode) -> Element<'static, Message> {
+    let mut b = button(text(target.label()));
+    if target != current {
+        b = b.on_press(Message::SetEditMode(target));
+    }
+    b.into()
 }
 
 fn mode_button(label: &str, target: Mode, current: Mode) -> Element<'static, Message> {
