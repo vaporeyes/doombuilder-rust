@@ -1,0 +1,1615 @@
+[meta]
+name = "Vanilla Doom 2"
+format = "doom"
+
+# Linedef action specials
+[[linedef_specials]]
+id = 0
+title = "None"
+category = "misc"
+
+[[linedef_specials]]
+id = 1
+title = "Door Open Wait Close (also monsters)"
+prefix = "DR"
+category = "door"
+
+[[linedef_specials]]
+id = 2
+title = "Door Open Stay"
+prefix = "W1"
+category = "door"
+
+[[linedef_specials]]
+id = 3
+title = "Door Close Stay"
+prefix = "W1"
+category = "door"
+
+[[linedef_specials]]
+id = 4
+title = "Door Open Wait Close"
+prefix = "W1"
+category = "door"
+
+[[linedef_specials]]
+id = 5
+title = "Floor Raise to Lowest Ceiling"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 6
+title = "Crusher Start with Fast Damage"
+prefix = "W1"
+category = "crusher"
+
+[[linedef_specials]]
+id = 7
+title = "Stairs Raise by 8"
+prefix = "S1"
+category = "stairs"
+
+[[linedef_specials]]
+id = 8
+title = "Stairs Raise by 8"
+prefix = "W1"
+category = "stairs"
+
+[[linedef_specials]]
+id = 9
+title = "Floor Raise Donut (changes texture)"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 10
+title = "Lift Lower Wait Raise"
+prefix = "W1"
+category = "lift"
+
+[[linedef_specials]]
+id = 11
+title = "Exit Level"
+prefix = "S1"
+category = "exit"
+
+[[linedef_specials]]
+id = 12
+title = "Light Change to Brightest Adjacent"
+prefix = "W1"
+category = "light"
+
+[[linedef_specials]]
+id = 13
+title = "Light Change to 255"
+prefix = "W1"
+category = "light"
+
+[[linedef_specials]]
+id = 14
+title = "Floor Raise by 32 (changes texture)"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 15
+title = "Floor Raise by 24 (changes texture)"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 16
+title = "Door Close Wait Open"
+prefix = "W1"
+category = "door"
+
+[[linedef_specials]]
+id = 17
+title = "Light Start Blinking"
+prefix = "W1"
+category = "light"
+
+[[linedef_specials]]
+id = 18
+title = "Floor Raise to Next Higher Floor"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 19
+title = "Floor Lower to Highest Floor"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 20
+title = "Floor Raise to Next Higher Floor (changes texture)"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 21
+title = "Lift Lower Wait Raise"
+prefix = "S1"
+category = "lift"
+
+[[linedef_specials]]
+id = 22
+title = "Floor Raise to Next Higher Floor (changes texture)"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 23
+title = "Floor Lower to Lowest Floor"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 24
+title = "Floor Raise to Lowest Ceiling"
+prefix = "G1"
+category = "floor"
+
+[[linedef_specials]]
+id = 25
+title = "Crusher Start with Slow Damage"
+prefix = "W1"
+category = "crusher"
+
+[[linedef_specials]]
+id = 26
+title = "Door (Blue) Open Wait Close"
+prefix = "DR"
+category = "door"
+
+[[linedef_specials]]
+id = 27
+title = "Door (Yellow) Open Wait Close"
+prefix = "DR"
+category = "door"
+
+[[linedef_specials]]
+id = 28
+title = "Door (Red) Open Wait Close"
+prefix = "DR"
+category = "door"
+
+[[linedef_specials]]
+id = 29
+title = "Door Open Wait Close"
+prefix = "S1"
+category = "door"
+
+[[linedef_specials]]
+id = 30
+title = "Floor Raise by Shortest Lower Texture"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 31
+title = "Door Open Stay"
+prefix = "D1"
+category = "door"
+
+[[linedef_specials]]
+id = 32
+title = "Door (Blue) Open Stay"
+prefix = "D1"
+category = "door"
+
+[[linedef_specials]]
+id = 33
+title = "Door (Red) Open Stay"
+prefix = "D1"
+category = "door"
+
+[[linedef_specials]]
+id = 34
+title = "Door (Yellow) Open Stay"
+prefix = "D1"
+category = "door"
+
+[[linedef_specials]]
+id = 35
+title = "Light Change to 35"
+prefix = "W1"
+category = "light"
+
+[[linedef_specials]]
+id = 36
+title = "Floor Lower to 8 above Highest Floor"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 37
+title = "Floor Lower to Lowest Floor (changes texture)"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 38
+title = "Floor Lower to Lowest Floor"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 39
+title = "Teleport"
+prefix = "W1"
+category = "teleport"
+
+[[linedef_specials]]
+id = 40
+title = "Ceiling Raise to Highest Ceiling"
+prefix = "W1"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 41
+title = "Ceiling Lower to Floor"
+prefix = "S1"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 42
+title = "Door Close Stay"
+prefix = "SR"
+category = "door"
+
+[[linedef_specials]]
+id = 43
+title = "Ceiling Lower to Floor"
+prefix = "SR"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 44
+title = "Ceiling Lower to 8 above Floor"
+prefix = "W1"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 45
+title = "Floor Lower to Highest Floor"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 46
+title = "Door Open Stay"
+prefix = "GR"
+category = "door"
+
+[[linedef_specials]]
+id = 47
+title = "Floor Raise to Next Higher Floor (changes texture)"
+prefix = "G1"
+category = "floor"
+
+[[linedef_specials]]
+id = 48
+title = "Scroll Texture Left"
+category = "scroll"
+
+[[linedef_specials]]
+id = 49
+title = "Ceiling Lower to 8 above Floor (perpetual slow crusher damage)"
+prefix = "S1"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 50
+title = "Door Close Stay"
+prefix = "S1"
+category = "door"
+
+[[linedef_specials]]
+id = 51
+title = "Exit Level (goes to secret level)"
+prefix = "S1"
+category = "exit"
+
+[[linedef_specials]]
+id = 52
+title = "Exit Level"
+prefix = "W1"
+category = "exit"
+
+[[linedef_specials]]
+id = 53
+title = "Floor Start Moving Up and Down"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 54
+title = "Floor Stop Moving"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 55
+title = "Floor Raise to 8 below Lowest Ceiling (crushes)"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 56
+title = "Floor Raise to 8 below Lowest Ceiling (crushes)"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 57
+title = "Crusher Stop"
+prefix = "W1"
+category = "crusher"
+
+[[linedef_specials]]
+id = 58
+title = "Floor Raise by 24"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 59
+title = "Floor Raise by 24 (changes texture)"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 60
+title = "Floor Lower to Lowest Floor"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 61
+title = "Door Open Stay"
+prefix = "SR"
+category = "door"
+
+[[linedef_specials]]
+id = 62
+title = "Lift Lower Wait Raise"
+prefix = "SR"
+category = "lift"
+
+[[linedef_specials]]
+id = 63
+title = "Door Open Wait Close"
+prefix = "SR"
+category = "door"
+
+[[linedef_specials]]
+id = 64
+title = "Floor Raise to Lowest Ceiling"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 65
+title = "Floor Raise to 8 below Lowest Ceiling (crushes)"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 66
+title = "Floor Raise by 24 (changes texture)"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 67
+title = "Floor Raise by 32 (changes texture)"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 68
+title = "Floor Raise to Next Higher Floor (changes texture)"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 69
+title = "Floor Raise to Next Higher Floor"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 70
+title = "Floor Lower to 8 above Highest Floor"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 71
+title = "Floor Lower to 8 above Highest Floor"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 72
+title = "Ceiling Lower to 8 above Floor"
+prefix = "WR"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 73
+title = "Crusher Start with Slow Damage"
+prefix = "WR"
+category = "crusher"
+
+[[linedef_specials]]
+id = 74
+title = "Crusher Stop"
+prefix = "WR"
+category = "crusher"
+
+[[linedef_specials]]
+id = 75
+title = "Door Close Stay"
+prefix = "WR"
+category = "door"
+
+[[linedef_specials]]
+id = 76
+title = "Door Close Stay Open"
+prefix = "WR"
+category = "door"
+
+[[linedef_specials]]
+id = 77
+title = "Crusher Start with Fast Damage"
+prefix = "WR"
+category = "crusher"
+
+[[linedef_specials]]
+id = 79
+title = "Light Change to 35"
+prefix = "WR"
+category = "light"
+
+[[linedef_specials]]
+id = 80
+title = "Light Change to Brightest Adjacent"
+prefix = "WR"
+category = "light"
+
+[[linedef_specials]]
+id = 81
+title = "Light Change to 255"
+prefix = "WR"
+category = "light"
+
+[[linedef_specials]]
+id = 82
+title = "Floor Lower to Lowest Floor"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 83
+title = "Floor Lower to Highest Floor"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 84
+title = "Floor Lower to Lowest Floor (changes texture)"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 86
+title = "Door Open Stay"
+prefix = "WR"
+category = "door"
+
+[[linedef_specials]]
+id = 87
+title = "Floor Start Moving Up and Down"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 88
+title = "Lift Lower Wait Raise"
+prefix = "WR"
+category = "lift"
+
+[[linedef_specials]]
+id = 89
+title = "Floor Stop Moving"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 90
+title = "Door Open Wait Close"
+prefix = "WR"
+category = "door"
+
+[[linedef_specials]]
+id = 91
+title = "Floor Raise to Lowest Ceiling"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 92
+title = "Floor Raise by 24"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 93
+title = "Floor Raise by 24 (changes texture)"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 94
+title = "Floor Raise to 8 below Lowest Ceiling (crushes)"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 95
+title = "Floor Raise to Next Higher Floor (changes texture)"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 96
+title = "Floor Raise by Shortest Lower Texture"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 97
+title = "Teleport"
+prefix = "WR"
+category = "teleport"
+
+[[linedef_specials]]
+id = 98
+title = "Floor Lower to 8 above Highest Floor"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 99
+title = "Door (Blue) Open Stay (fast)"
+prefix = "SR"
+category = "door"
+
+[[linedef_specials]]
+id = 100
+title = "Stairs Raise by 16 (fast)"
+prefix = "W1"
+category = "stairs"
+
+[[linedef_specials]]
+id = 101
+title = "Floor Raise to Lowest Ceiling"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 102
+title = "Floor Lower to Highest Floor"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 103
+title = "Door Open Stay"
+prefix = "S1"
+category = "door"
+
+[[linedef_specials]]
+id = 104
+title = "Light Change to Darkest Adjacent"
+prefix = "W1"
+category = "light"
+
+[[linedef_specials]]
+id = 105
+title = "Door Open Wait Close (fast)"
+prefix = "WR"
+category = "door"
+
+[[linedef_specials]]
+id = 106
+title = "Door Open Stay (fast)"
+prefix = "WR"
+category = "door"
+
+[[linedef_specials]]
+id = 107
+title = "Door Close Stay (fast)"
+prefix = "WR"
+category = "door"
+
+[[linedef_specials]]
+id = 108
+title = "Door Open Wait Close (fast)"
+prefix = "W1"
+category = "door"
+
+[[linedef_specials]]
+id = 109
+title = "Door Open Stay (fast)"
+prefix = "W1"
+category = "door"
+
+[[linedef_specials]]
+id = 110
+title = "Door Close (fast)"
+prefix = "W1"
+category = "door"
+
+[[linedef_specials]]
+id = 111
+title = "Door Open Wait Close (fast)"
+prefix = "S1"
+category = "door"
+
+[[linedef_specials]]
+id = 112
+title = "Door Open Stay (fast)"
+prefix = "S1"
+category = "door"
+
+[[linedef_specials]]
+id = 113
+title = "Door Close Stay (fast)"
+prefix = "S1"
+category = "door"
+
+[[linedef_specials]]
+id = 114
+title = "Door Open Wait Close (fast)"
+prefix = "SR"
+category = "door"
+
+[[linedef_specials]]
+id = 115
+title = "Door Open Stay (fast)"
+prefix = "SR"
+category = "door"
+
+[[linedef_specials]]
+id = 116
+title = "Door Close Stay (fast)"
+prefix = "SR"
+category = "door"
+
+[[linedef_specials]]
+id = 117
+title = "Door Open Wait Close (fast)"
+prefix = "DR"
+category = "door"
+
+[[linedef_specials]]
+id = 118
+title = "Door Open Stay (fast)"
+prefix = "D1"
+category = "door"
+
+[[linedef_specials]]
+id = 119
+title = "Floor Raise to Next Higher Floor"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 120
+title = "Lift Lower Wait Raise (fast)"
+prefix = "WR"
+category = "lift"
+
+[[linedef_specials]]
+id = 121
+title = "Lift Lower Wait Raise (fast)"
+prefix = "W1"
+category = "lift"
+
+[[linedef_specials]]
+id = 122
+title = "Lift Lower Wait Raise (fast)"
+prefix = "S1"
+category = "lift"
+
+[[linedef_specials]]
+id = 123
+title = "Lift Lower Wait Raise (fast)"
+prefix = "SR"
+category = "lift"
+
+[[linedef_specials]]
+id = 124
+title = "Exit Level (goes to secret level)"
+prefix = "W1"
+category = "exit"
+
+[[linedef_specials]]
+id = 125
+title = "Teleport (monsters only)"
+prefix = "W1"
+category = "teleport"
+
+[[linedef_specials]]
+id = 126
+title = "Teleport (monsters only)"
+prefix = "WR"
+category = "teleport"
+
+[[linedef_specials]]
+id = 127
+title = "Stairs Raise by 16 (fast)"
+prefix = "S1"
+category = "stairs"
+
+[[linedef_specials]]
+id = 128
+title = "Floor Raise to Next Higher Floor"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 129
+title = "Floor Raise to Next Higher Floor (fast)"
+prefix = "WR"
+category = "floor"
+
+[[linedef_specials]]
+id = 130
+title = "Floor Raise to Next Higher Floor (fast)"
+prefix = "W1"
+category = "floor"
+
+[[linedef_specials]]
+id = 131
+title = "Floor Raise to Next Higher Floor (fast)"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 132
+title = "Floor Raise to Next Higher Floor (fast)"
+prefix = "SR"
+category = "floor"
+
+[[linedef_specials]]
+id = 133
+title = "Door (Blue) Open Stay (fast)"
+prefix = "S1"
+category = "door"
+
+[[linedef_specials]]
+id = 134
+title = "Door (Red) Open Stay (fast)"
+prefix = "SR"
+category = "door"
+
+[[linedef_specials]]
+id = 135
+title = "Door (Red) Open Stay (fast)"
+prefix = "S1"
+category = "door"
+
+[[linedef_specials]]
+id = 136
+title = "Door (Yellow) Open Stay (fast)"
+prefix = "SR"
+category = "door"
+
+[[linedef_specials]]
+id = 137
+title = "Door (Yellow) Open Stay (fast)"
+prefix = "S1"
+category = "door"
+
+[[linedef_specials]]
+id = 138
+title = "Light Change to 255"
+prefix = "SR"
+category = "light"
+
+[[linedef_specials]]
+id = 139
+title = "Light Change to 35"
+prefix = "SR"
+category = "light"
+
+[[linedef_specials]]
+id = 140
+title = "Floor Raise by 512"
+prefix = "S1"
+category = "floor"
+
+[[linedef_specials]]
+id = 141
+title = "Crusher Start with Slow Damage (silent)"
+prefix = "W1"
+category = "crusher"
+
+# Thing types
+[[thing_types]]
+id = 1
+title = "Player 1 start"
+category = "players"
+sprite = "PLAYA2A8"
+
+[[thing_types]]
+id = 2
+title = "Player 2 start"
+category = "players"
+sprite = "PLAYA3A7"
+
+[[thing_types]]
+id = 3
+title = "Player 3 start"
+category = "players"
+sprite = "PLAYA4A6"
+
+[[thing_types]]
+id = 4
+title = "Player 4 start"
+category = "players"
+sprite = "PLAYA5"
+
+[[thing_types]]
+id = 5
+title = "Blue keycard"
+category = "keys"
+sprite = "BKEYA0"
+
+[[thing_types]]
+id = 6
+title = "Yellow keycard"
+category = "keys"
+sprite = "YKEYA0"
+
+[[thing_types]]
+id = 7
+title = "Spider Mastermind"
+category = "monsters"
+sprite = "SPIDG2G8"
+
+[[thing_types]]
+id = 8
+title = "Backpack"
+category = "ammunition"
+sprite = "BPAKA0"
+
+[[thing_types]]
+id = 9
+title = "Former Sergeant"
+category = "monsters"
+sprite = "SPOSA2A8"
+
+[[thing_types]]
+id = 10
+title = "Bloody mess 1"
+category = "decoration"
+sprite = "PLAYW0"
+
+[[thing_types]]
+id = 11
+title = "Player Deathmatch start"
+category = "players"
+sprite = "PLAYF1"
+
+[[thing_types]]
+id = 12
+title = "Bloody mess 2"
+category = "decoration"
+sprite = "PLAYW0"
+
+[[thing_types]]
+id = 13
+title = "Red keycard"
+category = "keys"
+sprite = "RKEYA0"
+
+[[thing_types]]
+id = 14
+title = "Teleport Destination"
+category = "teleports"
+sprite = "TFOGB0"
+
+[[thing_types]]
+id = 15
+title = "Dead player"
+category = "decoration"
+sprite = "PLAYN0"
+
+[[thing_types]]
+id = 16
+title = "Cyberdemon"
+category = "monsters"
+sprite = "CYBRA2"
+
+[[thing_types]]
+id = 17
+title = "Cell charge pack"
+category = "ammunition"
+sprite = "CELPA0"
+
+[[thing_types]]
+id = 18
+title = "Dead former human"
+category = "decoration"
+sprite = "POSSL0"
+
+[[thing_types]]
+id = 19
+title = "Dead former sergeant"
+category = "decoration"
+sprite = "SPOSL0"
+
+[[thing_types]]
+id = 20
+title = "Dead imp"
+category = "decoration"
+sprite = "TROOM0"
+
+[[thing_types]]
+id = 21
+title = "Dead demon"
+category = "decoration"
+sprite = "SARGN0"
+
+[[thing_types]]
+id = 22
+title = "Dead cacodemon"
+category = "decoration"
+sprite = "HEADL0"
+
+[[thing_types]]
+id = 23
+title = "Dead lost soul"
+category = "decoration"
+
+[[thing_types]]
+id = 24
+title = "Pool of blood and bones"
+category = "decoration"
+sprite = "POL5A0"
+
+[[thing_types]]
+id = 25
+title = "Impaled human"
+category = "decoration"
+sprite = "POL1A0"
+
+[[thing_types]]
+id = 26
+title = "Twitching impaled human"
+category = "decoration"
+sprite = "POL6A0"
+
+[[thing_types]]
+id = 27
+title = "Skull on a pole"
+category = "decoration"
+sprite = "POL4A0"
+
+[[thing_types]]
+id = 28
+title = "5 skulls shish kebob"
+category = "decoration"
+sprite = "POL2A0"
+
+[[thing_types]]
+id = 29
+title = "Pile of skulls and candles"
+category = "decoration"
+sprite = "POL3A0"
+
+[[thing_types]]
+id = 30
+title = "Tall green pillar"
+category = "obstacles"
+sprite = "COL1A0"
+
+[[thing_types]]
+id = 31
+title = "Short green pillar"
+category = "obstacles"
+sprite = "COL2A0"
+
+[[thing_types]]
+id = 32
+title = "Tall red pillar"
+category = "obstacles"
+sprite = "COL3A0"
+
+[[thing_types]]
+id = 33
+title = "Short red pillar"
+category = "obstacles"
+sprite = "COL4A0"
+
+[[thing_types]]
+id = 34
+title = "Candle"
+category = "lights"
+sprite = "CANDA0"
+
+[[thing_types]]
+id = 35
+title = "Candelabra"
+category = "lights"
+sprite = "CBRAA0"
+
+[[thing_types]]
+id = 36
+title = "Short green pillar (beating heart)"
+category = "obstacles"
+sprite = "COL5A0"
+
+[[thing_types]]
+id = 37
+title = "Short red pillar (skull)"
+category = "obstacles"
+sprite = "COL6A0"
+
+[[thing_types]]
+id = 38
+title = "Red skullkey"
+category = "keys"
+sprite = "RSKUB0"
+
+[[thing_types]]
+id = 39
+title = "Yellow skullkey"
+category = "keys"
+sprite = "YSKUB0"
+
+[[thing_types]]
+id = 40
+title = "Blue skullkey"
+category = "keys"
+sprite = "BSKUB0"
+
+[[thing_types]]
+id = 41
+title = "Evil Eye"
+category = "obstacles"
+sprite = "CEYEA0"
+
+[[thing_types]]
+id = 42
+title = "Floating skull rock"
+category = "obstacles"
+sprite = "FSKUA0"
+
+[[thing_types]]
+id = 43
+title = "Gray tree"
+category = "obstacles"
+sprite = "TRE1A0"
+
+[[thing_types]]
+id = 44
+title = "Tall blue firestick"
+category = "lights"
+sprite = "TBLUA0"
+
+[[thing_types]]
+id = 45
+title = "Tall green firestick"
+category = "lights"
+sprite = "TGRNA0"
+
+[[thing_types]]
+id = 46
+title = "Tall red firestick"
+category = "lights"
+sprite = "TREDA0"
+
+[[thing_types]]
+id = 47
+title = "Stalagmite"
+category = "obstacles"
+sprite = "SMITA0"
+
+[[thing_types]]
+id = 48
+title = "Tall techno pillar"
+category = "obstacles"
+sprite = "ELECA0"
+
+[[thing_types]]
+id = 49
+title = "Hanging victim, twitching (blocking)"
+category = "decoration"
+sprite = "GOR1A0"
+
+[[thing_types]]
+id = 50
+title = "Hanging victim, arms out (blocking)"
+category = "decoration"
+sprite = "GOR2A0"
+
+[[thing_types]]
+id = 51
+title = "Hanging victim, 1-legged (blocking)"
+category = "decoration"
+sprite = "GOR3A0"
+
+[[thing_types]]
+id = 52
+title = "Hanging pair of legs (blocking)"
+category = "decoration"
+sprite = "GOR4A0"
+
+[[thing_types]]
+id = 53
+title = "Hanging leg (blocking)"
+category = "decoration"
+sprite = "GOR5A0"
+
+[[thing_types]]
+id = 54
+title = "Large brown tree"
+category = "obstacles"
+sprite = "TRE2A0"
+
+[[thing_types]]
+id = 55
+title = "Short blue firestick"
+category = "lights"
+sprite = "SMBTA0"
+
+[[thing_types]]
+id = 56
+title = "Short green firestick"
+category = "lights"
+sprite = "SMGTA0"
+
+[[thing_types]]
+id = 57
+title = "Short red firestick"
+category = "lights"
+sprite = "SMRTA0"
+
+[[thing_types]]
+id = 58
+title = "Spectre"
+category = "monsters"
+sprite = "SARGF1"
+
+[[thing_types]]
+id = 59
+title = "Hanging victim, arms out"
+category = "decoration"
+sprite = "GOR2A0"
+
+[[thing_types]]
+id = 60
+title = "Hanging pair of legs"
+category = "decoration"
+sprite = "GOR4A0"
+
+[[thing_types]]
+id = 61
+title = "Hanging victim, 1-legged"
+category = "decoration"
+sprite = "GOR3A0"
+
+[[thing_types]]
+id = 62
+title = "Hanging leg"
+category = "decoration"
+sprite = "GOR5A0"
+
+[[thing_types]]
+id = 63
+title = "Hanging victim, twitching"
+category = "decoration"
+sprite = "GOR1C0"
+
+[[thing_types]]
+id = 64
+title = "Archvile"
+category = "monsters"
+sprite = "VILEA2D8"
+
+[[thing_types]]
+id = 65
+title = "Chaingunner"
+category = "monsters"
+sprite = "CPOSA2"
+
+[[thing_types]]
+id = 66
+title = "Revenant"
+category = "monsters"
+sprite = "SKELA2D8"
+
+[[thing_types]]
+id = 67
+title = "Mancubus"
+category = "monsters"
+sprite = "FATTC2C8"
+
+[[thing_types]]
+id = 68
+title = "Arachnotron"
+category = "monsters"
+sprite = "BSPIA2A8"
+
+[[thing_types]]
+id = 69
+title = "Hell Knight"
+category = "monsters"
+sprite = "BOS2A2C8"
+
+[[thing_types]]
+id = 70
+title = "Burning barrel"
+category = "obstacles"
+sprite = "FCANA0"
+
+[[thing_types]]
+id = 71
+title = "Pain Elemental"
+category = "monsters"
+sprite = "PAINA2A8"
+
+[[thing_types]]
+id = 72
+title = "Commander Keen"
+category = "monsters"
+sprite = "KEENA0"
+
+[[thing_types]]
+id = 73
+title = "Hanging victim, guts removed"
+category = "decoration"
+sprite = "HDB1A0"
+
+[[thing_types]]
+id = 74
+title = "Hanging victim, guts and brain removed"
+category = "decoration"
+sprite = "HDB2A0"
+
+[[thing_types]]
+id = 75
+title = "Hanging torso, looking down"
+category = "decoration"
+sprite = "HDB3A0"
+
+[[thing_types]]
+id = 76
+title = "Hanging torso, open skull"
+category = "decoration"
+sprite = "HDB4A0"
+
+[[thing_types]]
+id = 77
+title = "Hanging torso, looking up"
+category = "decoration"
+sprite = "HDB5A0"
+
+[[thing_types]]
+id = 78
+title = "Hanging torso, brain removed"
+category = "decoration"
+sprite = "HDB6A0"
+
+[[thing_types]]
+id = 79
+title = "Pool of blood and guts"
+category = "decoration"
+sprite = "POB1A0"
+
+[[thing_types]]
+id = 80
+title = "Pool of blood"
+category = "decoration"
+sprite = "POB2A0"
+
+[[thing_types]]
+id = 81
+title = "Pool of brains"
+category = "decoration"
+sprite = "BRS1A0"
+
+[[thing_types]]
+id = 82
+title = "Super Shotgun"
+category = "weapons"
+sprite = "SGN2A0"
+
+[[thing_types]]
+id = 83
+title = "Megasphere"
+category = "powerups"
+sprite = "MEGAA0"
+
+[[thing_types]]
+id = 84
+title = "Wolfenstein SS"
+category = "monsters"
+sprite = "SSWVA2"
+
+[[thing_types]]
+id = 85
+title = "Tall techno floor lamp"
+category = "lights"
+sprite = "TLMPA0"
+
+[[thing_types]]
+id = 86
+title = "Short techno floor lamp"
+category = "lights"
+sprite = "TLP2A0"
+
+[[thing_types]]
+id = 87
+title = "Monsters Target"
+category = "monsters"
+
+[[thing_types]]
+id = 88
+title = "Icon of Sin"
+category = "monsters"
+sprite = "BBRNA0"
+
+[[thing_types]]
+id = 89
+title = "Monsters Spawner"
+category = "monsters"
+sprite = "BOSFB0"
+
+[[thing_types]]
+id = 2001
+title = "Shotgun"
+category = "weapons"
+sprite = "SHOTA0"
+
+[[thing_types]]
+id = 2002
+title = "Chaingun"
+category = "weapons"
+sprite = "MGUNA0"
+
+[[thing_types]]
+id = 2003
+title = "Rocket launcher"
+category = "weapons"
+sprite = "LAUNA0"
+
+[[thing_types]]
+id = 2004
+title = "Plasma gun"
+category = "weapons"
+sprite = "PLASA0"
+
+[[thing_types]]
+id = 2005
+title = "Chainsaw"
+category = "weapons"
+sprite = "CSAWA0"
+
+[[thing_types]]
+id = 2006
+title = "BFG9000"
+category = "weapons"
+sprite = "BFUGA0"
+
+[[thing_types]]
+id = 2007
+title = "Ammo clip"
+category = "ammunition"
+sprite = "CLIPA0"
+
+[[thing_types]]
+id = 2008
+title = "Shotgun shells"
+category = "ammunition"
+sprite = "SHELA0"
+
+[[thing_types]]
+id = 2010
+title = "Rocket"
+category = "ammunition"
+sprite = "ROCKA0"
+
+[[thing_types]]
+id = 2011
+title = "Stimpack"
+category = "health"
+sprite = "STIMA0"
+
+[[thing_types]]
+id = 2012
+title = "Medikit"
+category = "health"
+sprite = "MEDIA0"
+
+[[thing_types]]
+id = 2013
+title = "Soulsphere"
+category = "powerups"
+sprite = "SOULA0"
+
+[[thing_types]]
+id = 2014
+title = "Health bonus"
+category = "health"
+sprite = "BON1A0"
+
+[[thing_types]]
+id = 2015
+title = "Armor bonus"
+category = "health"
+sprite = "BON2A0"
+
+[[thing_types]]
+id = 2018
+title = "Green armor"
+category = "health"
+sprite = "ARM1A0"
+
+[[thing_types]]
+id = 2019
+title = "Blue armor"
+category = "health"
+sprite = "ARM2A0"
+
+[[thing_types]]
+id = 2022
+title = "Invulnerability"
+category = "powerups"
+sprite = "PINVA0"
+
+[[thing_types]]
+id = 2023
+title = "Berserk"
+category = "powerups"
+sprite = "PSTRA0"
+
+[[thing_types]]
+id = 2024
+title = "Invisibility"
+category = "powerups"
+sprite = "PINSA0"
+
+[[thing_types]]
+id = 2025
+title = "Radiation suit"
+category = "powerups"
+sprite = "SUITA0"
+
+[[thing_types]]
+id = 2026
+title = "Computer map"
+category = "powerups"
+sprite = "PMAPA0"
+
+[[thing_types]]
+id = 2028
+title = "Floor lamp"
+category = "lights"
+sprite = "COLUA0"
+
+[[thing_types]]
+id = 2035
+title = "Barrel"
+category = "obstacles"
+sprite = "BAR1A0"
+
+[[thing_types]]
+id = 2045
+title = "Lite Amplification goggles"
+category = "powerups"
+sprite = "PVISA0"
+
+[[thing_types]]
+id = 2046
+title = "Box of Rockets"
+category = "ammunition"
+sprite = "BROKA0"
+
+[[thing_types]]
+id = 2047
+title = "Cell charge"
+category = "ammunition"
+sprite = "CELLA0"
+
+[[thing_types]]
+id = 2048
+title = "Box of Ammo"
+category = "ammunition"
+sprite = "AMMOA0"
+
+[[thing_types]]
+id = 2049
+title = "Box of Shells"
+category = "ammunition"
+sprite = "SBOXA0"
+
+[[thing_types]]
+id = 3001
+title = "Imp"
+category = "monsters"
+sprite = "TROOA2A8"
+
+[[thing_types]]
+id = 3002
+title = "Demon"
+category = "monsters"
+sprite = "SARGA2A8"
+
+[[thing_types]]
+id = 3003
+title = "Baron of Hell"
+category = "monsters"
+sprite = "BOSSA2A8"
+
+[[thing_types]]
+id = 3004
+title = "Former Human"
+category = "monsters"
+sprite = "POSSA2A8"
+
+[[thing_types]]
+id = 3005
+title = "Cacodemon"
+category = "monsters"
+sprite = "HEADA2A8"
+
+[[thing_types]]
+id = 3006
+title = "Lost Soul"
+category = "monsters"
+sprite = "SKULA8A2"
+
+[sector_specials]
+"0" = "Normal"
+"1" = "Light Blinks (randomly)"
+"2" = "Light Blinks (2 Hz)"
+"3" = "Light Blinks (1 Hz)"
+"4" = "Damage -10 or 20% health and Light Blinks (2 Hz)"
+"5" = "Damage -5 or 10% health"
+"7" = "Damage -2 or 5% health"
+"8" = "Light Glows (1+ sec)"
+"9" = "Secret"
+"10" = "Door Close Stay (after 30 sec)"
+"11" = "Damage -10 or 20% health and End level"
+"12" = "Light Blinks (1 Hz synchronized)"
+"13" = "Light Blinks (2 Hz synchronized)"
+"14" = "Door Open Close (opens after 5 min)"
+"16" = "Damage -10 or 20% health"
+"17" = "Light Flickers (randomly)"
+
+[linedef_flags]
+"1" = "Impassable"
+"2" = "Block monsters"
+"4" = "Two-sided"
+"8" = "Upper unpegged"
+"16" = "Lower unpegged"
+"32" = "Secret"
+"64" = "Block sound"
+"128" = "Hidden"
+"256" = "Shown"
+
+[thing_flags]
+"1" = "Easy"
+"2" = "Medium"
+"4" = "Hard"
+"8" = "Deaf"
+"16" = "Multiplayer only"

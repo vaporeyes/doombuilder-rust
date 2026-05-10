@@ -2,7 +2,11 @@
 // ABOUTME: can be applied or reverted in O(k) where k is the number of elements
 // ABOUTME: touched. Snapshot-of-Map is intentionally avoided to keep undo cheap.
 
-use crate::map::{Map, MapThing, SectorId, SidedefId, TextureName, ThingId, VertexId, LinedefId};
+use crate::map::{
+    LinedefId, Map, MapLinedef, MapSector, MapSidedef, MapThing, MapVertex, SectorId, SidedefId,
+    TextureName, ThingId, VertexId,
+};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct VertexMove {
@@ -77,6 +81,15 @@ pub enum Command {
         old: u16,
         new: u16,
     },
+    /// Bulk delete: vertices, linedefs, sidedefs, sectors, things.
+    /// Snapshots carry the OLD ids so cross-references can be remapped on
+    /// revert. `current_*` tracks the new ids after the most recent revert
+    /// so a subsequent redo knows what to remove.
+    DeleteElements(Box<DeletionState>),
+    /// Add a chain of linedefs (and the new vertices they require). Symmetric
+    /// of `DeleteElements`: revert removes by `current_*`; apply re-inserts
+    /// from snapshots and rebuilds `current_*`.
+    CreateLinedefChain(Box<LinedefChain>),
     /// Change one of a sector's integer fields.
     SetSectorIntField {
         id: SectorId,
@@ -98,6 +111,131 @@ pub enum Command {
         old: i32,
         new: i32,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum LineEndpoint {
+    /// References a vertex that existed BEFORE the chain (and still does after
+    /// the chain's vertices have been removed via undo).
+    Existing(VertexId),
+    /// Index into `LinedefChain::vertex_inserts`.
+    New(usize),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LinedefChain {
+    pub vertex_inserts: Vec<MapVertex>,
+    /// Per linedef: (from_endpoint, to_endpoint, template).
+    pub linedefs: Vec<(LineEndpoint, LineEndpoint, MapLinedef)>,
+    pub current_v: Vec<VertexId>,
+    pub current_l: Vec<LinedefId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeletionState {
+    pub vertex_snaps: Vec<(VertexId, MapVertex)>,
+    pub sector_snaps: Vec<(SectorId, MapSector)>,
+    pub sidedef_snaps: Vec<(SidedefId, MapSidedef)>,
+    pub linedef_snaps: Vec<(LinedefId, MapLinedef)>,
+    pub thing_snaps: Vec<MapThing>,
+    pub current_v: Vec<VertexId>,
+    pub current_sec: Vec<SectorId>,
+    pub current_side: Vec<SidedefId>,
+    pub current_line: Vec<LinedefId>,
+    pub current_thing: Vec<ThingId>,
+}
+
+/// Delete a selection (vertices / linedefs / sectors / things) with full
+/// topology cleanup, returning the snapshot needed to undo it. Must be called
+/// **before** the caller pushes a `Command::DeleteElements`.
+pub fn collect_and_delete(
+    map: &mut Map,
+    selected_vertices: &HashSet<VertexId>,
+    selected_linedefs: &HashSet<LinedefId>,
+    selected_sectors: &HashSet<SectorId>,
+    selected_things: &HashSet<ThingId>,
+) -> DeletionState {
+    let to_del_v = selected_vertices.clone();
+    let mut to_del_l = selected_linedefs.clone();
+    let to_del_sec = selected_sectors.clone();
+    let mut to_del_side: HashSet<SidedefId> = HashSet::new();
+    let to_del_t = selected_things.clone();
+
+    // Linedefs touching deleted vertices.
+    for (lid, line) in &map.linedefs {
+        if to_del_v.contains(&line.v1) || to_del_v.contains(&line.v2) {
+            to_del_l.insert(lid);
+        }
+    }
+    // Sidedefs pointing at deleted sectors.
+    for (sid, side) in &map.sidedefs {
+        if to_del_sec.contains(&side.sector) {
+            to_del_side.insert(sid);
+        }
+    }
+    // Iterate: any linedef left without sidedefs goes; sidedefs of any
+    // newly-marked linedef go too.
+    loop {
+        let mut changed = false;
+        let lids: Vec<LinedefId> = to_del_l.iter().copied().collect();
+        for lid in lids {
+            if let Some(line) = map.linedefs.get(lid) {
+                if let Some(r) = line.right {
+                    if to_del_side.insert(r) {
+                        changed = true;
+                    }
+                }
+                if let Some(l) = line.left {
+                    if to_del_side.insert(l) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for (lid, line) in &map.linedefs {
+            if to_del_l.contains(&lid) {
+                continue;
+            }
+            let r_gone = line.right.map(|s| to_del_side.contains(&s)).unwrap_or(true);
+            let l_gone = line.left.map(|s| to_del_side.contains(&s)).unwrap_or(true);
+            if r_gone && l_gone {
+                if to_del_l.insert(lid) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut state = DeletionState::default();
+    for tid in &to_del_t {
+        if let Some(t) = map.things.remove(*tid) {
+            state.thing_snaps.push(t);
+        }
+    }
+    for lid in &to_del_l {
+        if let Some(l) = map.linedefs.remove(*lid) {
+            state.linedef_snaps.push((*lid, l));
+        }
+    }
+    for sid in &to_del_side {
+        if let Some(s) = map.sidedefs.remove(*sid) {
+            state.sidedef_snaps.push((*sid, s));
+        }
+    }
+    for sid in &to_del_sec {
+        if let Some(s) = map.sectors.remove(*sid) {
+            state.sector_snaps.push((*sid, s));
+        }
+    }
+    for vid in &to_del_v {
+        if let Some(v) = map.vertices.remove(*vid) {
+            state.vertex_snaps.push((*vid, v));
+        }
+    }
+    state
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +316,48 @@ impl Command {
                     t.kind = *new;
                 }
             }
+            Command::DeleteElements(state) => {
+                // Remove whatever we last inserted on revert.
+                for id in state.current_thing.drain(..) {
+                    map.things.remove(id);
+                }
+                for id in state.current_line.drain(..) {
+                    map.linedefs.remove(id);
+                }
+                for id in state.current_side.drain(..) {
+                    map.sidedefs.remove(id);
+                }
+                for id in state.current_sec.drain(..) {
+                    map.sectors.remove(id);
+                }
+                for id in state.current_v.drain(..) {
+                    map.vertices.remove(id);
+                }
+            }
+            Command::CreateLinedefChain(chain) => {
+                // Re-create everything from snapshots; rebuild current_*.
+                chain.current_v.clear();
+                chain.current_l.clear();
+                let mut new_v_ids: Vec<VertexId> = Vec::with_capacity(chain.vertex_inserts.len());
+                for v in &chain.vertex_inserts {
+                    let id = map.vertices.insert(*v);
+                    new_v_ids.push(id);
+                    chain.current_v.push(id);
+                }
+                for (a, b, line) in &chain.linedefs {
+                    let mut new_line = line.clone();
+                    new_line.v1 = match a {
+                        LineEndpoint::Existing(id) => *id,
+                        LineEndpoint::New(idx) => new_v_ids[*idx],
+                    };
+                    new_line.v2 = match b {
+                        LineEndpoint::Existing(id) => *id,
+                        LineEndpoint::New(idx) => new_v_ids[*idx],
+                    };
+                    let id = map.linedefs.insert(new_line);
+                    chain.current_l.push(id);
+                }
+            }
             Command::SetSectorIntField { id, field, new, .. } => {
                 if let Some(s) = map.sectors.get_mut(*id) {
                     write_sector_int(s, *field, *new);
@@ -248,6 +428,62 @@ impl Command {
                 if let Some(t) = map.things.get_mut(*id) {
                     t.kind = *old;
                 }
+            }
+            Command::CreateLinedefChain(chain) => {
+                for id in chain.current_l.drain(..) {
+                    map.linedefs.remove(id);
+                }
+                for id in chain.current_v.drain(..) {
+                    map.vertices.remove(id);
+                }
+            }
+            Command::DeleteElements(state) => {
+                state.current_v.clear();
+                state.current_sec.clear();
+                state.current_side.clear();
+                state.current_line.clear();
+                state.current_thing.clear();
+
+                let mut remap_v: HashMap<VertexId, VertexId> = HashMap::new();
+                for (old_id, v) in state.vertex_snaps.iter() {
+                    let new_id = map.vertices.insert(*v);
+                    remap_v.insert(*old_id, new_id);
+                    state.current_v.push(new_id);
+                }
+                let mut remap_sec: HashMap<SectorId, SectorId> = HashMap::new();
+                for (old_id, s) in state.sector_snaps.iter() {
+                    let new_id = map.sectors.insert(s.clone());
+                    remap_sec.insert(*old_id, new_id);
+                    state.current_sec.push(new_id);
+                }
+                let mut remap_side: HashMap<SidedefId, SidedefId> = HashMap::new();
+                for (old_id, s) in state.sidedef_snaps.iter() {
+                    let mut new_side = s.clone();
+                    if let Some(new_sec) = remap_sec.get(&new_side.sector) {
+                        new_side.sector = *new_sec;
+                    }
+                    let new_id = map.sidedefs.insert(new_side);
+                    remap_side.insert(*old_id, new_id);
+                    state.current_side.push(new_id);
+                }
+                for (_old_id, l) in state.linedef_snaps.iter() {
+                    let mut new_line = l.clone();
+                    if let Some(nv) = remap_v.get(&new_line.v1) {
+                        new_line.v1 = *nv;
+                    }
+                    if let Some(nv) = remap_v.get(&new_line.v2) {
+                        new_line.v2 = *nv;
+                    }
+                    new_line.right = new_line.right.and_then(|s| remap_side.get(&s).copied());
+                    new_line.left = new_line.left.and_then(|s| remap_side.get(&s).copied());
+                    let new_id = map.linedefs.insert(new_line);
+                    state.current_line.push(new_id);
+                }
+                for t in state.thing_snaps.iter() {
+                    let new_id = map.things.insert(t.clone());
+                    state.current_thing.push(new_id);
+                }
+                map.rebuild_sidedef_index();
             }
             Command::SetSectorIntField { id, field, old, .. } => {
                 if let Some(s) = map.sectors.get_mut(*id) {
@@ -408,6 +644,107 @@ mod tests {
         assert!(stack.redo(&mut map));
         assert_eq!(map.vertices[id].x, 15);
         assert!(!stack.can_redo());
+    }
+
+    #[test]
+    fn delete_vertex_cascades_to_linedef_and_sidedefs() {
+        use crate::map::{MapLinedef, MapSidedef, MapVertex, TextureName};
+        let mut map = Map::new("T", MapFormat::Doom);
+        let v0 = map.vertices.insert(MapVertex { x: 0, y: 0 });
+        let v1 = map.vertices.insert(MapVertex { x: 64, y: 0 });
+        let sec = map.sectors.insert(crate::map::MapSector {
+            floor_height: 0,
+            ceiling_height: 128,
+            floor_texture: TextureName([0; 8]),
+            ceiling_texture: TextureName([0; 8]),
+            light: 192,
+            special: 0,
+            tag: 0,
+            sidedefs: Vec::new(),
+        });
+        let s0 = map.sidedefs.insert(MapSidedef {
+            sector: sec,
+            x_offset: 0,
+            y_offset: 0,
+            upper_texture: TextureName([0; 8]),
+            lower_texture: TextureName([0; 8]),
+            middle_texture: TextureName([0; 8]),
+        });
+        let l0 = map.linedefs.insert(MapLinedef {
+            v1: v0,
+            v2: v1,
+            flags: 0,
+            special: 0,
+            args: [0; 5],
+            tag: 0,
+            right: Some(s0),
+            left: None,
+        });
+
+        let mut sel_v = HashSet::new();
+        sel_v.insert(v0);
+        let state = collect_and_delete(&mut map, &sel_v, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        assert!(map.vertices.get(v0).is_none());
+        assert!(map.linedefs.get(l0).is_none(), "linedef using deleted vertex must go");
+        assert!(map.sidedefs.get(s0).is_none(), "sidedef of deleted linedef must go");
+        assert_eq!(state.vertex_snaps.len(), 1);
+        assert_eq!(state.linedef_snaps.len(), 1);
+        assert_eq!(state.sidedef_snaps.len(), 1);
+    }
+
+    #[test]
+    fn delete_element_undo_remaps_references() {
+        use crate::map::{MapLinedef, MapSidedef, MapVertex, TextureName};
+        let mut map = Map::new("T", MapFormat::Doom);
+        let v0 = map.vertices.insert(MapVertex { x: 0, y: 0 });
+        let v1 = map.vertices.insert(MapVertex { x: 64, y: 0 });
+        let sec = map.sectors.insert(crate::map::MapSector {
+            floor_height: 0,
+            ceiling_height: 128,
+            floor_texture: TextureName([0; 8]),
+            ceiling_texture: TextureName([0; 8]),
+            light: 192,
+            special: 0,
+            tag: 0,
+            sidedefs: Vec::new(),
+        });
+        let s0 = map.sidedefs.insert(MapSidedef {
+            sector: sec,
+            x_offset: 0,
+            y_offset: 0,
+            upper_texture: TextureName([0; 8]),
+            lower_texture: TextureName([0; 8]),
+            middle_texture: TextureName([0; 8]),
+        });
+        map.linedefs.insert(MapLinedef {
+            v1: v0,
+            v2: v1,
+            flags: 0,
+            special: 0,
+            args: [0; 5],
+            tag: 0,
+            right: Some(s0),
+            left: None,
+        });
+
+        let mut sel_v = HashSet::new();
+        sel_v.insert(v0);
+        let state = collect_and_delete(&mut map, &sel_v, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let mut cmd = Command::DeleteElements(Box::new(state));
+        assert_eq!(map.vertices.len(), 1);
+
+        // Undo: must reinsert vertex/linedef/sidedef and patch refs.
+        cmd.revert(&mut map);
+        assert_eq!(map.vertices.len(), 2);
+        assert_eq!(map.linedefs.len(), 1);
+        assert_eq!(map.sidedefs.len(), 1);
+        let (_, line) = map.linedefs.iter().next().unwrap();
+        assert!(map.vertices.contains_key(line.v1));
+        assert!(map.vertices.contains_key(line.v2));
+        let right = line.right.unwrap();
+        assert!(map.sidedefs.contains_key(right));
+        let side = &map.sidedefs[right];
+        assert!(map.sectors.contains_key(side.sector));
     }
 
     #[test]

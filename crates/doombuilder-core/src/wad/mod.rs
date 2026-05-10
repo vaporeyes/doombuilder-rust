@@ -136,17 +136,16 @@ impl Wad {
         self.directory.iter().find(|e| e.name_str() == name)
     }
 
-    /// Names of map markers (zero-size lumps whose next sibling is a recognised
-    /// map data lump such as THINGS or TEXTMAP). Robust for both vanilla and
-    /// custom map names.
+    /// Names of map markers — lumps whose next sibling is a recognised map
+    /// data lump such as THINGS or TEXTMAP. We do NOT require the marker to
+    /// be size 0: Hexen IWAD map markers carry 12 bytes of metadata, and
+    /// some custom WADs use non-empty markers too. The "next is THINGS"
+    /// constraint is enough to disambiguate.
     pub fn map_markers(&self) -> Vec<String> {
         const FOLLOWS: &[&str] = &["THINGS", "TEXTMAP"];
         let mut out = Vec::new();
         let dir = &self.directory;
         for i in 0..dir.len().saturating_sub(1) {
-            if dir[i].size != 0 {
-                continue;
-            }
             let next = dir[i + 1].name_str();
             if FOLLOWS.iter().any(|n| n.eq_ignore_ascii_case(next)) {
                 out.push(dir[i].name_str().to_string());

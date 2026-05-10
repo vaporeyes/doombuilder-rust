@@ -15,3 +15,6 @@ rfd.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 wgpu.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+directories.workspace = true

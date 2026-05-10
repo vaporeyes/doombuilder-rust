@@ -2,13 +2,13 @@
 // ABOUTME: linedefs, vertices, and hover/selection overlays. Mouse: middle/right
 // ABOUTME: drag pans, wheel zooms about cursor, left click selects, move hovers.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::map::{LinedefId, Map, SectorId, ThingId, VertexId};
 
-use crate::EditMode;
+use crate::{EditMode, Settings};
 use doombuilder_render::{FloorMesh, Hit};
 use glam::Vec2;
 use iced::mouse;
@@ -19,6 +19,11 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use crate::camera::Camera2D;
 
 const DRAG_THRESHOLD_PX: f32 = 3.0;
+
+// Process-wide empty maps so we can hand back a `&HashMap` when sprites are off.
+static EMPTY_HANDLES: std::sync::OnceLock<HashMap<String, ImageHandle>> =
+    std::sync::OnceLock::new();
+static EMPTY_DIMS: std::sync::OnceLock<HashMap<String, (u32, u32)>> = std::sync::OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub enum View2DMessage {
@@ -68,6 +73,9 @@ pub struct View2D {
     pub fills: Arc<Vec<FillTile>>,
     pub config: Arc<GameConfig>,
     pub edit_mode: EditMode,
+    pub sprite_handles: Arc<HashMap<String, ImageHandle>>,
+    pub sprite_dims: Arc<HashMap<String, (u32, u32)>>,
+    pub settings: Settings,
 }
 
 impl View2D {
@@ -249,9 +257,12 @@ impl<Message> Program<Message> for View2DProgram<Message> {
     ) -> Vec<Geometry> {
         let viewport = Vec2::new(bounds.width, bounds.height);
         let mode = self.inner.edit_mode;
+        let settings = self.inner.settings;
         let geometry = self.inner.cache.draw(renderer, bounds.size(), |frame| {
             draw_background(frame, bounds);
-            draw_grid(frame, &self.inner.camera, viewport);
+            if settings.show_grid {
+                draw_grid(frame, &self.inner.camera, viewport);
+            }
             let fill_alpha = if mode == EditMode::Sectors { 1.0 } else { 0.55 };
             if self.inner.fills.is_empty() {
                 draw_sector_fills_solid(
@@ -287,9 +298,10 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                 &self.inner.selection,
                 mode,
             );
-            // Vertices are only emphasised in Vertices mode; skip the per-vertex
-            // dot pass otherwise (selected/hovered vertices still render).
-            if mode == EditMode::Vertices {
+            // Vertices are only emphasised in Vertices mode by default; skip
+            // the per-vertex dot pass otherwise (selected/hovered vertices
+            // still render). Always-show overrides via settings.
+            if mode == EditMode::Vertices || settings.always_show_vertices {
                 draw_vertices(
                     frame,
                     &self.inner.map,
@@ -309,17 +321,32 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                     &self.inner.selection,
                 );
             }
-            let things_alpha = if mode == EditMode::Things { 1.0 } else { 0.55 };
-            draw_things(
-                frame,
-                &self.inner.map,
-                &self.inner.camera,
-                viewport,
-                &self.inner.config,
-                self.inner.hover,
-                &self.inner.selection,
-                things_alpha,
-            );
+            if settings.show_things {
+                let things_alpha = if mode == EditMode::Things { 1.0 } else { 0.55 };
+                let (sprite_handles, sprite_dims) = if settings.show_sprites {
+                    (
+                        &*self.inner.sprite_handles as &HashMap<_, _>,
+                        &*self.inner.sprite_dims as &HashMap<_, _>,
+                    )
+                } else {
+                    (
+                        EMPTY_HANDLES.get_or_init(HashMap::new),
+                        EMPTY_DIMS.get_or_init(HashMap::new),
+                    )
+                };
+                draw_things(
+                    frame,
+                    &self.inner.map,
+                    &self.inner.camera,
+                    viewport,
+                    &self.inner.config,
+                    self.inner.hover,
+                    &self.inner.selection,
+                    things_alpha,
+                    sprite_handles,
+                    sprite_dims,
+                );
+            }
             if let Some((start, end)) = self.inner.drag_rect {
                 draw_drag_rect(frame, &self.inner.camera, viewport, start, end);
             }
@@ -649,39 +676,74 @@ fn draw_things(
     hover: Option<HighlightKind>,
     selection: &HashSet<HighlightKind>,
     alpha: f32,
+    sprite_handles: &HashMap<String, ImageHandle>,
+    sprite_dims: &HashMap<String, (u32, u32)>,
 ) {
-    let radius_world = 16.0_f32;
+    let arrow_world_len = 16.0_f32;
     for (id, t) in &map.things {
         let world_x = t.x as f32;
         let world_y = t.y as f32;
         let center = camera.world_to_screen(Vec2::new(world_x, world_y), viewport);
-        let radius_px = (radius_world * camera.zoom).clamp(3.0, 18.0);
 
         let rad = (t.angle as f32).to_radians();
         let dx = rad.cos();
         let dy = rad.sin();
-        let arrow_world = Vec2::new(world_x + dx * radius_world, world_y + dy * radius_world);
+        let arrow_world = Vec2::new(world_x + dx * arrow_world_len, world_y + dy * arrow_world_len);
         let arrow_end = camera.world_to_screen(arrow_world, viewport);
 
-        let base = thing_color(config, t.kind);
-        let base = with_alpha(base, alpha);
         let is_selected = selection.contains(&HighlightKind::Thing(id));
         let is_hover = matches!(hover, Some(HighlightKind::Thing(h)) if h == id);
-        // Highlights stay full-opacity even when the things layer is dimmed.
-        let (fill, ring_color, ring_width) = if is_selected {
-            (with_alpha(base, 1.0), Color::from_rgb(1.0, 0.25, 0.25), 2.5)
-        } else if is_hover {
-            (with_alpha(base, 1.0), Color::from_rgb(1.0, 0.75, 0.2), 2.0)
+        let highlight_alpha = if is_selected || is_hover { 1.0 } else { alpha };
+
+        // Try sprite render; fall back to colored disc.
+        let sprite = resolve_sprite(config, sprite_handles, sprite_dims, t.kind);
+        let bbox: Option<(f32, f32, f32, f32)> = if let Some((handle, w, h)) = sprite {
+            // Doom sprites are typically taller than wide; render at native px = world units.
+            let half_w = (w as f32) * 0.5;
+            let half_h = (h as f32) * 0.5;
+            let world_min = Vec2::new(world_x - half_w, world_y - half_h);
+            let world_max = Vec2::new(world_x + half_w, world_y + half_h);
+            let tl = camera.world_to_screen(Vec2::new(world_min.x, world_max.y), viewport);
+            let br = camera.world_to_screen(Vec2::new(world_max.x, world_min.y), viewport);
+            let bw = (br.x - tl.x).max(2.0);
+            let bh = (br.y - tl.y).max(2.0);
+            let rect = Rectangle::new(Point::new(tl.x, tl.y), Size::new(bw, bh));
+            let img = canvas::Image::new(handle.clone()).opacity(highlight_alpha);
+            frame.draw_image(rect, img);
+            Some((tl.x, tl.y, bw, bh))
         } else {
-            (base, Color::from_rgba(0.0, 0.0, 0.0, 0.85 * alpha), 1.0)
+            let base = thing_color(config, t.kind);
+            let radius_px = (16.0_f32 * camera.zoom).clamp(3.0, 18.0);
+            frame.fill(
+                &Path::circle(Point::new(center.x, center.y), radius_px),
+                with_alpha(base, highlight_alpha),
+            );
+            let cx = center.x - radius_px;
+            let cy = center.y - radius_px;
+            let s = radius_px * 2.0;
+            Some((cx, cy, s, s))
         };
 
-        frame.fill(&Path::circle(Point::new(center.x, center.y), radius_px), fill);
-        let ring = Path::circle(Point::new(center.x, center.y), radius_px);
-        frame.stroke(
-            &ring,
-            Stroke::default().with_color(ring_color).with_width(ring_width),
-        );
+        // Selection / hover ring around the bbox.
+        if let Some((x, y, w, h)) = bbox {
+            if is_selected || is_hover {
+                let path = Path::new(|p| {
+                    p.move_to(Point::new(x, y));
+                    p.line_to(Point::new(x + w, y));
+                    p.line_to(Point::new(x + w, y + h));
+                    p.line_to(Point::new(x, y + h));
+                    p.close();
+                });
+                let (color, width) = if is_selected {
+                    (Color::from_rgb(1.0, 0.25, 0.25), 2.5)
+                } else {
+                    (Color::from_rgb(1.0, 0.75, 0.2), 2.0)
+                };
+                frame.stroke(&path, Stroke::default().with_color(color).with_width(width));
+            }
+        }
+
+        // Facing arrow on top.
         let arrow = Path::line(
             Point::new(center.x, center.y),
             Point::new(arrow_end.x, arrow_end.y),
@@ -689,10 +751,36 @@ fn draw_things(
         frame.stroke(
             &arrow,
             Stroke::default()
-                .with_color(Color::from_rgba(0.0, 0.0, 0.0, 0.95 * alpha))
+                .with_color(Color::from_rgba(0.0, 0.0, 0.0, 0.95 * highlight_alpha))
                 .with_width(2.0),
         );
     }
+}
+
+fn resolve_sprite<'a>(
+    config: &GameConfig,
+    handles: &'a HashMap<String, ImageHandle>,
+    dims: &HashMap<String, (u32, u32)>,
+    kind: u16,
+) -> Option<(&'a ImageHandle, u32, u32)> {
+    let raw = config.thing_type(kind)?.sprite.to_ascii_uppercase();
+    if raw.is_empty() {
+        return None;
+    }
+    let take_n = |n| raw.chars().take(n).collect::<String>();
+    let base4 = take_n(4);
+    let candidates = [
+        take_n(6),
+        format!("{base4}A0"),
+        format!("{base4}A1"),
+        format!("{base4}A2"),
+    ];
+    for c in &candidates {
+        if let (Some(h), Some(d)) = (handles.get(c), dims.get(c)) {
+            return Some((h, d.0, d.1));
+        }
+    }
+    None
 }
 
 fn with_alpha(c: Color, a: f32) -> Color {

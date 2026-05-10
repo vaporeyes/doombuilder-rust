@@ -74,6 +74,33 @@ impl GameConfig {
         Self::from_toml(VANILLA_DOOM_TOML).expect("bundled doom.toml is valid")
     }
 
+    pub fn vanilla_doom2() -> Self {
+        Self::from_toml(VANILLA_DOOM2_TOML).expect("bundled doom2.toml is valid")
+    }
+
+    pub fn heretic() -> Self {
+        Self::from_toml(HERETIC_TOML).expect("bundled heretic.toml is valid")
+    }
+
+    pub fn hexen() -> Self {
+        Self::from_toml(HEXEN_TOML).expect("bundled hexen.toml is valid")
+    }
+
+    /// Built-in named configs available without disk I/O.
+    pub fn builtin(name: &str) -> Option<Self> {
+        match name {
+            "Doom" => Some(Self::vanilla_doom()),
+            "Doom 2" => Some(Self::vanilla_doom2()),
+            "Heretic" => Some(Self::heretic()),
+            "Hexen" => Some(Self::hexen()),
+            _ => None,
+        }
+    }
+
+    pub fn builtin_names() -> &'static [&'static str] {
+        &["Doom", "Doom 2", "Heretic", "Hexen"]
+    }
+
     pub fn linedef_special(&self, id: u16) -> Option<&LinedefSpecial> {
         self.linedef_lookup
             .get(&id)
@@ -124,6 +151,9 @@ fn format_flags(table: &HashMap<String, String>, flags: u32) -> String {
 }
 
 const VANILLA_DOOM_TOML: &str = include_str!("../configs/doom.toml");
+const VANILLA_DOOM2_TOML: &str = include_str!("../configs/doom2.toml");
+const HERETIC_TOML: &str = include_str!("../configs/heretic.toml");
+const HEXEN_TOML: &str = include_str!("../configs/hexen.toml");
 
 #[cfg(test)]
 mod tests {

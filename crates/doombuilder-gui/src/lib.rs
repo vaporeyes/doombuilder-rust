@@ -14,12 +14,14 @@ use std::sync::Arc;
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::edit::{
-    Command, LinedefIntField, SectorIntField, SectorSlot, SidedefSlot, ThingIntField, ThingMove,
-    UndoStack, VertexMove,
+    collect_and_delete, Command, LineEndpoint, LinedefChain, LinedefIntField, SectorIntField,
+    SectorSlot, SidedefSlot, ThingIntField, ThingMove, UndoStack, VertexMove,
 };
+use doombuilder_core::map::LinedefId;
 use doombuilder_core::map::MapThing;
 use doombuilder_core::map::{
-    save_map_as_pwad, Map, MapSidedef, SectorId, TextureName, ThingId, VertexId,
+    save_map_as_pwad, Map, MapLinedef, MapSidedef, MapVertex, SectorId, TextureName, ThingId,
+    VertexId,
 };
 use doombuilder_core::textures::TextureSet;
 use doombuilder_core::wad::WadKind;
@@ -33,8 +35,8 @@ use iced::keyboard::{self, Modifiers};
 use iced::widget::canvas::Cache;
 use iced::widget::image::Handle as ImageHandle;
 use iced::widget::{
-    button, column, container, image, mouse_area, pick_list, row, scrollable, stack, text,
-    text_input, Space,
+    button, checkbox, column, container, image, mouse_area, pick_list, row, scrollable, stack,
+    text, text_input, Space,
 };
 use iced::{Color, Element, Length, Subscription, Task, Theme};
 
@@ -95,7 +97,7 @@ pub struct App {
     walls: Arc<Vec<Wall>>,
     spatial: Option<Arc<SpatialIndex>>,
     sector_fills: Arc<Vec<FillTile>>,
-    show_textures: bool,
+    settings: Settings,
     camera2d: Camera2D,
     camera3d: Camera3D,
     geometry3d: Arc<View3DGeometry>,
@@ -110,15 +112,25 @@ pub struct App {
     mode: Mode,
     edit_mode: EditMode,
     config: Arc<GameConfig>,
+    current_config_name: String,
     textures: Option<Arc<TextureSet>>,
     texture_handles: Arc<HashMap<String, ImageHandle>>,
     sprite_handles: Arc<HashMap<String, ImageHandle>>,
+    sprite_dims: Arc<HashMap<String, (u32, u32)>>,
     sorted_texture_names: Arc<Vec<String>>,
     active_picker: Option<ActivePicker>,
     picker_filter: String,
     sector_buffers: Option<SectorBuffers>,
     linedef_buffers: Option<LinedefBuffers>,
     thing_buffers: Option<ThingBuffers>,
+    drawing: Option<DrawingState>,
+}
+
+#[derive(Debug, Default)]
+pub struct DrawingState {
+    pub chain: LinedefChain,
+    /// Current chain head (live VertexId in the map + how we'd serialise it).
+    pub last: Option<(VertexId, LineEndpoint)>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +161,111 @@ pub enum ActivePicker {
     Action(doombuilder_core::map::LinedefId),
     ThingKind(ThingId),
     SectorSpecial(SectorId),
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct Settings {
+    #[serde(default = "default_true")]
+    pub show_textures: bool,
+    #[serde(default = "default_true")]
+    pub show_sprites: bool,
+    #[serde(default = "default_true")]
+    pub show_grid: bool,
+    #[serde(default = "default_true")]
+    pub show_things: bool,
+    #[serde(default)]
+    pub always_show_vertices: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            show_textures: true,
+            show_sprites: true,
+            show_grid: true,
+            show_things: true,
+            always_show_vertices: false,
+        }
+    }
+}
+
+impl Settings {
+    /// Path to the JSON settings file: e.g. `~/.config/doombuilder/settings.json`
+    /// on Linux, `~/Library/Application Support/doombuilder/settings.json` on
+    /// macOS, `%APPDATA%\doombuilder\settings.json` on Windows.
+    pub fn config_path() -> Option<PathBuf> {
+        let dirs = directories::ProjectDirs::from("", "", "doombuilder")?;
+        Some(dirs.config_dir().join("settings.json"))
+    }
+
+    pub fn load_or_default() -> Self {
+        let Some(path) = Self::config_path() else {
+            return Self::default();
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => return Self::default(),
+        };
+        serde_json::from_str(&text).unwrap_or_default()
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        let Some(path) = Self::config_path() else {
+            return Err("no settings directory available".into());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SettingKey {
+    ShowTextures,
+    ShowSprites,
+    ShowGrid,
+    ShowThings,
+    AlwaysShowVertices,
+}
+
+impl SettingKey {
+    fn label(self) -> &'static str {
+        match self {
+            SettingKey::ShowTextures => "Show sector textures (flats)",
+            SettingKey::ShowSprites => "Show thing sprites (vs colored placeholders)",
+            SettingKey::ShowGrid => "Show grid",
+            SettingKey::ShowThings => "Show things",
+            SettingKey::AlwaysShowVertices => "Always show vertex dots",
+        }
+    }
+
+    fn get(self, s: &Settings) -> bool {
+        match self {
+            SettingKey::ShowTextures => s.show_textures,
+            SettingKey::ShowSprites => s.show_sprites,
+            SettingKey::ShowGrid => s.show_grid,
+            SettingKey::ShowThings => s.show_things,
+            SettingKey::AlwaysShowVertices => s.always_show_vertices,
+        }
+    }
+
+    fn set(self, s: &mut Settings, v: bool) {
+        match self {
+            SettingKey::ShowTextures => s.show_textures = v,
+            SettingKey::ShowSprites => s.show_sprites = v,
+            SettingKey::ShowGrid => s.show_grid = v,
+            SettingKey::ShowThings => s.show_things = v,
+            SettingKey::AlwaysShowVertices => s.always_show_vertices = v,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -191,7 +308,7 @@ impl Default for App {
             walls: Arc::new(Vec::new()),
             spatial: None,
             sector_fills: Arc::new(Vec::new()),
-            show_textures: true,
+            settings: Settings::load_or_default(),
             camera2d: Camera2D::default(),
             camera3d: Camera3D::default(),
             geometry3d: Arc::new(View3DGeometry::default()),
@@ -206,15 +323,18 @@ impl Default for App {
             mode: Mode::default(),
             edit_mode: EditMode::default(),
             config: Arc::new(GameConfig::vanilla_doom()),
+            current_config_name: "Doom".to_string(),
             textures: None,
             texture_handles: Arc::new(HashMap::new()),
             sprite_handles: Arc::new(HashMap::new()),
+            sprite_dims: Arc::new(HashMap::new()),
             sorted_texture_names: Arc::new(Vec::new()),
             active_picker: None,
             picker_filter: String::new(),
             sector_buffers: None,
             linedef_buffers: None,
             thing_buffers: None,
+            drawing: None,
         }
     }
 }
@@ -232,6 +352,9 @@ pub enum Message {
     Mode(Mode),
     SetEditMode(EditMode),
     ToggleTextures,
+    OpenSettings,
+    SetSetting(SettingKey, bool),
+    SetGameConfig(String),
     View2D(View2DMessage),
     View3D(View3DMessage),
     ModifiersChanged(Modifiers),
@@ -241,6 +364,8 @@ pub enum Message {
     Redo,
     DeleteSelection,
     InsertThing,
+    ToggleDrawing,
+    CancelDrawing,
     OpenTexturePicker(PickerTarget),
     OpenActionPicker(doombuilder_core::map::LinedefId),
     OpenThingKindPicker(ThingId),
@@ -270,6 +395,7 @@ pub struct AssetSummary {
     textures: Option<Arc<TextureSet>>,
     texture_handles: Arc<HashMap<String, ImageHandle>>,
     sprite_handles: Arc<HashMap<String, ImageHandle>>,
+    sprite_dims: Arc<HashMap<String, (u32, u32)>>,
     summary: String,
     maps: Vec<String>,
 }
@@ -297,6 +423,12 @@ pub struct MapPayload {
 impl App {
     fn theme(&self) -> Theme {
         Theme::Light
+    }
+
+    fn persist_settings(&mut self) {
+        if let Err(e) = self.settings.save() {
+            self.status = format!("Settings save failed: {e}");
+        }
     }
 
     fn window_title(&self) -> String {
@@ -448,6 +580,7 @@ impl App {
                 self.sorted_texture_names = Arc::new(sorted);
                 self.texture_handles = asset.texture_handles;
                 self.sprite_handles = asset.sprite_handles;
+                self.sprite_dims = asset.sprite_dims;
                 self.summary = Some(asset.summary);
                 self.maps = asset.maps;
                 self.reset_map_state();
@@ -509,8 +642,30 @@ impl App {
                 Task::none()
             }
             Message::ToggleTextures => {
-                self.show_textures = !self.show_textures;
+                self.settings.show_textures = !self.settings.show_textures;
+                self.persist_settings();
                 self.cache2d.clear();
+                Task::none()
+            }
+            Message::OpenSettings => {
+                self.active_picker = Some(ActivePicker::Settings);
+                Task::none()
+            }
+            Message::SetSetting(key, value) => {
+                key.set(&mut self.settings, value);
+                self.persist_settings();
+                self.cache2d.clear();
+                Task::none()
+            }
+            Message::SetGameConfig(name) => {
+                if let Some(cfg) = GameConfig::builtin(&name) {
+                    self.config = Arc::new(cfg);
+                    self.current_config_name = name;
+                    // Rebuild 3D thing colors / categories etc. since they
+                    // sample from the active config.
+                    self.rebuild_geometry_indices();
+                    self.cache2d.clear();
+                }
                 Task::none()
             }
             Message::View2D(msg) => {
@@ -527,7 +682,9 @@ impl App {
                 Task::none()
             }
             Message::KeyboardEsc => {
-                if self.active_drag.is_some() {
+                if self.drawing.is_some() {
+                    self.cancel_drawing();
+                } else if self.active_drag.is_some() {
                     self.cancel_active_drag();
                 } else if !self.selection.is_empty() {
                     self.selection = Arc::new(HashSet::new());
@@ -757,33 +914,43 @@ impl App {
                 Task::none()
             }
             Message::DeleteSelection => {
-                let thing_ids: Vec<ThingId> = self
-                    .selection
-                    .iter()
-                    .filter_map(|h| match h {
-                        HighlightKind::Thing(id) => Some(*id),
-                        _ => None,
-                    })
-                    .collect();
-                if !thing_ids.is_empty() {
+                let mut sel_v: HashSet<doombuilder_core::map::VertexId> = HashSet::new();
+                let mut sel_l: HashSet<LinedefId> = HashSet::new();
+                let mut sel_sec: HashSet<SectorId> = HashSet::new();
+                let mut sel_t: HashSet<ThingId> = HashSet::new();
+                for h in self.selection.iter() {
+                    match h {
+                        HighlightKind::Vertex(v) => {
+                            sel_v.insert(*v);
+                        }
+                        HighlightKind::Linedef(l) => {
+                            sel_l.insert(*l);
+                        }
+                        HighlightKind::Sector(s) => {
+                            sel_sec.insert(*s);
+                        }
+                        HighlightKind::Thing(t) => {
+                            sel_t.insert(*t);
+                        }
+                    }
+                }
+                let any = !sel_v.is_empty()
+                    || !sel_l.is_empty()
+                    || !sel_sec.is_empty()
+                    || !sel_t.is_empty();
+                if any {
                     if let Some(map) = self.map.as_mut() {
                         let map_mut = Arc::make_mut(map);
-                        let mut snapshots = Vec::with_capacity(thing_ids.len());
-                        for id in &thing_ids {
-                            if let Some(t) = map_mut.things.remove(*id) {
-                                snapshots.push(t);
-                            }
-                        }
-                        if !snapshots.is_empty() {
-                            self.undo.push(Command::DeleteThings {
-                                snapshots,
-                                current_ids: Vec::new(),
-                            });
-                            let mut sel = (*self.selection).clone();
-                            for id in &thing_ids {
-                                sel.remove(&HighlightKind::Thing(*id));
-                            }
-                            self.selection = Arc::new(sel);
+                        let state = collect_and_delete(map_mut, &sel_v, &sel_l, &sel_sec, &sel_t);
+                        let nothing = state.vertex_snaps.is_empty()
+                            && state.sector_snaps.is_empty()
+                            && state.sidedef_snaps.is_empty()
+                            && state.linedef_snaps.is_empty()
+                            && state.thing_snaps.is_empty();
+                        if !nothing {
+                            self.undo
+                                .push(Command::DeleteElements(Box::new(state)));
+                            self.selection = Arc::new(HashSet::new());
                             self.rebuild_geometry_indices();
                             self.cache2d.clear();
                         }
@@ -939,6 +1106,22 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ToggleDrawing => {
+                if self.drawing.is_some() {
+                    // Pressing toggle again commits the chain.
+                    self.commit_drawing();
+                } else if self.map.is_some() {
+                    self.drawing = Some(DrawingState::default());
+                    self.status = "Drawing: click to chain linedefs (Esc cancels, D commits)".into();
+                }
+                self.cache2d.clear();
+                Task::none()
+            }
+            Message::CancelDrawing => {
+                self.cancel_drawing();
+                self.cache2d.clear();
+                Task::none()
+            }
             Message::Quit => iced::exit(),
             Message::Noop => Task::none(),
         }
@@ -978,6 +1161,7 @@ impl App {
                 }
                 keyboard::Key::Named(keyboard::key::Named::Insert) => Message::InsertThing,
                 keyboard::Key::Character("i") if !modifiers.command() => Message::InsertThing,
+                keyboard::Key::Character("d") if !modifiers.command() => Message::ToggleDrawing,
                 keyboard::Key::Character("1") if !modifiers.command() => {
                     Message::SetEditMode(EditMode::Vertices)
                 }
@@ -1048,23 +1232,27 @@ impl App {
                 self.cursor_world = None;
             }
             View2DMessage::ClickAt(world) => {
-                let hit = self.hit_test(world);
-                let additive = self.modifiers.shift();
-                let mut sel: HashSet<HighlightKind> = (*self.selection).clone();
-                match (hit, additive) {
-                    (Some(h), true) => {
-                        if !sel.insert(h) {
-                            sel.remove(&h);
+                if self.drawing.is_some() {
+                    self.drawing_click(world);
+                } else {
+                    let hit = self.hit_test(world);
+                    let additive = self.modifiers.shift();
+                    let mut sel: HashSet<HighlightKind> = (*self.selection).clone();
+                    match (hit, additive) {
+                        (Some(h), true) => {
+                            if !sel.insert(h) {
+                                sel.remove(&h);
+                            }
                         }
+                        (Some(h), false) => {
+                            sel.clear();
+                            sel.insert(h);
+                        }
+                        (None, false) => sel.clear(),
+                        (None, true) => {}
                     }
-                    (Some(h), false) => {
-                        sel.clear();
-                        sel.insert(h);
-                    }
-                    (None, false) => sel.clear(),
-                    (None, true) => {}
+                    self.selection = Arc::new(sel);
                 }
-                self.selection = Arc::new(sel);
             }
             View2DMessage::DragMoved { start, current } => {
                 self.handle_drag_moved(start, current);
@@ -1289,6 +1477,102 @@ impl App {
             .collect()
     }
 
+    fn drawing_click(&mut self, world: Vec2) {
+        let Some(drawing) = self.drawing.as_mut() else {
+            return;
+        };
+        let Some(map) = self.map.as_mut() else {
+            return;
+        };
+        let map_mut = Arc::make_mut(map);
+
+        // Snap to nearest existing vertex within ~8 px (world units / zoom).
+        let snap_world = (8.0_f32 / self.camera2d.zoom.max(1e-6)).max(2.0);
+        let snapped = self
+            .spatial
+            .as_ref()
+            .and_then(|sp| sp.nearest_vertex(world.x, world.y, snap_world));
+
+        let (target_vid, target_endpoint) = match snapped {
+            Some(vid) => (vid, LineEndpoint::Existing(vid)),
+            None => {
+                let vsnap = MapVertex {
+                    x: world.x.round() as i32,
+                    y: world.y.round() as i32,
+                };
+                let new_vid = map_mut.vertices.insert(vsnap);
+                drawing.chain.vertex_inserts.push(vsnap);
+                drawing.chain.current_v.push(new_vid);
+                let idx = drawing.chain.vertex_inserts.len() - 1;
+                (new_vid, LineEndpoint::New(idx))
+            }
+        };
+
+        if let Some((from_vid, from_endpoint)) = drawing.last.clone() {
+            if from_vid != target_vid {
+                let template = MapLinedef {
+                    v1: from_vid,
+                    v2: target_vid,
+                    flags: 0,
+                    special: 0,
+                    args: [0; 5],
+                    tag: 0,
+                    right: None,
+                    left: None,
+                };
+                let new_lid = map_mut.linedefs.insert(template.clone());
+                drawing.chain.current_l.push(new_lid);
+                drawing.chain.linedefs.push((
+                    from_endpoint,
+                    target_endpoint.clone(),
+                    template,
+                ));
+            }
+        }
+        drawing.last = Some((target_vid, target_endpoint));
+        self.status = format!(
+            "Drawing: {} verts, {} lines (Esc cancels, D commits)",
+            drawing.chain.current_v.len(),
+            drawing.chain.current_l.len()
+        );
+        // Spatial index is now stale; rebuild on commit/cancel rather than per-click.
+        self.cache2d.clear();
+    }
+
+    fn cancel_drawing(&mut self) {
+        let Some(drawing) = self.drawing.take() else {
+            return;
+        };
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            for id in drawing.chain.current_l.iter().rev() {
+                map_mut.linedefs.remove(*id);
+            }
+            for id in drawing.chain.current_v.iter().rev() {
+                map_mut.vertices.remove(*id);
+            }
+        }
+        self.rebuild_geometry_indices();
+        self.status = "Drawing cancelled.".into();
+    }
+
+    fn commit_drawing(&mut self) {
+        let Some(drawing) = self.drawing.take() else {
+            return;
+        };
+        if drawing.chain.linedefs.is_empty() && drawing.chain.vertex_inserts.is_empty() {
+            self.status = "Drawing committed (empty).".into();
+            return;
+        }
+        let count_v = drawing.chain.current_v.len();
+        let count_l = drawing.chain.current_l.len();
+        self.undo
+            .push(Command::CreateLinedefChain(Box::new(drawing.chain)));
+        self.rebuild_geometry_indices();
+        self.cache2d.clear();
+        self.status = format!("Drew {} vertices and {} linedefs.", count_v, count_l);
+    }
+
     fn cancel_active_drag(&mut self) {
         let mode = self.active_drag.take();
         match mode {
@@ -1444,18 +1728,38 @@ impl App {
                 mode_button("2D", Mode::View2D, self.mode),
                 mode_button("3D", Mode::View3D, self.mode),
                 vertical_separator(),
+                text("Game:").size(13),
+                pick_list(
+                    GameConfig::builtin_names()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>(),
+                    Some(self.current_config_name.clone()),
+                    Message::SetGameConfig,
+                ),
+                vertical_separator(),
                 edit_mode_button(EditMode::Vertices, self.edit_mode),
                 edit_mode_button(EditMode::Linedefs, self.edit_mode),
                 edit_mode_button(EditMode::Sectors, self.edit_mode),
                 edit_mode_button(EditMode::Things, self.edit_mode),
                 vertical_separator(),
-                button(text(if self.show_textures {
+                button(text(if self.drawing.is_some() {
+                    "Drawing: ON (D commits)"
+                } else {
+                    "Draw"
+                }))
+                .style(style::win32_toggle_button(self.drawing.is_some()))
+                .on_press(Message::ToggleDrawing),
+                button(text(if self.settings.show_textures {
                     "Show textures: ON"
                 } else {
                     "Show textures: OFF"
                 }))
                 .style(style::win32_standard_button)
                 .on_press(Message::ToggleTextures),
+                button(text("Settings\u{2026}"))
+                    .style(style::win32_standard_button)
+                    .on_press(Message::OpenSettings),
             ]
             .spacing(8)
             .padding(6)
@@ -1483,13 +1787,16 @@ impl App {
                     hover: self.hover,
                     selection: self.selection.clone(),
                     drag_rect: self.drag_rect,
-                    fills: if self.show_textures {
+                    fills: if self.settings.show_textures {
                         self.sector_fills.clone()
                     } else {
                         Arc::new(Vec::new())
                     },
                     config: self.config.clone(),
                     edit_mode: self.edit_mode,
+                    sprite_handles: self.sprite_handles.clone(),
+                    sprite_dims: self.sprite_dims.clone(),
+                    settings: self.settings,
                 };
                 view.into_widget(Message::View2D)
             }
@@ -1642,6 +1949,7 @@ impl App {
             Some(ActivePicker::Action(_)) => self.action_picker_panel(),
             Some(ActivePicker::ThingKind(_)) => self.thing_kind_picker_panel(),
             Some(ActivePicker::SectorSpecial(_)) => self.sector_special_picker_panel(),
+            Some(ActivePicker::Settings) => self.settings_panel(),
             None => Space::new().into(),
         };
 
@@ -1832,6 +2140,45 @@ impl App {
             .spacing(8)
             .padding(12)
             .into()
+    }
+
+    fn settings_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Settings").size(18),
+            Space::new().width(Length::Fill),
+            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let keys = [
+            SettingKey::ShowTextures,
+            SettingKey::ShowSprites,
+            SettingKey::ShowGrid,
+            SettingKey::ShowThings,
+            SettingKey::AlwaysShowVertices,
+        ];
+
+        let rows: Vec<Element<'_, Message>> = keys
+            .iter()
+            .copied()
+            .map(|k| {
+                let on = k.get(&self.settings);
+                checkbox(on)
+                    .label(k.label())
+                    .on_toggle(move |v| Message::SetSetting(k, v))
+                    .into()
+            })
+            .collect();
+
+        column![
+            title_row,
+            text("2D viewport display").size(14),
+            column(rows).spacing(6),
+        ]
+        .spacing(12)
+        .padding(16)
+        .into()
     }
 
     fn sector_special_picker_panel(&self) -> Element<'_, Message> {
@@ -2640,7 +2987,8 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Delete Selection"),
     MenuItem("Insert Thing"),
 ];
-const VIEW_MENU_ITEMS: &[MenuItem] = &[MenuItem("2D Mode"), MenuItem("3D Mode")];
+const VIEW_MENU_ITEMS: &[MenuItem] =
+    &[MenuItem("2D Mode"), MenuItem("3D Mode"), MenuItem("Settings\u{2026}")];
 const TOOLS_MENU_ITEMS: &[MenuItem] = &[MenuItem("Map Statistics (n/a)")];
 const HELP_MENU_ITEMS: &[MenuItem] = &[MenuItem("About (n/a)")];
 
@@ -2669,6 +3017,7 @@ fn dispatch_view(item: MenuItem) -> Message {
     match item.0 {
         "2D Mode" => Message::Mode(Mode::View2D),
         "3D Mode" => Message::Mode(Mode::View3D),
+        "Settings\u{2026}" => Message::OpenSettings,
         _ => Message::Noop,
     }
 }
@@ -2873,9 +3222,13 @@ async fn pick_file() -> Option<PathBuf> {
 
 async fn load_asset(path: PathBuf) -> Result<AssetSummary, String> {
     let (wad, textures, summary, maps) = open_and_summarise(&path).map_err(|e| e.to_string())?;
-    let (texture_handles, sprite_handles) = match textures.as_ref() {
-        Some(ts) => (build_texture_handles(ts), build_sprite_handles(ts)),
-        None => (HashMap::new(), HashMap::new()),
+    let (texture_handles, sprite_handles, sprite_dims) = match textures.as_ref() {
+        Some(ts) => (
+            build_texture_handles(ts),
+            build_sprite_handles(ts),
+            build_sprite_dims(ts),
+        ),
+        None => (HashMap::new(), HashMap::new(), HashMap::new()),
     };
     Ok(AssetSummary {
         path,
@@ -2883,9 +3236,17 @@ async fn load_asset(path: PathBuf) -> Result<AssetSummary, String> {
         textures,
         texture_handles: Arc::new(texture_handles),
         sprite_handles: Arc::new(sprite_handles),
+        sprite_dims: Arc::new(sprite_dims),
         summary,
         maps,
     })
+}
+
+fn build_sprite_dims(set: &TextureSet) -> HashMap<String, (u32, u32)> {
+    set.sprites
+        .iter()
+        .map(|(name, img)| (name.clone(), (img.width as u32, img.height as u32)))
+        .collect()
 }
 
 fn build_texture_handles(set: &TextureSet) -> HashMap<String, ImageHandle> {

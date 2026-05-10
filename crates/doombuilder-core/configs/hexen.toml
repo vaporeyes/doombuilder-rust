@@ -1,0 +1,1860 @@
+[meta]
+name = "Hexen"
+format = "hexen"
+
+# Linedef action specials
+[[linedef_specials]]
+id = 0
+title = "None"
+category = "misc"
+
+[[linedef_specials]]
+id = 1
+title = "Sound Number"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 2
+title = "Target Angle"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 3
+title = "Target Angle"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 4
+title = "Movement Length"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 5
+title = "Sound Number"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 6
+title = "Movement Length (8px)"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 7
+title = "Delay"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 8
+title = "Delay"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 9
+title = "Line Horizon"
+category = "line"
+
+[[linedef_specials]]
+id = 10
+title = "Light Tag"
+category = "door"
+
+[[linedef_specials]]
+id = 11
+title = "Light Tag"
+category = "door"
+
+[[linedef_specials]]
+id = 12
+title = "Light Tag"
+category = "door"
+
+[[linedef_specials]]
+id = 13
+title = "Light Tag"
+category = "door"
+
+[[linedef_specials]]
+id = 20
+title = "Movement Amount"
+category = "floor"
+
+[[linedef_specials]]
+id = 21
+title = "Movement Speed"
+category = "floor"
+
+[[linedef_specials]]
+id = 22
+title = "Movement Speed"
+category = "floor"
+
+[[linedef_specials]]
+id = 23
+title = "Movement Amount"
+category = "floor"
+
+[[linedef_specials]]
+id = 24
+title = "Movement Speed"
+category = "floor"
+
+[[linedef_specials]]
+id = 25
+title = "Movement Speed"
+category = "floor"
+
+[[linedef_specials]]
+id = 26
+title = "Reset Delay"
+category = "stairs"
+
+[[linedef_specials]]
+id = 27
+title = "Reset Delay"
+category = "stairs"
+
+[[linedef_specials]]
+id = 28
+title = "Crush Damage"
+category = "floor"
+
+[[linedef_specials]]
+id = 29
+title = "Movement Amount"
+category = "pillar"
+
+[[linedef_specials]]
+id = 30
+title = "Ceiling Movement Amount"
+category = "pillar"
+
+[[linedef_specials]]
+id = 31
+title = "Reset Delay"
+category = "stairs"
+
+[[linedef_specials]]
+id = 32
+title = "Reset Delay"
+category = "stairs"
+
+[[linedef_specials]]
+id = 35
+title = "Movement Amount (8px)"
+category = "floor"
+
+[[linedef_specials]]
+id = 36
+title = "Movement Amount (8px)"
+category = "floor"
+
+[[linedef_specials]]
+id = 40
+title = "Movement Amount"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 41
+title = "Movement Amount"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 42
+title = "Crush Damage"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 43
+title = "Crush Damage"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 44
+title = "Sector Tag"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 45
+title = "Crush Damage"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 46
+title = "Sector Tag"
+category = "floor"
+
+[[linedef_specials]]
+id = 60
+title = "Reverse Delay"
+category = "platform"
+
+[[linedef_specials]]
+id = 61
+title = "Sector Tag"
+category = "platform"
+
+[[linedef_specials]]
+id = 62
+title = "Reverse Delay"
+category = "platform"
+
+[[linedef_specials]]
+id = 63
+title = "Movement Amount (8px)"
+category = "platform"
+
+[[linedef_specials]]
+id = 64
+title = "Reverse Delay"
+category = "platform"
+
+[[linedef_specials]]
+id = 65
+title = "Movement Amount (8px)"
+category = "platform"
+
+[[linedef_specials]]
+id = 66
+title = "Target Height (8px)"
+category = "floor"
+
+[[linedef_specials]]
+id = 67
+title = "Target Height (8px)"
+category = "floor"
+
+[[linedef_specials]]
+id = 68
+title = "Negative Height"
+category = "floor"
+
+[[linedef_specials]]
+id = 69
+title = "Negative Height"
+category = "ceiling"
+
+[[linedef_specials]]
+id = 70
+title = "Target Sector Tag (0=ignore)"
+category = "teleport"
+
+[[linedef_specials]]
+id = 71
+title = "Target Sector Tag (0=ignore)"
+category = "teleport"
+
+[[linedef_specials]]
+id = 72
+title = "Thrust Distance"
+category = "thing"
+
+[[linedef_specials]]
+id = 73
+title = "Damage Amount"
+category = "thing"
+
+[[linedef_specials]]
+id = 74
+title = "Position"
+category = "teleport"
+
+[[linedef_specials]]
+id = 75
+title = "End Game"
+category = "end"
+
+[[linedef_specials]]
+id = 80
+title = "Script Argument 3"
+category = "script"
+
+[[linedef_specials]]
+id = 81
+title = "Map Number"
+category = "script"
+
+[[linedef_specials]]
+id = 82
+title = "Map Number"
+category = "script"
+
+[[linedef_specials]]
+id = 83
+title = "Key Number"
+category = "script"
+
+[[linedef_specials]]
+id = 90
+title = "Target Angle"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 91
+title = "Target Angle"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 92
+title = "Movement Length"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 93
+title = "Movement Length (8px)"
+category = "polyobj"
+
+[[linedef_specials]]
+id = 94
+title = "Movement Amount"
+category = "pillar"
+
+[[linedef_specials]]
+id = 95
+title = "Movement Amount"
+category = "floor"
+
+[[linedef_specials]]
+id = 96
+title = "Movement Amount"
+category = "floor"
+
+[[linedef_specials]]
+id = 100
+title = "Scroll Speed"
+category = "scroll"
+
+[[linedef_specials]]
+id = 101
+title = "Scroll Speed"
+category = "scroll"
+
+[[linedef_specials]]
+id = 102
+title = "Scroll Speed"
+category = "scroll"
+
+[[linedef_specials]]
+id = 103
+title = "Scroll Speed"
+category = "scroll"
+
+[[linedef_specials]]
+id = 110
+title = "Lighting Amount"
+category = "light"
+
+[[linedef_specials]]
+id = 111
+title = "Lighting Amount"
+category = "light"
+
+[[linedef_specials]]
+id = 112
+title = "Brightness Level"
+category = "light"
+
+[[linedef_specials]]
+id = 113
+title = "Fade Duration"
+category = "light"
+
+[[linedef_specials]]
+id = 114
+title = "Fade Duration"
+category = "light"
+
+[[linedef_specials]]
+id = 115
+title = "Darkest Level"
+category = "light"
+
+[[linedef_specials]]
+id = 116
+title = "Darkest Duration"
+category = "light"
+
+[[linedef_specials]]
+id = 120
+title = "Thing Tag"
+category = "earthquake"
+
+[[linedef_specials]]
+id = 121
+title = "Set Line ID"
+category = "line"
+
+[[linedef_specials]]
+id = 129
+title = "Script Argument 3"
+category = "use"
+
+[[linedef_specials]]
+id = 130
+title = "Thing Tag"
+category = "thing"
+
+[[linedef_specials]]
+id = 131
+title = "Thing Tag"
+category = "thing"
+
+[[linedef_specials]]
+id = 132
+title = "Thing Tag"
+category = "thing"
+
+[[linedef_specials]]
+id = 133
+title = "Thing Tag"
+category = "thing"
+
+[[linedef_specials]]
+id = 134
+title = "Vertical Speed"
+category = "thing"
+
+[[linedef_specials]]
+id = 135
+title = "Thing Angle"
+category = "thing"
+
+[[linedef_specials]]
+id = 136
+title = "Vertical Speed"
+category = "thing"
+
+[[linedef_specials]]
+id = 137
+title = "Thing Angle"
+category = "thing"
+
+[[linedef_specials]]
+id = 140
+title = "Sound Number"
+category = "sector"
+
+# Thing types
+[[thing_types]]
+id = 1
+title = "Player 1 start"
+category = "players"
+sprite = "CLERA1"
+
+[[thing_types]]
+id = 2
+title = "Player 2 start"
+category = "players"
+sprite = "CLERA1"
+
+[[thing_types]]
+id = 3
+title = "Player 3 start"
+category = "players"
+sprite = "CLERA1"
+
+[[thing_types]]
+id = 4
+title = "Player 4 start"
+category = "players"
+sprite = "CLERA1"
+
+[[thing_types]]
+id = 5
+title = "Winged Statue"
+category = "obstacles"
+sprite = "STTWA0"
+
+[[thing_types]]
+id = 6
+title = "Tiny Rock (mossy)"
+category = "decoration"
+sprite = "RCK1A0"
+
+[[thing_types]]
+id = 7
+title = "Small Rock (mossy)"
+category = "decoration"
+sprite = "RCK2A0"
+
+[[thing_types]]
+id = 9
+title = "Medium Rock (mossy)"
+category = "decoration"
+sprite = "RCK3A0"
+
+[[thing_types]]
+id = 10
+title = "Serpent Staff"
+category = "weapons"
+sprite = "WCSSA0"
+
+[[thing_types]]
+id = 11
+title = "Player Deathmatch start"
+category = "players"
+sprite = "CLERR0"
+
+[[thing_types]]
+id = 12
+title = "Quietus Piece 1"
+category = "weapons"
+sprite = "WFR1A0"
+
+[[thing_types]]
+id = 13
+title = "Quietus Piece 2"
+category = "weapons"
+sprite = "WFR2A0"
+
+[[thing_types]]
+id = 14
+title = "Teleport Landing"
+category = "teleports"
+sprite = "TELEA0"
+
+[[thing_types]]
+id = 15
+title = "Big Rock (mossy)"
+category = "decoration"
+sprite = "RCK4A0"
+
+[[thing_types]]
+id = 16
+title = "Quietus Piece 3"
+category = "weapons"
+sprite = "WFR3A0"
+
+[[thing_types]]
+id = 17
+title = "Chandelier (lit)"
+category = "lights"
+sprite = "CDLRA0"
+
+[[thing_types]]
+id = 18
+title = "Wraithverge Piece 1"
+category = "weapons"
+sprite = "WCH1A0"
+
+[[thing_types]]
+id = 19
+title = "Wraithverge Piece 2"
+category = "weapons"
+sprite = "WCH2A0"
+
+[[thing_types]]
+id = 20
+title = "Wraithverge Piece 3"
+category = "weapons"
+sprite = "WCH3A0"
+
+[[thing_types]]
+id = 21
+title = "BloodScourge Piece 1"
+category = "weapons"
+sprite = "WMS1A0"
+
+[[thing_types]]
+id = 22
+title = "BloodScourge Piece 2"
+category = "weapons"
+sprite = "WMS2A0"
+
+[[thing_types]]
+id = 23
+title = "BloodScourge Piece 3"
+category = "weapons"
+sprite = "WMS3A0"
+
+[[thing_types]]
+id = 24
+title = "Dead Tree"
+category = "obstacles"
+sprite = "TRE1A0"
+
+[[thing_types]]
+id = 25
+title = "Dead Tree (destructable)"
+category = "obstacles"
+sprite = "TRE1A0"
+
+[[thing_types]]
+id = 26
+title = "Mossy Tree 1"
+category = "obstacles"
+sprite = "TRE2A0"
+
+[[thing_types]]
+id = 27
+title = "Mossy Tree 2"
+category = "obstacles"
+sprite = "TRE3A0"
+
+[[thing_types]]
+id = 28
+title = "Tree Stump (burned)"
+category = "obstacles"
+sprite = "STM1A0"
+
+[[thing_types]]
+id = 29
+title = "Tree Stump (bare)"
+category = "obstacles"
+sprite = "STM2A0"
+
+[[thing_types]]
+id = 30
+title = "Porkalator"
+category = "powerups"
+sprite = "ARTIPORK"
+
+[[thing_types]]
+id = 31
+title = "Green Chaos Serpent"
+category = "monsters"
+sprite = "DEMNA1"
+
+[[thing_types]]
+id = 32
+title = "Mystic Urn"
+category = "powerups"
+sprite = "ARTISPHL"
+
+[[thing_types]]
+id = 33
+title = "Torch"
+category = "powerups"
+sprite = "ARTITRCH"
+
+[[thing_types]]
+id = 34
+title = "Reiver"
+category = "monsters"
+sprite = "WRTHA1"
+
+[[thing_types]]
+id = 36
+title = "Chaos Device"
+category = "powerups"
+
+[[thing_types]]
+id = 37
+title = "Tree Stump 1"
+category = "obstacles"
+sprite = "STM3A0"
+
+[[thing_types]]
+id = 38
+title = "Tree Stump 2"
+category = "obstacles"
+sprite = "STM4A0"
+
+[[thing_types]]
+id = 39
+title = "Large Mushroom 1"
+category = "decoration"
+sprite = "MSH1A0"
+
+[[thing_types]]
+id = 40
+title = "Large Mushroom 2"
+category = "decoration"
+sprite = "MSH2A0"
+
+[[thing_types]]
+id = 41
+title = "Medium Mushroom"
+category = "decoration"
+sprite = "MSH3A0"
+
+[[thing_types]]
+id = 42
+title = "Small Mushroom 1"
+category = "decoration"
+sprite = "MSH4A0"
+
+[[thing_types]]
+id = 44
+title = "Small Mushroom 2"
+category = "decoration"
+sprite = "MSH5A0"
+
+[[thing_types]]
+id = 45
+title = "Small Mushroom 3"
+category = "decoration"
+sprite = "MSH6A0"
+
+[[thing_types]]
+id = 46
+title = "Small Mushroom 4"
+category = "decoration"
+sprite = "MSH7A0"
+
+[[thing_types]]
+id = 47
+title = "Small Mushroom 5"
+category = "decoration"
+sprite = "MSH8A0"
+
+[[thing_types]]
+id = 48
+title = "Stalagmite (pillar)"
+category = "obstacles"
+sprite = "SGMPA0"
+
+[[thing_types]]
+id = 49
+title = "Stalagmite (large)"
+category = "obstacles"
+sprite = "SGM1A0"
+
+[[thing_types]]
+id = 50
+title = "Stalagmite (medium)"
+category = "obstacles"
+sprite = "SGM2A0"
+
+[[thing_types]]
+id = 51
+title = "Stalagmite (small)"
+category = "obstacles"
+sprite = "SGM3A0"
+
+[[thing_types]]
+id = 52
+title = "Stalactite (large)"
+category = "obstacles"
+sprite = "SLC1A0"
+
+[[thing_types]]
+id = 53
+title = "Frost Shards"
+category = "weapons"
+sprite = "WMCSA0"
+
+[[thing_types]]
+id = 54
+title = "Wall Torch (lit)"
+category = "lights"
+sprite = "WLTRB0"
+
+[[thing_types]]
+id = 55
+title = "Wall Torch (unlit)"
+category = "lights"
+sprite = "WLTRI0"
+
+[[thing_types]]
+id = 56
+title = "Stalactite (medium)"
+category = "obstacles"
+sprite = "SLC2A0"
+
+[[thing_types]]
+id = 57
+title = "Stalactite (small)"
+category = "obstacles"
+sprite = "SLC3A0"
+
+[[thing_types]]
+id = 58
+title = "Hanging Moss 1"
+category = "decoration"
+sprite = "MSS1A0"
+
+[[thing_types]]
+id = 59
+title = "Hanging Moss 2"
+category = "decoration"
+sprite = "MSS2A0"
+
+[[thing_types]]
+id = 60
+title = "Dead Tree (mossy)"
+category = "obstacles"
+sprite = "SWMVA0"
+
+[[thing_types]]
+id = 61
+title = "Impaled Corpse"
+category = "decoration"
+sprite = "CPS1A0"
+
+[[thing_types]]
+id = 62
+title = "Corpse (sleeping)"
+category = "decoration"
+sprite = "CPS2A0"
+
+[[thing_types]]
+id = 63
+title = "Tombstone (RIP)"
+category = "obstacles"
+sprite = "TMS1A0"
+
+[[thing_types]]
+id = 64
+title = "Tombstone (Shane)"
+category = "obstacles"
+sprite = "TMS2A0"
+
+[[thing_types]]
+id = 65
+title = "Tombstone (slimy)"
+category = "obstacles"
+sprite = "TMS3A0"
+
+[[thing_types]]
+id = 66
+title = "Tombstone (Brian R)"
+category = "obstacles"
+sprite = "TMS4A0"
+
+[[thing_types]]
+id = 67
+title = "Tombstone (cross circle)"
+category = "obstacles"
+sprite = "TMS5A0"
+
+[[thing_types]]
+id = 68
+title = "Tombstone (small cross)"
+category = "obstacles"
+sprite = "TMS6A0"
+
+[[thing_types]]
+id = 69
+title = "Tombstone (Brian P)"
+category = "obstacles"
+sprite = "TMS7A0"
+
+[[thing_types]]
+id = 71
+title = "Hanging Corpse"
+category = "decoration"
+sprite = "CPS3A0"
+
+[[thing_types]]
+id = 72
+title = "Stone Gargoyle (tall)"
+category = "obstacles"
+sprite = "STT2A0"
+
+[[thing_types]]
+id = 73
+title = "Ice Gargoyle (tall)"
+category = "obstacles"
+sprite = "STT3A0"
+
+[[thing_types]]
+id = 74
+title = "Stone Gargoyle (short)"
+category = "obstacles"
+sprite = "STT4A0"
+
+[[thing_types]]
+id = 76
+title = "Ice Gargoyle (short)"
+category = "obstacles"
+sprite = "STT5A0"
+
+[[thing_types]]
+id = 77
+title = "Battle Rag Banner"
+category = "obstacles"
+
+[[thing_types]]
+id = 78
+title = "Tall Tree 1"
+category = "obstacles"
+sprite = "TRE5A0"
+
+[[thing_types]]
+id = 79
+title = "Tall Tree 2"
+category = "obstacles"
+sprite = "TRE4A0"
+
+[[thing_types]]
+id = 80
+title = "Gnarled Tree 1"
+category = "obstacles"
+sprite = "TRE6A0"
+
+[[thing_types]]
+id = 81
+title = "Crystal Vial"
+category = "health"
+sprite = "PTN1A0"
+
+[[thing_types]]
+id = 82
+title = "Quartz Flask"
+category = "powerups"
+sprite = "ARTIPTN2"
+
+[[thing_types]]
+id = 83
+title = "Wings Of Wrath"
+category = "powerups"
+sprite = "ARTISOAR"
+
+[[thing_types]]
+id = 84
+title = "Icon Of The Defender"
+category = "powerups"
+sprite = "ARTIINVU"
+
+[[thing_types]]
+id = 86
+title = "Dark Servant"
+category = "powerups"
+sprite = "ARTISUMN"
+
+[[thing_types]]
+id = 87
+title = "Gnarled Tree 2"
+category = "obstacles"
+sprite = "TRE7A0"
+
+[[thing_types]]
+id = 88
+title = "Log"
+category = "obstacles"
+sprite = "SLTRA0"
+
+[[thing_types]]
+id = 89
+title = "Icicle (large)"
+category = "obstacles"
+sprite = "ICT1A0"
+
+[[thing_types]]
+id = 90
+title = "Icicle (medium)"
+category = "obstacles"
+sprite = "ICT2A0"
+
+[[thing_types]]
+id = 91
+title = "Icicle (small)"
+category = "obstacles"
+sprite = "ICT3A0"
+
+[[thing_types]]
+id = 92
+title = "Icicle (tiny)"
+category = "obstacles"
+sprite = "ICT4A0"
+
+[[thing_types]]
+id = 93
+title = "Ice Spike (large)"
+category = "obstacles"
+sprite = "ICM1A0"
+
+[[thing_types]]
+id = 94
+title = "Ice Spike (medium)"
+category = "obstacles"
+sprite = "ICM2A0"
+
+[[thing_types]]
+id = 95
+title = "Ice Spike (small)"
+category = "obstacles"
+sprite = "ICM3A0"
+
+[[thing_types]]
+id = 96
+title = "Ice Spike (tiny)"
+category = "obstacles"
+sprite = "ICM4A0"
+
+[[thing_types]]
+id = 97
+title = "Big Rock (brown)"
+category = "obstacles"
+sprite = "RKBLA0"
+
+[[thing_types]]
+id = 98
+title = "Small Rock (brown)"
+category = "obstacles"
+sprite = "RKBSA0"
+
+[[thing_types]]
+id = 99
+title = "Big Rock (grey)"
+category = "obstacles"
+sprite = "RKBKA0"
+
+[[thing_types]]
+id = 100
+title = "Brick Rubble (large)"
+category = "decoration"
+sprite = "RBL1A0"
+
+[[thing_types]]
+id = 101
+title = "Brick Rubble (small)"
+category = "decoration"
+sprite = "RBL2A0"
+
+[[thing_types]]
+id = 102
+title = "Brick Rubble (medium)"
+category = "decoration"
+sprite = "RBL3A0"
+
+[[thing_types]]
+id = 103
+title = "Pillar With Vase"
+category = "obstacles"
+sprite = "VASEA0"
+
+[[thing_types]]
+id = 104
+title = "Pot (tall)"
+category = "decoration"
+sprite = "POT1A0"
+
+[[thing_types]]
+id = 105
+title = "Pot (medium)"
+category = "decoration"
+sprite = "POT2A0"
+
+[[thing_types]]
+id = 106
+title = "Pot (short)"
+category = "decoration"
+sprite = "POT3A0"
+
+[[thing_types]]
+id = 107
+title = "Centaur"
+category = "monsters"
+sprite = "CENTA1"
+
+[[thing_types]]
+id = 108
+title = "Lynched Corpse"
+category = "decoration"
+sprite = "CPS4A0"
+
+[[thing_types]]
+id = 109
+title = "Lynched Corpse (heartless)"
+category = "decoration"
+sprite = "CPS5A0"
+
+[[thing_types]]
+id = 110
+title = "Corpse (sitting)"
+category = "decoration"
+sprite = "CPS6A0"
+
+[[thing_types]]
+id = 111
+title = "Pool Of Blood"
+category = "decoration"
+sprite = "GIBSA0"
+
+[[thing_types]]
+id = 114
+title = "Dark Bishop"
+category = "monsters"
+sprite = "BISHA1"
+
+[[thing_types]]
+id = 115
+title = "Slaughtar"
+category = "monsters"
+sprite = "CENTF1"
+
+[[thing_types]]
+id = 116
+title = "Twined Torch (lit)"
+category = "lights"
+sprite = "TWTRA0"
+
+[[thing_types]]
+id = 117
+title = "Twined Torch (unlit)"
+category = "lights"
+sprite = "TWTRI0"
+
+[[thing_types]]
+id = 118
+title = "Glitter Bridge"
+category = "other"
+
+[[thing_types]]
+id = 119
+title = "3 Candles (lit)"
+category = "lights"
+sprite = "CNDLA0"
+
+[[thing_types]]
+id = 120
+title = "Stalker Boss"
+category = "monsters"
+sprite = "SSPTD0"
+
+[[thing_types]]
+id = 121
+title = "Stalker"
+category = "monsters"
+sprite = "SSPTB0"
+
+[[thing_types]]
+id = 122
+title = "Blue Mana"
+category = "ammunition"
+sprite = "MAN1H0"
+
+[[thing_types]]
+id = 123
+title = "Hammer Of Retribution"
+category = "weapons"
+sprite = "WFHMA0"
+
+[[thing_types]]
+id = 124
+title = "Green Mana"
+category = "ammunition"
+sprite = "MAN2H0"
+
+[[thing_types]]
+id = 140
+title = "Teleport Smoke"
+category = "teleports"
+sprite = "TSMKA0"
+
+[[thing_types]]
+id = 254
+title = "Destination Thing Tag"
+category = "monsters"
+sprite = "DRAGC1"
+
+[[thing_types]]
+id = 8000
+title = "Flechette"
+category = "powerups"
+sprite = "ARTIPSBG"
+
+[[thing_types]]
+id = 8002
+title = "Boots Of Speed"
+category = "powerups"
+sprite = "ARTISPED"
+
+[[thing_types]]
+id = 8003
+title = "Crater Of Might"
+category = "powerups"
+sprite = "ARTIBMAN"
+
+[[thing_types]]
+id = 8004
+title = "Combine Mana"
+category = "ammunition"
+sprite = "MAN3A0"
+
+[[thing_types]]
+id = 8005
+title = "Mesh Armor"
+category = "health"
+sprite = "ARM1A0"
+
+[[thing_types]]
+id = 8006
+title = "Falcon Shield"
+category = "health"
+sprite = "ARM2A0"
+
+[[thing_types]]
+id = 8007
+title = "Platinum Helm"
+category = "health"
+sprite = "ARM3A0"
+
+[[thing_types]]
+id = 8008
+title = "Amulet Of Warding"
+category = "health"
+sprite = "ARM4A0"
+
+[[thing_types]]
+id = 8009
+title = "Firestorm"
+category = "weapons"
+sprite = "WCFMA0"
+
+[[thing_types]]
+id = 8010
+title = "Timon's Axe"
+category = "weapons"
+sprite = "WFAXA0"
+
+[[thing_types]]
+id = 8020
+title = "Wendigo"
+category = "monsters"
+sprite = "ICEYA1"
+
+[[thing_types]]
+id = 8030
+title = "Steel Key"
+category = "keys"
+sprite = "KEY1A0"
+
+[[thing_types]]
+id = 8031
+title = "Cave Key"
+category = "keys"
+sprite = "KEY2A0"
+
+[[thing_types]]
+id = 8032
+title = "Axe Key"
+category = "keys"
+sprite = "KEY3A0"
+
+[[thing_types]]
+id = 8033
+title = "Fire Key"
+category = "keys"
+sprite = "KEY4A0"
+
+[[thing_types]]
+id = 8034
+title = "Emerald Key"
+category = "keys"
+sprite = "KEY5A0"
+
+[[thing_types]]
+id = 8035
+title = "Dungeon Key"
+category = "keys"
+sprite = "KEY6A0"
+
+[[thing_types]]
+id = 8036
+title = "Silver Key"
+category = "keys"
+sprite = "KEY7A0"
+
+[[thing_types]]
+id = 8037
+title = "Rusty Key"
+category = "keys"
+sprite = "KEY8A0"
+
+[[thing_types]]
+id = 8038
+title = "Horn Key"
+category = "keys"
+sprite = "KEY9A0"
+
+[[thing_types]]
+id = 8039
+title = "Swamp Key"
+category = "keys"
+sprite = "KEYAA0"
+
+[[thing_types]]
+id = 8040
+title = "Arc Of Death"
+category = "weapons"
+sprite = "WMLGG0"
+
+[[thing_types]]
+id = 8041
+title = "Dragonskin Bracers"
+category = "powerups"
+sprite = "ARTIBRAC"
+
+[[thing_types]]
+id = 8042
+title = "Minotaur Statue (lit)"
+category = "lights"
+sprite = "FBULB0"
+
+[[thing_types]]
+id = 8043
+title = "Minotaur Statue (unlit)"
+category = "lights"
+sprite = "FBULH0"
+
+[[thing_types]]
+id = 8044
+title = "Rusty Gargoyle (tall)"
+category = "obstacles"
+sprite = "GAR1A0"
+
+[[thing_types]]
+id = 8045
+title = "Dark Lava Gargoyle (tall)"
+category = "obstacles"
+sprite = "GAR2A0"
+
+[[thing_types]]
+id = 8046
+title = "Lava Gargoyle (tall)"
+category = "obstacles"
+sprite = "GAR3A0"
+
+[[thing_types]]
+id = 8047
+title = "Bronze Gargoyle (tall)"
+category = "obstacles"
+sprite = "GAR4A0"
+
+[[thing_types]]
+id = 8048
+title = "Steel Gargoyle (tall)"
+category = "obstacles"
+sprite = "GAR5A0"
+
+[[thing_types]]
+id = 8049
+title = "Dark Lava Gargoyle (short)"
+category = "obstacles"
+sprite = "GAR6A0"
+
+[[thing_types]]
+id = 8050
+title = "Lava Gargoyle (short)"
+category = "obstacles"
+sprite = "GAR7A0"
+
+[[thing_types]]
+id = 8051
+title = "Bronze Gargoyle (short)"
+category = "obstacles"
+sprite = "GAR8A0"
+
+[[thing_types]]
+id = 8052
+title = "Steel Gargoyle (short)"
+category = "obstacles"
+sprite = "GAR9A0"
+
+[[thing_types]]
+id = 8060
+title = "Skull With Flame"
+category = "lights"
+sprite = "FSKLA0"
+
+[[thing_types]]
+id = 8061
+title = "Brazier With Flame"
+category = "lights"
+sprite = "BRTRB0"
+
+[[thing_types]]
+id = 8062
+title = "Leafless Tree"
+category = "obstacles"
+sprite = "TRDTA0"
+
+[[thing_types]]
+id = 8063
+title = "Chandelier (unlit)"
+category = "lights"
+sprite = "CDLRD0"
+
+[[thing_types]]
+id = 8064
+title = "Suit Of Armor"
+category = "obstacles"
+sprite = "SUITA0"
+
+[[thing_types]]
+id = 8065
+title = "Bell"
+category = "obstacles"
+sprite = "BBLLA0"
+
+[[thing_types]]
+id = 8066
+title = "Blue Candle (lit)"
+category = "lights"
+sprite = "CANDA0"
+
+[[thing_types]]
+id = 8067
+title = "Iron Maiden"
+category = "obstacles"
+sprite = "IRONA0"
+
+[[thing_types]]
+id = 8068
+title = "Evergreen Tree"
+category = "obstacles"
+sprite = "XMASA0"
+
+[[thing_types]]
+id = 8069
+title = "Cauldron (lit)"
+category = "lights"
+sprite = "CDRNG0"
+
+[[thing_types]]
+id = 8070
+title = "Cauldron (unlit)"
+category = "lights"
+sprite = "CDRNA0"
+
+[[thing_types]]
+id = 8071
+title = "Chain (short)"
+category = "decoration"
+sprite = "CHNSA0"
+
+[[thing_types]]
+id = 8072
+title = "Chain (long)"
+category = "decoration"
+sprite = "CHNSB0"
+
+[[thing_types]]
+id = 8073
+title = "Hook With Heart"
+category = "decoration"
+sprite = "CHNSC0"
+
+[[thing_types]]
+id = 8074
+title = "Chain With Large Hook"
+category = "decoration"
+sprite = "CHNSD0"
+
+[[thing_types]]
+id = 8075
+title = "Chain With Small Hook"
+category = "decoration"
+sprite = "CHNSE0"
+
+[[thing_types]]
+id = 8076
+title = "Chain with Spike Ball"
+category = "decoration"
+sprite = "CHNSF0"
+
+[[thing_types]]
+id = 8077
+title = "Hook With Skull"
+category = "decoration"
+sprite = "CHNSG0"
+
+[[thing_types]]
+id = 8080
+title = "Brown Chaos Serpent"
+category = "monsters"
+sprite = "DEM2A1"
+
+[[thing_types]]
+id = 8100
+title = "Barrel"
+category = "obstacles"
+sprite = "BARLA0"
+
+[[thing_types]]
+id = 8101
+title = "Shrub"
+category = "decoration"
+sprite = "SHB1A0"
+
+[[thing_types]]
+id = 8102
+title = "Shrub 2"
+category = "decoration"
+sprite = "SHB2A0"
+
+[[thing_types]]
+id = 8103
+title = "Hanging Bucket"
+category = "decoration"
+sprite = "BCKTA0"
+
+[[thing_types]]
+id = 8104
+title = "Large Mushroom (explodes)"
+category = "decoration"
+sprite = "SHRMB0"
+
+[[thing_types]]
+id = 8200
+title = "Castle Key"
+category = "keys"
+sprite = "KEYBA0"
+
+[[thing_types]]
+id = 8500
+title = "Large Brown Stein"
+category = "decoration"
+sprite = "TST1A0"
+
+[[thing_types]]
+id = 8501
+title = "Small Silver Stein"
+category = "decoration"
+sprite = "TST2A0"
+
+[[thing_types]]
+id = 8502
+title = "Candle With Web (unlit)"
+category = "lights"
+sprite = "TST3A0"
+
+[[thing_types]]
+id = 8503
+title = "Small Gray Candle (unlit)"
+category = "lights"
+sprite = "TST4A0"
+
+[[thing_types]]
+id = 8504
+title = "Small Candle (unlit)"
+category = "lights"
+sprite = "TST5A0"
+
+[[thing_types]]
+id = 8505
+title = "Goblet (spilled)"
+category = "decoration"
+sprite = "TST6A0"
+
+[[thing_types]]
+id = 8506
+title = "Goblet (tall)"
+category = "decoration"
+sprite = "TST7A0"
+
+[[thing_types]]
+id = 8507
+title = "Goblet (small)"
+category = "decoration"
+sprite = "TST8A0"
+
+[[thing_types]]
+id = 8508
+title = "Goblet (silver)"
+category = "decoration"
+sprite = "TST9A0"
+
+[[thing_types]]
+id = 8509
+title = "Meat Cleaver"
+category = "decoration"
+sprite = "TST0A0"
+
+[[thing_types]]
+id = 9002
+title = "Yorick's Skull"
+category = "puzzle"
+sprite = "ARTISKLL"
+
+[[thing_types]]
+id = 9003
+title = "Heart Of D'Sparil"
+category = "puzzle"
+sprite = "ARTIBGEM"
+
+[[thing_types]]
+id = 9004
+title = "Ruby Planet"
+category = "puzzle"
+sprite = "ARTIGEMR"
+
+[[thing_types]]
+id = 9005
+title = "Emerald Planet 1"
+category = "puzzle"
+sprite = "ARTIGEMG"
+
+[[thing_types]]
+id = 9006
+title = "Sapphire Planet 1"
+category = "puzzle"
+sprite = "ARTIGEMB"
+
+[[thing_types]]
+id = 9007
+title = "Daemon Codex"
+category = "puzzle"
+sprite = "ARTIBOK1"
+
+[[thing_types]]
+id = 9008
+title = "Liber Obscura"
+category = "puzzle"
+sprite = "ARTIBOK2"
+
+[[thing_types]]
+id = 9009
+title = "Emerald Planet 2"
+category = "puzzle"
+sprite = "ARTIGMG2"
+
+[[thing_types]]
+id = 9010
+title = "Sapphire Planet 2"
+category = "puzzle"
+sprite = "ARTIGMB2"
+
+[[thing_types]]
+id = 9011
+title = "Yorick's Statue"
+category = "puzzle"
+sprite = "STWNA0"
+
+[[thing_types]]
+id = 9012
+title = "Pedestal Of D'Sparil"
+category = "puzzle"
+sprite = "GMPDA0"
+
+[[thing_types]]
+id = 9018
+title = "Clock Gear (steel)"
+category = "puzzle"
+sprite = "ARTIGEAR"
+
+[[thing_types]]
+id = 9019
+title = "Clock Gear (bronze)"
+category = "puzzle"
+sprite = "ARTIGER2"
+
+[[thing_types]]
+id = 9020
+title = "Clock Gear (steel and bronze)"
+category = "puzzle"
+sprite = "ARTIGER3"
+
+[[thing_types]]
+id = 9021
+title = "Clock Gear (bronze and steel)"
+category = "puzzle"
+sprite = "ARTIGER4"
+
+[[thing_types]]
+id = 9100
+title = "Player 5 Start"
+category = "players"
+sprite = "CLERA1"
+
+[[thing_types]]
+id = 9101
+title = "Player 6 Start"
+category = "players"
+sprite = "CLERA1"
+
+[[thing_types]]
+id = 9102
+title = "Player 7 Start"
+category = "players"
+sprite = "CLERA1"
+
+[[thing_types]]
+id = 9103
+title = "Player 8 Start"
+category = "players"
+sprite = "CLERA1"
+
+[[thing_types]]
+id = 10000
+title = "Fog Lifetime"
+category = "other"
+
+[[thing_types]]
+id = 10001
+title = "Moving Fog"
+category = "other"
+
+[[thing_types]]
+id = 10002
+title = "Moving Fog"
+category = "other"
+
+[[thing_types]]
+id = 10003
+title = "Moving Fog"
+category = "other"
+
+[[thing_types]]
+id = 10011
+title = "Reiver (buried)"
+category = "monsters"
+sprite = "WRTHA1"
+
+[[thing_types]]
+id = 10030
+title = "Ettin"
+category = "monsters"
+sprite = "ETTNA1"
+
+[[thing_types]]
+id = 10040
+title = "Banishment Device"
+category = "powerups"
+sprite = "ARTITELO"
+
+[[thing_types]]
+id = 10060
+title = "Affrit"
+category = "monsters"
+sprite = "FDMNA1"
+
+[[thing_types]]
+id = 10080
+title = "Heresiarch"
+category = "monsters"
+sprite = "SORCA1"
+
+[[thing_types]]
+id = 10090
+title = "Spike Down"
+category = "decoration"
+sprite = "TSPKD0"
+
+[[thing_types]]
+id = 10091
+title = "Spike Up"
+category = "decoration"
+sprite = "TSPKB0"
+
+[[thing_types]]
+id = 10100
+title = "Zedek (fighter)"
+category = "monsters"
+sprite = "PLAYE8"
+
+[[thing_types]]
+id = 10101
+title = "Traductus (cleric)"
+category = "monsters"
+sprite = "CLERE8"
+
+[[thing_types]]
+id = 10102
+title = "Menelkir (mage)"
+category = "monsters"
+sprite = "MAGEE8"
+
+[[thing_types]]
+id = 10110
+title = "Disc Of Repulsion"
+category = "powerups"
+sprite = "ARTIBLST"
+
+[[thing_types]]
+id = 10120
+title = "Mystic Ambit Incant"
+category = "powerups"
+sprite = "ARTIHRAD"
+
+[[thing_types]]
+id = 10200
+title = "Korax"
+category = "monsters"
+sprite = "KORXA1"
+
+[[thing_types]]
+id = 10225
+title = "Changing Angle"
+category = "other"
+sprite = "ABATC2C8"
+
+[[thing_types]]
+id = 10500
+title = "Small Flame (timed)"
+category = "lights"
+sprite = "FFSMA0"
+
+[[thing_types]]
+id = 10501
+title = "Small Flame"
+category = "lights"
+sprite = "FFSMA0"
+
+[[thing_types]]
+id = 10502
+title = "Large Flame (timed)"
+category = "lights"
+sprite = "FFLGD0"
+
+[[thing_types]]
+id = 10503
+title = "Large Flame"
+category = "lights"
+sprite = "FFLGD0"
+
+[sector_specials]
+"0" = "Normal"
+"1" = "Light Phased"
+"2" = "Light Sequence Start"
+"3" = "Light Sequence Special 1"
+"4" = "Light Sequence Special 2"
+"26" = "Stairs Special 1"
+"27" = "Stairs Special 2"
+"198" = "Light Indoor 2"
+"199" = "Light Indoor 1"
+"200" = "Sky 2 (MAPINFO)"
+"201" = "Scroll North (slow)"
+"202" = "Scroll North (medium)"
+"203" = "Scroll North (fast)"
+"204" = "Scroll East (slow)"
+"205" = "Scroll East (medium)"
+"206" = "Scroll East (fast)"
+"207" = "Scroll South (slow)"
+"208" = "Scroll South (medium)"
+"209" = "Scroll South (fast)"
+"210" = "Scroll West (slow)"
+"211" = "Scroll West (medium)"
+"212" = "Scroll West (fast)"
+"213" = "Scroll NorthWest (slow)"
+"214" = "Scroll NorthWest (medium)"
+"215" = "Scroll NorthWest (fast)"
+"216" = "Scroll NorthEast (slow)"
+"217" = "Scroll NorthEast (medium)"
+"218" = "Scroll NorthEast (fast)"
+"219" = "Scroll SouthEast (slow)"
+"220" = "Scroll SouthEast (medium)"
+"221" = "Scroll SouthEast (fast)"
+"222" = "Scroll SouthWest (slow)"
+"223" = "Scroll SouthWest (medium)"
+"224" = "Scroll SouthWest (fast)"
+
+[linedef_flags]
+"1" = "Impassable"
+"2" = "Block monsters"
+"4" = "Two-sided"
+"8" = "Upper unpegged"
+"16" = "Lower unpegged"
+"32" = "Secret"
+"64" = "Block sound"
+"128" = "Hidden"
+"256" = "Shown"
+"512" = "Repeatable"
+"8192" = "Block all"
+
+[thing_flags]
+"1" = "Easy"
+"2" = "Medium"
+"4" = "Hard"
+"8" = "Dormant"
+"16" = "Fighter"
+"32" = "Cleric"
+"64" = "Mage"
+"128" = "Single"
+"256" = "Coop"
+"512" = "Deathmatch"
+"2048" = "Class 1"
+"4096" = "Class 2"
+"8192" = "Class 3"
