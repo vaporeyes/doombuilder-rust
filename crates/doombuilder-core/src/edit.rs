@@ -77,10 +77,24 @@ pub enum Command {
         old: u16,
         new: u16,
     },
-    /// Change one of a sector's integer fields (floor / ceiling / light / tag).
+    /// Change one of a sector's integer fields.
     SetSectorIntField {
         id: SectorId,
         field: SectorIntField,
+        old: i32,
+        new: i32,
+    },
+    /// Change one of a linedef's integer fields (flags / tag).
+    SetLinedefIntField {
+        id: LinedefId,
+        field: LinedefIntField,
+        old: i32,
+        new: i32,
+    },
+    /// Change one of a thing's integer fields (angle / flags).
+    SetThingIntField {
+        id: ThingId,
+        field: ThingIntField,
         old: i32,
         new: i32,
     },
@@ -92,6 +106,19 @@ pub enum SectorIntField {
     CeilingHeight,
     Light,
     Tag,
+    Special,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinedefIntField {
+    Flags,
+    Tag,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThingIntField {
+    Angle,
+    Flags,
 }
 
 impl Command {
@@ -149,6 +176,16 @@ impl Command {
             Command::SetSectorIntField { id, field, new, .. } => {
                 if let Some(s) = map.sectors.get_mut(*id) {
                     write_sector_int(s, *field, *new);
+                }
+            }
+            Command::SetLinedefIntField { id, field, new, .. } => {
+                if let Some(l) = map.linedefs.get_mut(*id) {
+                    write_linedef_int(l, *field, *new);
+                }
+            }
+            Command::SetThingIntField { id, field, new, .. } => {
+                if let Some(t) = map.things.get_mut(*id) {
+                    write_thing_int(t, *field, *new);
                 }
             }
         }
@@ -212,6 +249,16 @@ impl Command {
                     write_sector_int(s, *field, *old);
                 }
             }
+            Command::SetLinedefIntField { id, field, old, .. } => {
+                if let Some(l) = map.linedefs.get_mut(*id) {
+                    write_linedef_int(l, *field, *old);
+                }
+            }
+            Command::SetThingIntField { id, field, old, .. } => {
+                if let Some(t) = map.things.get_mut(*id) {
+                    write_thing_int(t, *field, *old);
+                }
+            }
         }
     }
 }
@@ -224,6 +271,21 @@ fn write_sector_int(s: &mut crate::map::MapSector, field: SectorIntField, value:
         }
         SectorIntField::Light => s.light = value.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
         SectorIntField::Tag => s.tag = value.clamp(0, u16::MAX as i32) as u16,
+        SectorIntField::Special => s.special = value.clamp(0, u16::MAX as i32) as u16,
+    }
+}
+
+fn write_linedef_int(l: &mut crate::map::MapLinedef, field: LinedefIntField, value: i32) {
+    match field {
+        LinedefIntField::Flags => l.flags = value.clamp(0, u16::MAX as i32) as u16,
+        LinedefIntField::Tag => l.tag = value.clamp(0, u16::MAX as i32) as u16,
+    }
+}
+
+fn write_thing_int(t: &mut crate::map::MapThing, field: ThingIntField, value: i32) {
+    match field {
+        ThingIntField::Angle => t.angle = ((value % 360 + 360) % 360).clamp(0, u16::MAX as i32) as u16,
+        ThingIntField::Flags => t.flags = value.clamp(0, u16::MAX as i32) as u16,
     }
 }
 

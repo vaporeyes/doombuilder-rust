@@ -13,7 +13,8 @@ use std::sync::Arc;
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::edit::{
-    Command, SectorIntField, SectorSlot, SidedefSlot, ThingMove, UndoStack, VertexMove,
+    Command, LinedefIntField, SectorIntField, SectorSlot, SidedefSlot, ThingIntField, ThingMove,
+    UndoStack, VertexMove,
 };
 use doombuilder_core::map::MapThing;
 use doombuilder_core::map::{
@@ -130,6 +131,7 @@ pub enum ActivePicker {
     Texture(PickerTarget),
     Action(doombuilder_core::map::LinedefId),
     ThingKind(ThingId),
+    SectorSpecial(SectorId),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -223,11 +225,15 @@ pub enum Message {
     OpenTexturePicker(PickerTarget),
     OpenActionPicker(doombuilder_core::map::LinedefId),
     OpenThingKindPicker(ThingId),
+    OpenSectorSpecialPicker(SectorId),
     ClosePicker,
     PickTexture(String),
     PickAction(u16),
     PickThingKind(u16),
+    PickSectorSpecial(u16),
     PickerFilterChanged(String),
+    ToggleLinedefFlag { id: doombuilder_core::map::LinedefId, bit: u16 },
+    ToggleThingFlag { id: ThingId, bit: u16 },
     SectorFieldChanged { field: SectorIntField, text: String },
     SectorFieldSubmit(SectorIntField),
     Quit,
@@ -507,6 +513,11 @@ impl App {
                 self.picker_filter.clear();
                 Task::none()
             }
+            Message::OpenSectorSpecialPicker(id) => {
+                self.active_picker = Some(ActivePicker::SectorSpecial(id));
+                self.picker_filter.clear();
+                Task::none()
+            }
             Message::ClosePicker => {
                 self.active_picker = None;
                 self.picker_filter.clear();
@@ -533,6 +544,67 @@ impl App {
                                 self.cache2d.clear();
                             }
                         }
+                    }
+                }
+                Task::none()
+            }
+            Message::PickSectorSpecial(new_special) => {
+                if let Some(ActivePicker::SectorSpecial(id)) = self.active_picker.take() {
+                    if let Some(map) = self.map.as_mut() {
+                        let map_mut = Arc::make_mut(map);
+                        if let Some(s) = map_mut.sectors.get(id) {
+                            let old = s.special as i32;
+                            let new = new_special as i32;
+                            if old != new {
+                                let mut cmd = Command::SetSectorIntField {
+                                    id,
+                                    field: SectorIntField::Special,
+                                    old,
+                                    new,
+                                };
+                                cmd.apply(map_mut);
+                                self.undo.push(cmd);
+                                self.cache2d.clear();
+                            }
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::ToggleLinedefFlag { id, bit } => {
+                if let Some(map) = self.map.as_mut() {
+                    let map_mut = Arc::make_mut(map);
+                    if let Some(line) = map_mut.linedefs.get(id) {
+                        let old = line.flags as i32;
+                        let new = (line.flags ^ bit) as i32;
+                        let mut cmd = Command::SetLinedefIntField {
+                            id,
+                            field: LinedefIntField::Flags,
+                            old,
+                            new,
+                        };
+                        cmd.apply(map_mut);
+                        self.undo.push(cmd);
+                        self.cache2d.clear();
+                    }
+                }
+                Task::none()
+            }
+            Message::ToggleThingFlag { id, bit } => {
+                if let Some(map) = self.map.as_mut() {
+                    let map_mut = Arc::make_mut(map);
+                    if let Some(t) = map_mut.things.get(id) {
+                        let old = t.flags as i32;
+                        let new = (t.flags ^ bit) as i32;
+                        let mut cmd = Command::SetThingIntField {
+                            id,
+                            field: ThingIntField::Flags,
+                            old,
+                            new,
+                        };
+                        cmd.apply(map_mut);
+                        self.undo.push(cmd);
+                        self.cache2d.clear();
                     }
                 }
                 Task::none()
@@ -677,8 +749,10 @@ impl App {
             }
             Message::SectorFieldChanged { field, text } => {
                 if let Some(b) = self.sector_buffers.as_mut() {
-                    sector_buffer_field_mut(b, field).clear();
-                    sector_buffer_field_mut(b, field).push_str(&text);
+                    if let Some(slot) = sector_buffer_field_mut(b, field) {
+                        slot.clear();
+                        slot.push_str(&text);
+                    }
                 }
                 Task::none()
             }
@@ -695,6 +769,7 @@ impl App {
                             SectorIntField::CeilingHeight => sec.ceiling_height as i32,
                             SectorIntField::Light => sec.light as i32,
                             SectorIntField::Tag => sec.tag as i32,
+                            SectorIntField::Special => sec.special as i32,
                         };
                         if old != new {
                             let mut cmd = Command::SetSectorIntField {
@@ -1296,6 +1371,8 @@ impl App {
         } else if let Some(h) = single {
             match h {
                 HighlightKind::Sector(_) => self.sector_inspector(map, h),
+                HighlightKind::Linedef(id) => self.linedef_inspector(map, id),
+                HighlightKind::Thing(id) => self.thing_inspector(map, id),
                 _ => selection_details(map, &self.config, h),
             }
         } else {
@@ -1413,6 +1490,7 @@ impl App {
             Some(ActivePicker::Texture(_)) => self.texture_picker_panel(),
             Some(ActivePicker::Action(_)) => self.action_picker_panel(),
             Some(ActivePicker::ThingKind(_)) => self.thing_kind_picker_panel(),
+            Some(ActivePicker::SectorSpecial(_)) => self.sector_special_picker_panel(),
             None => Space::new().into(),
         };
 
@@ -1603,6 +1681,75 @@ impl App {
             .into()
     }
 
+    fn sector_special_picker_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Pick a sector special").size(18),
+            Space::new().width(Length::Fill),
+            button("Close").on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let search = text_input("Filter\u{2026}", &self.picker_filter)
+            .on_input(Message::PickerFilterChanged)
+            .padding(6)
+            .width(Length::Fill);
+
+        let q = self.picker_filter.to_ascii_lowercase();
+        let mut entries: Vec<(u16, &String)> = self
+            .config
+            .sector_specials
+            .iter()
+            .filter_map(|(k, v)| k.parse::<u16>().ok().map(|id| (id, v)))
+            .collect();
+        entries.sort_by_key(|(id, _)| *id);
+        let filtered: Vec<(u16, &String)> = entries
+            .into_iter()
+            .filter(|(id, name)| {
+                if q.is_empty() {
+                    return true;
+                }
+                name.to_ascii_lowercase().contains(&q) || id.to_string().contains(&q)
+            })
+            .collect();
+
+        let count_text = text(format!(
+            "{} of {} specials",
+            filtered.len(),
+            self.config.sector_specials.len()
+        ))
+        .size(12);
+
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        for (id, name) in &filtered {
+            let label = format!("{:>4} - {}", id, name);
+            let row_btn = button(text(label).size(13))
+                .padding(4)
+                .style(button::text)
+                .on_press(Message::PickSectorSpecial(*id))
+                .width(Length::Fill);
+            rows.push(row_btn.into());
+        }
+
+        let list: Element<'_, Message> = if rows.is_empty() {
+            container(text("No specials match.").size(13))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
+        } else {
+            scrollable(column(rows).spacing(2).padding(4))
+                .height(Length::Fill)
+                .into()
+        };
+
+        column![title_row, search, count_text, list]
+            .spacing(8)
+            .padding(12)
+            .into()
+    }
+
     fn thing_kind_picker_panel(&self) -> Element<'_, Message> {
         let title_row = row![
             text("Pick a thing type").size(18),
@@ -1708,6 +1855,97 @@ impl App {
             .into()
     }
 
+    fn linedef_inspector(
+        &self,
+        map: &Map,
+        id: doombuilder_core::map::LinedefId,
+    ) -> Element<'_, Message> {
+        let Some(line) = map.linedefs.get(id) else {
+            return text("(missing linedef)").into();
+        };
+        let length = match (map.vertices.get(line.v1), map.vertices.get(line.v2)) {
+            (Some(a), Some(b)) => {
+                let dx = (b.x - a.x) as f32;
+                let dy = (b.y - a.y) as f32;
+                (dx * dx + dy * dy).sqrt()
+            }
+            _ => 0.0,
+        };
+        let action_label = match self.config.linedef_special(line.special) {
+            Some(s) if !s.prefix.is_empty() => {
+                format!("{} - {} {}", line.special, s.prefix, s.title)
+            }
+            Some(s) => format!("{} - {}", line.special, s.title),
+            None => format!("{} - (unknown)", line.special),
+        };
+        let front_sec = line
+            .right
+            .and_then(|sid| map.sidedefs.get(sid))
+            .map(|s| s.sector);
+        let back_sec = line
+            .left
+            .and_then(|sid| map.sidedefs.get(sid))
+            .map(|s| s.sector);
+        let (fh, ch) = sector_heights(map, front_sec);
+        let (bfh, bch) = sector_heights(map, back_sec);
+
+        let flags = flag_toggle_row(&self.config.linedef_flags, line.flags, move |bit| {
+            Message::ToggleLinedefFlag { id, bit }
+        });
+
+        column![
+            text("Linedef").size(15),
+            button(text(format!("Action:  {action_label}")).size(13))
+                .padding(0)
+                .style(button::text)
+                .on_press(Message::OpenActionPicker(id)),
+            text(format!("Length:  {length:.0}")).size(13),
+            text(format!("Tag:     {}", line.tag)).size(13),
+            text("Flags:").size(13),
+            flags,
+            text(format!(
+                "Front Sector: {}    Back Sector: {}",
+                sector_label(front_sec),
+                sector_label(back_sec)
+            ))
+            .size(13),
+            text(format!(
+                "Front Height: {fh}/{ch}    Back Height: {bfh}/{bch}"
+            ))
+            .size(13),
+        ]
+        .spacing(4)
+        .into()
+    }
+
+    fn thing_inspector(&self, map: &Map, id: ThingId) -> Element<'_, Message> {
+        let Some(t) = map.things.get(id) else {
+            return text("(missing thing)").into();
+        };
+        let name = match self.config.thing_type(t.kind) {
+            Some(tt) => format!("{} - {}", t.kind, tt.title),
+            None => format!("{} - (unknown)", t.kind),
+        };
+        let flags = flag_toggle_row(&self.config.thing_flags, t.flags, move |bit| {
+            Message::ToggleThingFlag { id, bit }
+        });
+
+        column![
+            text("Thing").size(15),
+            button(text(format!("Type:    {name}")).size(13))
+                .padding(0)
+                .style(button::text)
+                .on_press(Message::OpenThingKindPicker(id)),
+            text(format!("X:       {}", t.x)).size(13),
+            text(format!("Y:       {}", t.y)).size(13),
+            text(format!("Angle:   {}\u{00B0}", t.angle)).size(13),
+            text("Flags:").size(13),
+            flags,
+        ]
+        .spacing(4)
+        .into()
+    }
+
     fn sector_inspector(&self, map: &Map, highlight: HighlightKind) -> Element<'_, Message> {
         let id = match highlight {
             HighlightKind::Sector(id) => id,
@@ -1744,7 +1982,10 @@ impl App {
             row_input("Ceiling:", buf.ceiling.clone(), SectorIntField::CeilingHeight),
             row_input("Light:", buf.light.clone(), SectorIntField::Light),
             row_input("Tag:", buf.tag.clone(), SectorIntField::Tag),
-            text(format!("Special: {special_label}")).size(13),
+            button(text(format!("Special: {special_label}")).size(13))
+                .padding(0)
+                .style(button::text)
+                .on_press(Message::OpenSectorSpecialPicker(id)),
             text(format!("Sidedefs: {}", sec.sidedefs.len())).size(13),
         ]
         .spacing(4)
@@ -2198,21 +2439,56 @@ fn menu_picker(
         .into()
 }
 
+fn flag_toggle_row<'a, F>(
+    table: &HashMap<String, String>,
+    flags: u16,
+    on_toggle: F,
+) -> Element<'a, Message>
+where
+    F: Fn(u16) -> Message + 'a,
+{
+    let mut entries: Vec<(u16, String)> = table
+        .iter()
+        .filter_map(|(k, v)| k.parse::<u16>().ok().map(|b| (b, v.clone())))
+        .collect();
+    entries.sort_by_key(|(b, _)| *b);
+    let cells: Vec<Element<'_, Message>> = entries
+        .into_iter()
+        .map(|(bit, label)| {
+            let on = (flags & bit) != 0;
+            let style = if on { button::primary } else { button::secondary };
+            button(text(label).size(11))
+                .padding(4)
+                .style(style)
+                .on_press(on_toggle(bit))
+                .into()
+        })
+        .collect();
+    column![row(cells).spacing(4).wrap()]
+        .spacing(2)
+        .into()
+}
+
 fn sector_buffer_field(b: &SectorBuffers, field: SectorIntField) -> &str {
     match field {
         SectorIntField::FloorHeight => &b.floor,
         SectorIntField::CeilingHeight => &b.ceiling,
         SectorIntField::Light => &b.light,
         SectorIntField::Tag => &b.tag,
+        SectorIntField::Special => "",
     }
 }
 
-fn sector_buffer_field_mut(b: &mut SectorBuffers, field: SectorIntField) -> &mut String {
+fn sector_buffer_field_mut<'a>(
+    b: &'a mut SectorBuffers,
+    field: SectorIntField,
+) -> Option<&'a mut String> {
     match field {
-        SectorIntField::FloorHeight => &mut b.floor,
-        SectorIntField::CeilingHeight => &mut b.ceiling,
-        SectorIntField::Light => &mut b.light,
-        SectorIntField::Tag => &mut b.tag,
+        SectorIntField::FloorHeight => Some(&mut b.floor),
+        SectorIntField::CeilingHeight => Some(&mut b.ceiling),
+        SectorIntField::Light => Some(&mut b.light),
+        SectorIntField::Tag => Some(&mut b.tag),
+        SectorIntField::Special => None,
     }
 }
 
