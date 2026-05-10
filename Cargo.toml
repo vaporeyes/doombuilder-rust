@@ -17,7 +17,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/jsh/doombuilder-rust"
 
 [workspace.dependencies]
-iced = { version = "0.14", features = ["canvas", "advanced", "image-without-codecs"] }
+iced = { version = "0.14", features = ["canvas", "advanced", "image-without-codecs", "svg"] }
 thiserror = "2"
 bytemuck = { version = "1.18", features = ["derive"] }
 memmap2 = "0.9"

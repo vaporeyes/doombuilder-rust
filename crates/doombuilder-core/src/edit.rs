@@ -90,6 +90,9 @@ pub enum Command {
     /// of `DeleteElements`: revert removes by `current_*`; apply re-inserts
     /// from snapshots and rebuilds `current_*`.
     CreateLinedefChain(Box<LinedefChain>),
+    /// Create a sector + per-linedef sidedef facing inward. Built from a
+    /// closed loop of pre-existing linedefs that have no sides yet.
+    MakeSector(Box<MakeSectorState>),
     /// Change one of a sector's integer fields.
     SetSectorIntField {
         id: SectorId,
@@ -111,6 +114,160 @@ pub enum Command {
         old: i32,
         new: i32,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidedefSide {
+    Right,
+    Left,
+}
+
+#[derive(Debug)]
+pub enum MakeSectorError {
+    NoLines,
+    LineHasSides,
+    NotAClosedLoop,
+    DanglingVertex,
+}
+
+#[derive(Debug, Clone)]
+pub struct MakeSectorState {
+    pub sector_template: MapSector,
+    pub sidedef_template: MapSidedef,
+    pub line_assignments: Vec<(LinedefId, SidedefSide)>,
+    pub current_sec: Option<SectorId>,
+    pub current_sides: Vec<SidedefId>,
+}
+
+/// Compute a `MakeSectorState` from a closed loop of side-less linedefs.
+/// Caller wraps it in a `Command::MakeSector` and applies it to mutate the map.
+pub fn compute_make_sector(
+    map: &Map,
+    line_ids: &[LinedefId],
+) -> Result<MakeSectorState, MakeSectorError> {
+    if line_ids.is_empty() {
+        return Err(MakeSectorError::NoLines);
+    }
+    // 1. Validate: linedefs exist and have no sides yet.
+    for lid in line_ids {
+        let l = map
+            .linedefs
+            .get(*lid)
+            .ok_or(MakeSectorError::NotAClosedLoop)?;
+        if l.right.is_some() || l.left.is_some() {
+            return Err(MakeSectorError::LineHasSides);
+        }
+    }
+
+    // 2. Build vertex adjacency over the selected subgraph.
+    let mut adj: HashMap<VertexId, Vec<(VertexId, LinedefId)>> = HashMap::new();
+    for lid in line_ids {
+        let l = &map.linedefs[*lid];
+        adj.entry(l.v1).or_default().push((l.v2, *lid));
+        adj.entry(l.v2).or_default().push((l.v1, *lid));
+    }
+    if adj.values().any(|v| v.len() != 2) {
+        return Err(MakeSectorError::DanglingVertex);
+    }
+
+    // 3. Walk the loop starting from the first linedef.
+    let first = &map.linedefs[line_ids[0]];
+    let start_v = first.v1;
+    let mut current_v = first.v2;
+    let mut walked: Vec<(VertexId, VertexId, LinedefId)> = vec![(start_v, current_v, line_ids[0])];
+    let mut visited: HashSet<LinedefId> = [line_ids[0]].into_iter().collect();
+    let max_iters = line_ids.len() + 1;
+    let mut iter = 0;
+    while current_v != start_v {
+        iter += 1;
+        if iter > max_iters {
+            return Err(MakeSectorError::NotAClosedLoop);
+        }
+        let next = adj
+            .get(&current_v)
+            .and_then(|cands| cands.iter().find(|(_, lid)| !visited.contains(lid)));
+        let Some(&(next_v, next_lid)) = next else {
+            return Err(MakeSectorError::NotAClosedLoop);
+        };
+        walked.push((current_v, next_v, next_lid));
+        visited.insert(next_lid);
+        current_v = next_v;
+    }
+    if visited.len() != line_ids.len() {
+        return Err(MakeSectorError::NotAClosedLoop);
+    }
+
+    // 4. Centroid of the loop.
+    let mut cx = 0.0_f32;
+    let mut cy = 0.0_f32;
+    for (_, to, _) in &walked {
+        let v = &map.vertices[*to];
+        cx += v.x as f32;
+        cy += v.y as f32;
+    }
+    cx /= walked.len() as f32;
+    cy /= walked.len() as f32;
+
+    // 5. Per-edge: decide which side the centroid lies on.
+    let mut line_assignments: Vec<(LinedefId, SidedefSide)> = Vec::with_capacity(walked.len());
+    for (from, to, lid) in &walked {
+        let pa = &map.vertices[*from];
+        let pb = &map.vertices[*to];
+        let dx = (pb.x - pa.x) as f32;
+        let dy = (pb.y - pa.y) as f32;
+        let mid_x = (pa.x as f32 + pb.x as f32) * 0.5;
+        let mid_y = (pa.y as f32 + pb.y as f32) * 0.5;
+        let to_c_x = cx - mid_x;
+        let to_c_y = cy - mid_y;
+        // Left perpendicular (rotate 90° CCW in standard math axes).
+        let perp_x = -dy;
+        let perp_y = dx;
+        let inside_is_walk_left = perp_x * to_c_x + perp_y * to_c_y > 0.0;
+
+        let line = &map.linedefs[*lid];
+        let walk_matches = line.v1 == *from && line.v2 == *to;
+        // For Doom, "right" sidedef is on the right hand side as you walk
+        // along the linedef from v1 to v2.
+        let inside_is_linedef_right = if walk_matches {
+            !inside_is_walk_left
+        } else {
+            inside_is_walk_left
+        };
+        let side = if inside_is_linedef_right {
+            SidedefSide::Right
+        } else {
+            SidedefSide::Left
+        };
+        line_assignments.push((*lid, side));
+    }
+
+    // 6. Templates with sane defaults. Caller's command::apply does the insert.
+    let sector_template = MapSector {
+        floor_height: 0,
+        ceiling_height: 128,
+        floor_texture: TextureName(*b"FLOOR5_4"),
+        ceiling_texture: TextureName(*b"CEIL3_5\0"),
+        light: 160,
+        special: 0,
+        tag: 0,
+        sidedefs: Vec::new(),
+    };
+    let sidedef_template = MapSidedef {
+        sector: SectorId::default(), // filled in by apply
+        x_offset: 0,
+        y_offset: 0,
+        upper_texture: TextureName([0; 8]),
+        lower_texture: TextureName([0; 8]),
+        middle_texture: TextureName(*b"STARTAN3"),
+    };
+
+    Ok(MakeSectorState {
+        sector_template,
+        sidedef_template,
+        line_assignments,
+        current_sec: None,
+        current_sides: Vec::new(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +491,24 @@ impl Command {
                     map.vertices.remove(id);
                 }
             }
+            Command::MakeSector(state) => {
+                let new_sec = map.sectors.insert(state.sector_template.clone());
+                state.current_sec = Some(new_sec);
+                state.current_sides.clear();
+                for (lid, side) in &state.line_assignments {
+                    let mut tmpl = state.sidedef_template.clone();
+                    tmpl.sector = new_sec;
+                    let sid = map.sidedefs.insert(tmpl);
+                    state.current_sides.push(sid);
+                    if let Some(line) = map.linedefs.get_mut(*lid) {
+                        match side {
+                            SidedefSide::Right => line.right = Some(sid),
+                            SidedefSide::Left => line.left = Some(sid),
+                        }
+                    }
+                }
+                map.rebuild_sidedef_index();
+            }
             Command::CreateLinedefChain(chain) => {
                 // Re-create everything from snapshots; rebuild current_*.
                 chain.current_v.clear();
@@ -436,6 +611,23 @@ impl Command {
                 for id in chain.current_v.drain(..) {
                     map.vertices.remove(id);
                 }
+            }
+            Command::MakeSector(state) => {
+                for (lid, side) in &state.line_assignments {
+                    if let Some(line) = map.linedefs.get_mut(*lid) {
+                        match side {
+                            SidedefSide::Right => line.right = None,
+                            SidedefSide::Left => line.left = None,
+                        }
+                    }
+                }
+                for sid in state.current_sides.drain(..) {
+                    map.sidedefs.remove(sid);
+                }
+                if let Some(sec) = state.current_sec.take() {
+                    map.sectors.remove(sec);
+                }
+                map.rebuild_sidedef_index();
             }
             Command::DeleteElements(state) => {
                 state.current_v.clear();
@@ -644,6 +836,59 @@ mod tests {
         assert!(stack.redo(&mut map));
         assert_eq!(map.vertices[id].x, 15);
         assert!(!stack.can_redo());
+    }
+
+    #[test]
+    fn make_sector_assigns_sidedefs_inward() {
+        use crate::map::{MapLinedef, MapVertex};
+        let mut map = Map::new("T", MapFormat::Doom);
+        // CCW square: (0,0) (64,0) (64,64) (0,64).
+        let v = [
+            map.vertices.insert(MapVertex { x: 0, y: 0 }),
+            map.vertices.insert(MapVertex { x: 64, y: 0 }),
+            map.vertices.insert(MapVertex { x: 64, y: 64 }),
+            map.vertices.insert(MapVertex { x: 0, y: 64 }),
+        ];
+        let mk = |a, b| MapLinedef {
+            v1: a,
+            v2: b,
+            flags: 0,
+            special: 0,
+            args: [0; 5],
+            tag: 0,
+            right: None,
+            left: None,
+        };
+        let lines = vec![
+            map.linedefs.insert(mk(v[0], v[1])),
+            map.linedefs.insert(mk(v[1], v[2])),
+            map.linedefs.insert(mk(v[2], v[3])),
+            map.linedefs.insert(mk(v[3], v[0])),
+        ];
+
+        let state = compute_make_sector(&map, &lines).expect("loop is closed");
+        assert_eq!(state.line_assignments.len(), 4);
+
+        let mut cmd = Command::MakeSector(Box::new(state));
+        cmd.apply(&mut map);
+
+        assert_eq!(map.sectors.len(), 1);
+        assert_eq!(map.sidedefs.len(), 4);
+        // For a CCW square walked v0->v1->v2->v3, the centroid is to the LEFT of
+        // the walk direction, so each linedef's left side is inside.
+        // walk v0->v1 matches linedef.v1->v2, so inside == left == linedef.left.
+        let l01 = &map.linedefs[lines[0]];
+        assert!(l01.left.is_some(), "v0->v1 left should be set");
+        assert!(l01.right.is_none(), "v0->v1 right should remain unset");
+
+        // Undo: linedefs revert to having no sides.
+        cmd.revert(&mut map);
+        assert_eq!(map.sectors.len(), 0);
+        assert_eq!(map.sidedefs.len(), 0);
+        for lid in &lines {
+            let l = &map.linedefs[*lid];
+            assert!(l.right.is_none() && l.left.is_none());
+        }
     }
 
     #[test]

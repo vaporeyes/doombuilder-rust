@@ -3,6 +3,7 @@
 // ABOUTME: viewport, bottom inspector with texture slots, status bar.
 
 mod camera;
+mod icons;
 mod style;
 mod view2d;
 mod view3d;
@@ -14,8 +15,8 @@ use std::sync::Arc;
 use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::edit::{
-    collect_and_delete, Command, LineEndpoint, LinedefChain, LinedefIntField, SectorIntField,
-    SectorSlot, SidedefSlot, ThingIntField, ThingMove, UndoStack, VertexMove,
+    collect_and_delete, compute_make_sector, Command, LineEndpoint, LinedefChain, LinedefIntField,
+    SectorIntField, SectorSlot, SidedefSlot, ThingIntField, ThingMove, UndoStack, VertexMove,
 };
 use doombuilder_core::map::LinedefId;
 use doombuilder_core::map::MapThing;
@@ -366,6 +367,7 @@ pub enum Message {
     InsertThing,
     ToggleDrawing,
     CancelDrawing,
+    MakeSector,
     OpenTexturePicker(PickerTarget),
     OpenActionPicker(doombuilder_core::map::LinedefId),
     OpenThingKindPicker(ThingId),
@@ -1122,6 +1124,10 @@ impl App {
                 self.cache2d.clear();
                 Task::none()
             }
+            Message::MakeSector => {
+                self.do_make_sector();
+                Task::none()
+            }
             Message::Quit => iced::exit(),
             Message::Noop => Task::none(),
         }
@@ -1162,6 +1168,7 @@ impl App {
                 keyboard::Key::Named(keyboard::key::Named::Insert) => Message::InsertThing,
                 keyboard::Key::Character("i") if !modifiers.command() => Message::InsertThing,
                 keyboard::Key::Character("d") if !modifiers.command() => Message::ToggleDrawing,
+                keyboard::Key::Character("m") if modifiers.command() => Message::MakeSector,
                 keyboard::Key::Character("1") if !modifiers.command() => {
                     Message::SetEditMode(EditMode::Vertices)
                 }
@@ -1477,6 +1484,51 @@ impl App {
             .collect()
     }
 
+    fn do_make_sector(&mut self) {
+        let line_ids: Vec<doombuilder_core::map::LinedefId> = self
+            .selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Linedef(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        if line_ids.is_empty() {
+            self.status = "Make Sector: select a closed loop of linedefs first.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else {
+            return;
+        };
+        match compute_make_sector(map, &line_ids) {
+            Ok(state) => {
+                let mut cmd = Command::MakeSector(Box::new(state));
+                if let Some(map) = self.map.as_mut() {
+                    let map_mut = Arc::make_mut(map);
+                    cmd.apply(map_mut);
+                    self.undo.push(cmd);
+                    self.rebuild_geometry_indices();
+                    self.cache2d.clear();
+                    self.status = format!("Made sector from {} linedefs.", line_ids.len());
+                }
+            }
+            Err(doombuilder_core::edit::MakeSectorError::NoLines) => {
+                self.status = "Make Sector: no linedefs selected.".into();
+            }
+            Err(doombuilder_core::edit::MakeSectorError::LineHasSides) => {
+                self.status =
+                    "Make Sector: at least one selected linedef already has a sidedef.".into();
+            }
+            Err(doombuilder_core::edit::MakeSectorError::NotAClosedLoop) => {
+                self.status = "Make Sector: selected lines do not form a single closed loop.".into();
+            }
+            Err(doombuilder_core::edit::MakeSectorError::DanglingVertex) => {
+                self.status =
+                    "Make Sector: each vertex in the loop must touch exactly two selected lines.".into();
+            }
+        }
+    }
+
     fn drawing_click(&mut self, world: Vec2) {
         let Some(drawing) = self.drawing.as_mut() else {
             return;
@@ -1566,11 +1618,23 @@ impl App {
         }
         let count_v = drawing.chain.current_v.len();
         let count_l = drawing.chain.current_l.len();
+        let new_lines: Vec<doombuilder_core::map::LinedefId> = drawing.chain.current_l.clone();
         self.undo
             .push(Command::CreateLinedefChain(Box::new(drawing.chain)));
         self.rebuild_geometry_indices();
+        // Auto-select the freshly-drawn linedefs and switch to Linedefs mode
+        // so the user can flow straight into Make Sector.
+        let mut sel = HashSet::new();
+        for id in &new_lines {
+            sel.insert(HighlightKind::Linedef(*id));
+        }
+        self.selection = Arc::new(sel);
+        self.edit_mode = EditMode::Linedefs;
         self.cache2d.clear();
-        self.status = format!("Drew {} vertices and {} linedefs.", count_v, count_l);
+        self.status = format!(
+            "Drew {} vertices and {} linedefs (selected for Make Sector).",
+            count_v, count_l
+        );
     }
 
     fn cancel_active_drag(&mut self) {
@@ -1720,50 +1784,48 @@ impl App {
             .into()
         };
 
+        let toolbar_row = row![
+            icons::icon_cmd_btn(icons::FOLDER_OPEN, "Open WAD\u{2026}", Message::OpenWadRequested),
+            icons::icon_cmd_btn(icons::SAVE_DISK, "Save Map As\u{2026}", Message::SaveMapRequested),
+            vertical_separator(),
+            text("Map:").size(13),
+            map_picker,
+            vertical_separator(),
+            icons::icon_btn(icons::VIEW_2D, "2D View", Message::Mode(Mode::View2D), self.mode == Mode::View2D),
+            icons::icon_btn(icons::VIEW_3D, "3D View", Message::Mode(Mode::View3D), self.mode == Mode::View3D),
+            vertical_separator(),
+            text("Game:").size(13),
+            pick_list(
+                GameConfig::builtin_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+                Some(self.current_config_name.clone()),
+                Message::SetGameConfig,
+            ),
+            vertical_separator(),
+            icons::icon_btn(icons::VERTEX, "Vertices mode (1)", Message::SetEditMode(EditMode::Vertices), self.edit_mode == EditMode::Vertices),
+            icons::icon_btn(icons::LINEDEF, "Linedefs mode (2)", Message::SetEditMode(EditMode::Linedefs), self.edit_mode == EditMode::Linedefs),
+            icons::icon_btn(icons::SECTOR, "Sectors mode (3)", Message::SetEditMode(EditMode::Sectors), self.edit_mode == EditMode::Sectors),
+            icons::icon_btn(icons::THING, "Things mode (4)", Message::SetEditMode(EditMode::Things), self.edit_mode == EditMode::Things),
+            vertical_separator(),
+            icons::icon_btn(icons::DRAW_PEN, "Draw lines (D)", Message::ToggleDrawing, self.drawing.is_some()),
+            icons::icon_cmd_btn(icons::MAKE_SECTOR, "Make sector from selected lines (\u{2318}M)", Message::MakeSector),
+            icons::icon_btn(icons::TEXTURES, "Show sector textures", Message::ToggleTextures, self.settings.show_textures),
+            icons::icon_cmd_btn(icons::SETTINGS_GEAR, "Settings\u{2026}", Message::OpenSettings),
+        ]
+        .spacing(4)
+        .padding(6)
+        .align_y(iced::Alignment::Center);
+
         container(
-            row![
-                text("Map:").size(13),
-                map_picker,
-                vertical_separator(),
-                mode_button("2D", Mode::View2D, self.mode),
-                mode_button("3D", Mode::View3D, self.mode),
-                vertical_separator(),
-                text("Game:").size(13),
-                pick_list(
-                    GameConfig::builtin_names()
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<Vec<_>>(),
-                    Some(self.current_config_name.clone()),
-                    Message::SetGameConfig,
-                ),
-                vertical_separator(),
-                edit_mode_button(EditMode::Vertices, self.edit_mode),
-                edit_mode_button(EditMode::Linedefs, self.edit_mode),
-                edit_mode_button(EditMode::Sectors, self.edit_mode),
-                edit_mode_button(EditMode::Things, self.edit_mode),
-                vertical_separator(),
-                button(text(if self.drawing.is_some() {
-                    "Drawing: ON (D commits)"
-                } else {
-                    "Draw"
-                }))
-                .style(style::win32_toggle_button(self.drawing.is_some()))
-                .on_press(Message::ToggleDrawing),
-                button(text(if self.settings.show_textures {
-                    "Show textures: ON"
-                } else {
-                    "Show textures: OFF"
-                }))
-                .style(style::win32_standard_button)
-                .on_press(Message::ToggleTextures),
-                button(text("Settings\u{2026}"))
-                    .style(style::win32_standard_button)
-                    .on_press(Message::OpenSettings),
-            ]
-            .spacing(8)
-            .padding(6)
-            .align_y(iced::Alignment::Center),
+            scrollable(toolbar_row)
+                .direction(iced::widget::scrollable::Direction::Horizontal(
+                    iced::widget::scrollable::Scrollbar::new()
+                        .width(4)
+                        .scroller_width(4),
+                ))
+                .width(Length::Fill),
         )
         .style(panel_style)
         .width(Length::Fill)
@@ -2986,6 +3048,8 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Clear Selection"),
     MenuItem("Delete Selection"),
     MenuItem("Insert Thing"),
+    MenuItem("Make Sector"),
+    MenuItem("Toggle Draw Mode"),
 ];
 const VIEW_MENU_ITEMS: &[MenuItem] =
     &[MenuItem("2D Mode"), MenuItem("3D Mode"), MenuItem("Settings\u{2026}")];
@@ -3009,6 +3073,8 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Clear Selection" => Message::KeyboardEsc,
         "Delete Selection" => Message::DeleteSelection,
         "Insert Thing" => Message::InsertThing,
+        "Make Sector" => Message::MakeSector,
+        "Toggle Draw Mode" => Message::ToggleDrawing,
         _ => Message::Noop,
     }
 }
@@ -3144,24 +3210,6 @@ fn edit_mode_matches(mode: EditMode, h: HighlightKind) -> bool {
             | (EditMode::Sectors, HighlightKind::Sector(_))
             | (EditMode::Things, HighlightKind::Thing(_))
     )
-}
-
-fn edit_mode_button(target: EditMode, current: EditMode) -> Element<'static, Message> {
-    let active = target == current;
-    let mut b = button(text(target.label())).style(style::win32_toggle_button(active));
-    if !active {
-        b = b.on_press(Message::SetEditMode(target));
-    }
-    b.into()
-}
-
-fn mode_button(label: &str, target: Mode, current: Mode) -> Element<'static, Message> {
-    let active = target == current;
-    let mut b = button(text(label.to_string())).style(style::win32_toggle_button(active));
-    if !active {
-        b = b.on_press(Message::Mode(target));
-    }
-    b.into()
 }
 
 fn menu_bar_style(theme: &Theme) -> container::Style {
