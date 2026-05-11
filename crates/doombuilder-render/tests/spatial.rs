@@ -25,6 +25,7 @@ fn square_map() -> (Map, [VertexId; 4]) {
         special: 0,
         tag: 0,
         sidedefs: Vec::new(),
+        fields: Default::default(),
     });
     let mk_side = |map: &mut Map| {
         map.sidedefs.insert(MapSidedef {
@@ -49,6 +50,7 @@ fn square_map() -> (Map, [VertexId; 4]) {
         tag: 0,
         right: Some(side),
         left: None,
+        fields: Default::default(),
     };
     map.linedefs.insert(mk_line(v0, v1, s0));
     map.linedefs.insert(mk_line(v1, v2, s1));

@@ -577,6 +577,7 @@ pub fn compute_make_sector(
         special: 0,
         tag: 0,
         sidedefs: Vec::new(),
+        fields: Default::default(),
     };
     let sidedef_template = MapSidedef {
         sector: SectorId::default(), // filled in by apply
@@ -1372,6 +1373,7 @@ impl Command {
                         tag: orig.tag,
                         right: new_right,
                         left: new_left,
+                        fields: orig.fields.clone(),
                     };
                     let new_lid = map.linedefs.insert(new_line);
                     split.new_line = Some(new_lid);
@@ -2112,6 +2114,7 @@ mod tests {
             tag: 0,
             right: None,
             left: None,
+            fields: Default::default(),
         });
         let l1 = map.linedefs.insert(MapLinedef {
             v1: v1,
@@ -2122,6 +2125,7 @@ mod tests {
             tag: 0,
             right: None,
             left: None,
+            fields: Default::default(),
         });
 
         let state = compute_vertex_merge(&map, &[v0, v1]).expect("state");
@@ -2167,6 +2171,7 @@ mod tests {
             special: 0,
             tag: 0,
             sidedefs: Vec::new(),
+            fields: Default::default(),
         });
         let s0 = map.sidedefs.insert(MapSidedef {
             sector: sec,
@@ -2185,6 +2190,7 @@ mod tests {
             tag: 7,
             right: Some(s0),
             left: None,
+            fields: Default::default(),
         });
 
         let state = compute_split_lines(&map, &[line]).expect("state");
@@ -2232,6 +2238,7 @@ mod tests {
             tag: 0,
             right: None,
             left: None,
+            fields: Default::default(),
         };
         let lines = vec![
             map.linedefs.insert(mk(v[0], v[1])),
@@ -2280,6 +2287,7 @@ mod tests {
             special: 0,
             tag: 0,
             sidedefs: Vec::new(),
+            fields: Default::default(),
         });
         let s0 = map.sidedefs.insert(MapSidedef {
             sector: sec,
@@ -2298,6 +2306,7 @@ mod tests {
             tag: 0,
             right: Some(s0),
             left: None,
+            fields: Default::default(),
         });
 
         let mut sel_v = HashSet::new();
@@ -2326,6 +2335,7 @@ mod tests {
             special: 0,
             tag: 0,
             sidedefs: Vec::new(),
+            fields: Default::default(),
         });
         let s0 = map.sidedefs.insert(MapSidedef {
             sector: sec,
@@ -2344,6 +2354,7 @@ mod tests {
             tag: 0,
             right: Some(s0),
             left: None,
+            fields: Default::default(),
         });
 
         let mut sel_v = HashSet::new();
@@ -2395,6 +2406,7 @@ mod tests {
             special: 0,
             tag: 0,
             sidedefs: Vec::new(),
+            fields: Default::default(),
         });
         let sec_b = map.sectors.insert(MapSector {
             floor_height: 16,
@@ -2405,6 +2417,7 @@ mod tests {
             special: 0,
             tag: 0,
             sidedefs: Vec::new(),
+            fields: Default::default(),
         });
         let side_a = map.sidedefs.insert(MapSidedef {
             sector: sec_a,
@@ -2457,6 +2470,7 @@ mod tests {
             special: 0,
             tag: 0,
             sidedefs: Vec::new(),
+            fields: Default::default(),
         });
         let s_right = map.sidedefs.insert(MapSidedef {
             sector: sec,
@@ -2483,6 +2497,7 @@ mod tests {
             tag: 0,
             right: Some(s_right),
             left: Some(s_left),
+            fields: Default::default(),
         });
 
         let mut cmd = Command::FlipLinedefs(vec![line]);

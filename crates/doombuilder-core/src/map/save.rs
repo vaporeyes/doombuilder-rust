@@ -4,12 +4,23 @@
 
 use std::collections::HashMap;
 
+use crate::error::Result;
 use crate::format::MapFormat;
+use crate::map::node_builder::{self, NodeBuilder};
 use crate::map::{LinedefId, Map, SectorId, SidedefId, VertexId};
 use crate::wad::LumpEntry;
 
-/// Produce the ordered lump list for a single map, ready to feed to write_pwad.
+/// Produce the ordered lump list for a single map, using the bundled node
+/// builder. Panics never (the builtin builder is infallible); kept Result-free
+/// so existing callers don't need updating.
 pub fn serialize_map(map: &Map) -> Vec<LumpEntry<'_>> {
+    // Builtin is infallible, so unwrap is safe.
+    serialize_map_with(map, &NodeBuilder::Builtin).expect("builtin node builder is infallible")
+}
+
+/// Like `serialize_map` but takes a builder choice. Returns an error only
+/// when an external builder (e.g. zdbsp) fails to run or produces bad output.
+pub fn serialize_map_with<'a>(map: &'a Map, builder: &NodeBuilder) -> Result<Vec<LumpEntry<'a>>> {
     let vertex_idx: HashMap<VertexId, u16> = map
         .vertices
         .iter()
@@ -29,7 +40,7 @@ pub fn serialize_map(map: &Map) -> Vec<LumpEntry<'_>> {
         .map(|(i, (id, _))| (id, i as u16))
         .collect();
 
-    let nodes = crate::map::nodes::build_nodes(map);
+    let nodes = node_builder::build(map, builder)?;
 
     let things = serialize_things(map);
     let linedefs = serialize_linedefs(map, &vertex_idx, &sidedef_idx);
@@ -59,7 +70,7 @@ pub fn serialize_map(map: &Map) -> Vec<LumpEntry<'_>> {
     if map.format == MapFormat::Hexen {
         lumps.push(LumpEntry { name: "BEHAVIOR", data: Vec::new() });
     }
-    lumps
+    Ok(lumps)
 }
 
 /// Convenience wrapper: serialize then pack as PWAD bytes.
@@ -68,7 +79,13 @@ pub fn save_map_as_pwad(map: &Map) -> Vec<u8> {
     crate::wad::write_pwad(&lumps)
 }
 
-fn serialize_vertexes(map: &Map) -> Vec<u8> {
+/// Like `save_map_as_pwad` but lets the caller pick the node builder.
+pub fn save_map_as_pwad_with(map: &Map, builder: &NodeBuilder) -> Result<Vec<u8>> {
+    let lumps = serialize_map_with(map, builder)?;
+    Ok(crate::wad::write_pwad(&lumps))
+}
+
+pub(crate) fn serialize_vertexes(map: &Map) -> Vec<u8> {
     let mut out = Vec::with_capacity(map.vertices.len() * 4);
     for (_, v) in &map.vertices {
         out.extend_from_slice(&(v.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes());
@@ -77,7 +94,7 @@ fn serialize_vertexes(map: &Map) -> Vec<u8> {
     out
 }
 
-fn serialize_sectors(map: &Map) -> Vec<u8> {
+pub(crate) fn serialize_sectors(map: &Map) -> Vec<u8> {
     let mut out = Vec::with_capacity(map.sectors.len() * 26);
     for (_, s) in &map.sectors {
         out.extend_from_slice(&s.floor_height.to_le_bytes());
@@ -92,7 +109,7 @@ fn serialize_sectors(map: &Map) -> Vec<u8> {
     out
 }
 
-fn serialize_sidedefs(map: &Map, sector_idx: &HashMap<SectorId, u16>) -> Vec<u8> {
+pub(crate) fn serialize_sidedefs(map: &Map, sector_idx: &HashMap<SectorId, u16>) -> Vec<u8> {
     let mut out = Vec::with_capacity(map.sidedefs.len() * 30);
     for (_, s) in &map.sidedefs {
         out.extend_from_slice(&s.x_offset.to_le_bytes());
@@ -147,6 +164,7 @@ mod tests {
             tag: 0,
             right: None,
             left: None,
+            fields: Default::default(),
         };
         let l0 = map.linedefs.insert(mk(v0, v1));
         let l1 = map.linedefs.insert(mk(v1, v2));
@@ -173,7 +191,7 @@ mod tests {
     }
 }
 
-fn serialize_linedefs(
+pub(crate) fn serialize_linedefs(
     map: &Map,
     vertex_idx: &HashMap<VertexId, u16>,
     sidedef_idx: &HashMap<SidedefId, u16>,
@@ -212,7 +230,7 @@ fn serialize_linedefs(
 
 fn _suppress_unused(_id: LinedefId) {}
 
-fn serialize_things(map: &Map) -> Vec<u8> {
+pub(crate) fn serialize_things(map: &Map) -> Vec<u8> {
     let stride = if map.format == MapFormat::Hexen { 20 } else { 10 };
     let mut out = Vec::with_capacity(map.things.len() * stride);
     for (_, t) in &map.things {

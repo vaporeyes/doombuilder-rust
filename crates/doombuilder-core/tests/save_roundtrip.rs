@@ -21,6 +21,7 @@ fn synthetic_doom_map() -> Map {
         special: 9,
         tag: 7,
         sidedefs: Vec::new(),
+        fields: Default::default(),
     });
     let mk_side = |map: &mut Map| {
         map.sidedefs.insert(MapSidedef {
@@ -45,6 +46,7 @@ fn synthetic_doom_map() -> Map {
         tag: 11,
         right: Some(side),
         left: None,
+        fields: Default::default(),
     };
     map.linedefs.insert(mk_line(v0, v1, s0));
     map.linedefs.insert(mk_line(v1, v2, s1));

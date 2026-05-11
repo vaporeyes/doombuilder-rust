@@ -3,17 +3,55 @@
 
 pub mod ids;
 mod load;
+pub mod node_builder;
 pub mod nodes;
-mod save;
+pub(crate) mod save;
 
 pub use ids::{LinedefId, SectorId, SidedefId, ThingId, VertexId};
 pub use load::{detect_format, load_auto, load_doom, load_hexen, MapName};
+pub use node_builder::NodeBuilder;
 pub use nodes::{build_nodes, NodeOutput};
-pub use save::{save_map_as_pwad, serialize_map};
+pub use save::{save_map_as_pwad, save_map_as_pwad_with, serialize_map, serialize_map_with};
 
 use slotmap::SlotMap;
+use std::collections::HashMap;
 
 use crate::format::MapFormat;
+
+/// UDMF "universal" value. Mirrors the four primitive value kinds the UDMF
+/// spec allows for field literals; preserves the originating kind so a
+/// loaded map round-trips losslessly even for fields we don't otherwise know.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UniValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+}
+
+impl UniValue {
+    pub fn as_bool(&self) -> Option<bool> {
+        if let UniValue::Bool(v) = self { Some(*v) } else { None }
+    }
+    pub fn as_int(&self) -> Option<i64> {
+        if let UniValue::Int(v) = self { Some(*v) } else { None }
+    }
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            UniValue::Float(v) => Some(*v),
+            UniValue::Int(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> Option<&str> {
+        if let UniValue::String(v) = self { Some(v.as_str()) } else { None }
+    }
+}
+
+/// Open-ended bag of UDMF extension fields keyed by lowercase field name.
+/// Empty for entities loaded from non-UDMF formats; populated on UDMF load
+/// for any field the typed core doesn't already capture.
+pub type FieldBag = HashMap<String, UniValue>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MapVertex {
@@ -34,6 +72,9 @@ pub struct MapLinedef {
     pub tag: u16,
     pub right: Option<SidedefId>,
     pub left: Option<SidedefId>,
+    /// UDMF extension fields not captured by the typed members above.
+    /// Empty for Doom/Hexen-format maps.
+    pub fields: FieldBag,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +99,9 @@ pub struct MapSector {
     /// Derived index of sidedefs whose `sector` field points here.
     /// Rebuilt by `Map::rebuild_sidedef_index`; keep in sync on mutations.
     pub sidedefs: Vec<SidedefId>,
+    /// UDMF extension fields not captured by the typed members above.
+    /// Empty for Doom/Hexen-format maps.
+    pub fields: FieldBag,
 }
 
 #[derive(Debug, Clone)]

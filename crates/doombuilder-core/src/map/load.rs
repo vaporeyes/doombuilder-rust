@@ -98,6 +98,7 @@ fn load(wad: &Wad, name: MapName, format: MapFormat) -> Result<Map> {
                 special: s.special,
                 tag: s.tag,
                 sidedefs: Vec::new(),
+                fields: Default::default(),
             })
         })
         .collect();
@@ -153,6 +154,7 @@ fn load_linedefs_doom(
             tag: line.tag,
             right,
             left,
+            fields: Default::default(),
         });
     }
     Ok(())
@@ -180,6 +182,7 @@ fn load_linedefs_hexen(
             tag: 0,
             right,
             left,
+            fields: Default::default(),
         });
     }
     Ok(())

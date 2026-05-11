@@ -26,7 +26,8 @@ use doombuilder_core::edit::{
 use doombuilder_core::map::LinedefId;
 use doombuilder_core::map::MapThing;
 use doombuilder_core::map::{
-    save_map_as_pwad, Map, MapLinedef, MapSidedef, MapVertex, SectorId, TextureName, ThingId,
+    save_map_as_pwad, save_map_as_pwad_with, Map, MapLinedef, MapSidedef, MapVertex, NodeBuilder,
+    SectorId, TextureName, ThingId,
     VertexId,
 };
 use doombuilder_core::textures::TextureSet;
@@ -267,6 +268,39 @@ pub struct Settings {
     /// Show the 3D preview in a dedicated right-side panel in 2D mode.
     #[serde(default = "default_true")]
     pub show_3d_overlay: bool,
+    /// Which BSP/blockmap/reject builder to use when saving maps.
+    #[serde(default)]
+    pub node_builder: NodeBuilderKind,
+    /// Path to a `zdbsp` executable, used when `node_builder == Zdbsp`.
+    #[serde(default)]
+    pub zdbsp_path: Option<PathBuf>,
+}
+
+/// Serializable choice of node builder. Mirrors `doombuilder_core::map::
+/// NodeBuilder` but stays a flat enum so it round-trips through the JSON
+/// settings file without needing to embed paths in every variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum NodeBuilderKind {
+    #[default]
+    Builtin,
+    Zdbsp,
+}
+
+impl NodeBuilderKind {
+    pub const ALL: [NodeBuilderKind; 2] = [NodeBuilderKind::Builtin, NodeBuilderKind::Zdbsp];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NodeBuilderKind::Builtin => "Built-in (Rust)",
+            NodeBuilderKind::Zdbsp => "zdbsp (external)",
+        }
+    }
+}
+
+impl std::fmt::Display for NodeBuilderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -329,6 +363,23 @@ impl Default for Settings {
             view_mode: View2DMode::default(),
             full_brightness: false,
             show_3d_overlay: true,
+            node_builder: NodeBuilderKind::default(),
+            zdbsp_path: None,
+        }
+    }
+}
+
+impl Settings {
+    /// Materialize a `core::NodeBuilder` from the persisted choice. Falls back
+    /// to Builtin if the user selected zdbsp without supplying a path.
+    pub fn make_node_builder(&self) -> doombuilder_core::map::NodeBuilder {
+        use doombuilder_core::map::NodeBuilder as Nb;
+        match self.node_builder {
+            NodeBuilderKind::Builtin => Nb::Builtin,
+            NodeBuilderKind::Zdbsp => match &self.zdbsp_path {
+                Some(p) => Nb::Zdbsp { exe: p.clone(), extra_args: Vec::new() },
+                None => Nb::Builtin,
+            },
         }
     }
 }
@@ -605,6 +656,9 @@ pub enum Message {
     EnginePathPicked(Option<PathBuf>),
     PickIwadRequested,
     IwadPathPicked(Option<PathBuf>),
+    SetNodeBuilder(NodeBuilderKind),
+    PickZdbspRequested,
+    ZdbspPathPicked(Option<PathBuf>),
     MakeSector,
     SplitLines,
     MergeVertices,
@@ -889,7 +943,8 @@ impl App {
                     return Task::none();
                 };
                 self.status = format!("Saving {}...", path.display());
-                Task::perform(save_map_to_path(map, path), Message::SaveMapDone)
+                let builder = self.settings.make_node_builder();
+                Task::perform(save_map_to_path(map, path, builder), Message::SaveMapDone)
             }
             Message::SaveMapDone(Ok(path)) => {
                 self.status = format!("Saved {}", path.display());
@@ -1834,6 +1889,22 @@ impl App {
                 self.settings.iwad_path = Some(path.clone());
                 self.persist_settings();
                 self.status = format!("IWAD set: {}", path.display());
+                Task::none()
+            }
+            Message::SetNodeBuilder(kind) => {
+                self.settings.node_builder = kind;
+                self.persist_settings();
+                self.status = format!("Node builder: {kind}");
+                Task::none()
+            }
+            Message::PickZdbspRequested => {
+                Task::perform(pick_executable(), Message::ZdbspPathPicked)
+            }
+            Message::ZdbspPathPicked(None) => Task::none(),
+            Message::ZdbspPathPicked(Some(path)) => {
+                self.settings.zdbsp_path = Some(path.clone());
+                self.persist_settings();
+                self.status = format!("zdbsp set: {}", path.display());
                 Task::none()
             }
             Message::MakeSector => {
@@ -3030,7 +3101,14 @@ impl App {
         };
         // Stash the test PWAD in the OS temp dir; engines accept absolute paths.
         let pwad_path = std::env::temp_dir().join("doombuilder-test.wad");
-        let bytes = doombuilder_core::map::save_map_as_pwad(&map);
+        let builder = self.settings.make_node_builder();
+        let bytes = match save_map_as_pwad_with(&map, &builder) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Test: node builder failed: {e}");
+                return;
+            }
+        };
         if let Err(e) = std::fs::write(&pwad_path, &bytes) {
             self.status = format!("Test: failed to write temp WAD: {e}");
             return;
@@ -3908,6 +3986,7 @@ impl App {
                     tag: 0,
                     right: None,
                     left: None,
+                    fields: Default::default(),
                 };
                 let new_lid = map_mut.linedefs.insert(template.clone());
                 drawing.chain.current_l.push(new_lid);
@@ -5627,12 +5706,40 @@ impl App {
         ]
         .spacing(6);
 
+        let zdbsp_label = self
+            .settings
+            .zdbsp_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(not set)".into());
+        let nodes_section = column![
+            text("Node Builder").size(14),
+            pick_list(
+                NodeBuilderKind::ALL.to_vec(),
+                Some(self.settings.node_builder),
+                Message::SetNodeBuilder,
+            )
+            .placeholder("Node builder"),
+            row![
+                text("zdbsp path: ").size(12),
+                text(zdbsp_label).size(12),
+                Space::new().width(Length::Fill),
+                button("Pick\u{2026}")
+                    .style(style::win32_standard_button)
+                    .on_press(Message::PickZdbspRequested),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(6);
+
         column![
             title_row,
             theme_section,
             text("2D viewport display").size(14),
             column(rows).spacing(6),
             test_section,
+            nodes_section,
         ]
         .spacing(12)
         .padding(16)
@@ -6838,8 +6945,16 @@ async fn pick_save_path(suggested_stem: String) -> Option<PathBuf> {
         .map(|h| h.path().to_path_buf())
 }
 
-async fn save_map_to_path(map: Arc<Map>, path: PathBuf) -> Result<PathBuf, String> {
-    let bytes = save_map_as_pwad(&map);
+async fn save_map_to_path(
+    map: Arc<Map>,
+    path: PathBuf,
+    builder: NodeBuilder,
+) -> Result<PathBuf, String> {
+    // Builtin path stays infallible; external builders surface their error.
+    let bytes = match builder {
+        NodeBuilder::Builtin => save_map_as_pwad(&map),
+        b @ NodeBuilder::Zdbsp { .. } => save_map_as_pwad_with(&map, &b).map_err(|e| e.to_string())?,
+    };
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path)
 }
@@ -6974,6 +7089,7 @@ fn chain_from_polyline(points: &[Vec2], closed: bool) -> LinedefChain {
                 tag: 0,
                 right: None,
                 left: None,
+                fields: Default::default(),
             },
         ));
     }
@@ -7021,6 +7137,7 @@ fn chain_from_grid(a: Vec2, b: Vec2, cols: u32, rows: u32) -> LinedefChain {
                 tag: 0,
                 right: None,
                 left: None,
+                fields: Default::default(),
             },
         )
     };

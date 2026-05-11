@@ -717,6 +717,7 @@ mod tests {
             special: 0,
             tag: 0,
             sidedefs: Vec::new(),
+            fields: Default::default(),
         });
         let s = |sec| MapSidedef {
             sector: sec,
@@ -739,6 +740,7 @@ mod tests {
             tag: 0,
             right: Some(side),
             left: None,
+            fields: Default::default(),
         };
         map.linedefs.insert(mk(v0, v1, s0));
         map.linedefs.insert(mk(v1, v2, s1));
@@ -820,6 +822,7 @@ mod tests {
             special: 0,
             tag: 0,
             sidedefs: Vec::new(),
+            fields: Default::default(),
         });
         let sec_b = map.sectors.insert(MapSector {
             floor_height: 0,
@@ -830,6 +833,7 @@ mod tests {
             special: 0,
             tag: 0,
             sidedefs: Vec::new(),
+            fields: Default::default(),
         });
         let mk_side = |sec| MapSidedef {
             sector: sec,
@@ -860,6 +864,7 @@ mod tests {
             tag: 0,
             right: Some(right),
             left,
+            fields: Default::default(),
         };
         map.linedefs.insert(mk(v0, v1, a_bottom, None));
         map.linedefs.insert(mk(v1, v2, b_bottom, None));
