@@ -130,6 +130,16 @@ pub struct App {
     linedef_buffers: Option<LinedefBuffers>,
     thing_buffers: Option<ThingBuffers>,
     drawing: Option<DrawingState>,
+    /// Buffer state for the Go-To-Coords modal (text in the X/Y inputs).
+    go_to_coords_x: String,
+    go_to_coords_y: String,
+    /// Hide hover overlays when false (toggled with H).
+    show_highlights: bool,
+    /// When true, left-mouse drag in the 2D viewport pans instead of selects.
+    space_held: bool,
+    /// User-placed Visual Mode camera position; takes precedence over the
+    /// map AABB centre when entering 3D mode.
+    visual_camera_start: Option<Vec2>,
 }
 
 #[derive(Debug, Default)]
@@ -168,6 +178,7 @@ pub enum ActivePicker {
     ThingKind(ThingId),
     SectorSpecial(SectorId),
     Settings,
+    GoToCoords,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -392,6 +403,11 @@ impl Default for App {
             linedef_buffers: None,
             thing_buffers: None,
             drawing: None,
+            go_to_coords_x: String::new(),
+            go_to_coords_y: String::new(),
+            show_highlights: true,
+            space_held: false,
+            visual_camera_start: None,
         }
     }
 }
@@ -430,6 +446,16 @@ pub enum Message {
     CancelDrawing,
     CycleGridStep(i32),
     PanCamera { dx_units: i32, dy_units: i32, fast: bool },
+    FitToScreen,
+    OpenGoToCoords,
+    GoToCoordsXChanged(String),
+    GoToCoordsYChanged(String),
+    GoToCoordsSubmit,
+    SnapSelectionToGrid,
+    ToggleHighlights,
+    PlaceVisualCamera,
+    DrawingRemoveLast,
+    SpaceHeld(bool),
     SetTheme(ThemeKind),
     TestMap,
     PickEngineRequested,
@@ -759,6 +785,12 @@ impl App {
                 Task::none()
             }
             Message::Mode(mode) => {
+                if mode == Mode::View3D {
+                    if let Some(pos) = self.visual_camera_start {
+                        self.camera3d.target.x = pos.x;
+                        self.camera3d.target.y = pos.y;
+                    }
+                }
                 self.mode = mode;
                 Task::none()
             }
@@ -1048,48 +1080,7 @@ impl App {
                 Task::none()
             }
             Message::DeleteSelection => {
-                let mut sel_v: HashSet<doombuilder_core::map::VertexId> = HashSet::new();
-                let mut sel_l: HashSet<LinedefId> = HashSet::new();
-                let mut sel_sec: HashSet<SectorId> = HashSet::new();
-                let mut sel_t: HashSet<ThingId> = HashSet::new();
-                for h in self.selection.iter() {
-                    match h {
-                        HighlightKind::Vertex(v) => {
-                            sel_v.insert(*v);
-                        }
-                        HighlightKind::Linedef(l) => {
-                            sel_l.insert(*l);
-                        }
-                        HighlightKind::Sector(s) => {
-                            sel_sec.insert(*s);
-                        }
-                        HighlightKind::Thing(t) => {
-                            sel_t.insert(*t);
-                        }
-                    }
-                }
-                let any = !sel_v.is_empty()
-                    || !sel_l.is_empty()
-                    || !sel_sec.is_empty()
-                    || !sel_t.is_empty();
-                if any {
-                    if let Some(map) = self.map.as_mut() {
-                        let map_mut = Arc::make_mut(map);
-                        let state = collect_and_delete(map_mut, &sel_v, &sel_l, &sel_sec, &sel_t);
-                        let nothing = state.vertex_snaps.is_empty()
-                            && state.sector_snaps.is_empty()
-                            && state.sidedef_snaps.is_empty()
-                            && state.linedef_snaps.is_empty()
-                            && state.thing_snaps.is_empty();
-                        if !nothing {
-                            self.undo
-                                .push(Command::DeleteElements(Box::new(state)));
-                            self.selection = Arc::new(HashSet::new());
-                            self.rebuild_geometry_indices();
-                            self.cache2d.clear();
-                        }
-                    }
-                }
+                self.delete_selection();
                 Task::none()
             }
             Message::InsertThing => {
@@ -1260,6 +1251,89 @@ impl App {
                 self.cycle_grid_step(delta);
                 Task::none()
             }
+            Message::FitToScreen => {
+                if let Some(map) = self.map.as_ref() {
+                    if let Some((min, max)) = map_aabb(map) {
+                        // Use a generous viewport size so we get a useful zoom
+                        // without needing to know the on-screen bounds here.
+                        self.camera2d.frame_aabb(min, max, Vec2::new(1200.0, 800.0));
+                        self.cache2d.clear();
+                        self.status = "Framed map.".into();
+                    }
+                }
+                Task::none()
+            }
+            Message::OpenGoToCoords => {
+                self.go_to_coords_x = format!("{:.0}", self.camera2d.center.x);
+                self.go_to_coords_y = format!("{:.0}", self.camera2d.center.y);
+                self.active_picker = Some(ActivePicker::GoToCoords);
+                Task::none()
+            }
+            Message::GoToCoordsXChanged(s) => {
+                self.go_to_coords_x = s;
+                Task::none()
+            }
+            Message::GoToCoordsYChanged(s) => {
+                self.go_to_coords_y = s;
+                Task::none()
+            }
+            Message::GoToCoordsSubmit => {
+                let x = self.go_to_coords_x.trim().parse::<f32>().ok();
+                let y = self.go_to_coords_y.trim().parse::<f32>().ok();
+                if let (Some(x), Some(y)) = (x, y) {
+                    self.camera2d.center = Vec2::new(x, y);
+                    self.active_picker = None;
+                    self.cache2d.clear();
+                    self.status = format!("Camera centered at ({x:.0}, {y:.0})");
+                } else {
+                    self.status = "Go To: both X and Y must be numbers.".into();
+                }
+                Task::none()
+            }
+            Message::SnapSelectionToGrid => {
+                self.snap_selection_to_grid();
+                Task::none()
+            }
+            Message::ToggleHighlights => {
+                self.show_highlights = !self.show_highlights;
+                if !self.show_highlights {
+                    self.hover = None;
+                }
+                self.cache2d.clear();
+                self.status = if self.show_highlights {
+                    "Highlights on".into()
+                } else {
+                    "Highlights off".into()
+                };
+                Task::none()
+            }
+            Message::PlaceVisualCamera => {
+                if let Some(world) = self.cursor_world {
+                    self.visual_camera_start = Some(world);
+                    self.status = format!(
+                        "Visual camera placed at ({:.0}, {:.0}).",
+                        world.x, world.y
+                    );
+                } else {
+                    self.status = "Visual camera: move cursor over canvas first.".into();
+                }
+                Task::none()
+            }
+            Message::DrawingRemoveLast => {
+                if self.drawing.is_some() {
+                    self.drawing_remove_last();
+                } else {
+                    // Backspace outside of drawing mode falls back to the
+                    // classic "delete selection" behavior so muscle memory
+                    // still works.
+                    self.delete_selection();
+                }
+                Task::none()
+            }
+            Message::SpaceHeld(down) => {
+                self.space_held = down;
+                Task::none()
+            }
             Message::PanCamera { dx_units, dy_units, fast } => {
                 let step = self.effective_grid_step().max(8.0);
                 let mul = if fast { 4.0 } else { 1.0 };
@@ -1418,10 +1492,21 @@ impl App {
                 keyboard::Key::Character("z") if modifiers.command() => Message::Undo,
                 keyboard::Key::Character("y") if modifiers.command() => Message::Redo,
                 keyboard::Key::Character("s") if modifiers.command() => Message::SaveMapRequested,
-                keyboard::Key::Named(keyboard::key::Named::Delete)
-                | keyboard::Key::Named(keyboard::key::Named::Backspace) => {
-                    Message::DeleteSelection
+                keyboard::Key::Named(keyboard::key::Named::Delete) => Message::DeleteSelection,
+                keyboard::Key::Named(keyboard::key::Named::Backspace) => {
+                    // Routed in the handler: removes last drawn vertex when
+                    // drawing is active, otherwise deletes the selection.
+                    Message::DrawingRemoveLast
                 }
+                keyboard::Key::Named(keyboard::key::Named::Home) => Message::FitToScreen,
+                keyboard::Key::Character("g") if modifiers.command() && modifiers.shift() => {
+                    Message::OpenGoToCoords
+                }
+                keyboard::Key::Character("[") => Message::CycleGridStep(1),
+                keyboard::Key::Character("]") => Message::CycleGridStep(-1),
+                keyboard::Key::Character("h") if !modifiers.command() => Message::ToggleHighlights,
+                keyboard::Key::Character("w") if modifiers.command() => Message::PlaceVisualCamera,
+                keyboard::Key::Named(keyboard::key::Named::Space) => Message::SpaceHeld(true),
                 keyboard::Key::Named(keyboard::key::Named::Insert) => Message::InsertThing,
                 keyboard::Key::Character("i") if !modifiers.command() => Message::InsertThing,
                 keyboard::Key::Character("d") if !modifiers.command() => Message::ToggleDrawing,
@@ -1455,9 +1540,10 @@ impl App {
                 }
                 _ => Message::ModifiersChanged(modifiers),
             },
-            keyboard::Event::KeyReleased { modifiers, .. } => {
-                Message::ModifiersChanged(modifiers)
-            }
+            keyboard::Event::KeyReleased { key, modifiers, .. } => match key.as_ref() {
+                keyboard::Key::Named(keyboard::key::Named::Space) => Message::SpaceHeld(false),
+                _ => Message::ModifiersChanged(modifiers),
+            },
         })
     }
 
@@ -1501,7 +1587,11 @@ impl App {
             } => self.camera2d.zoom_about(pivot, viewport, factor),
             View2DMessage::HoverAt(world) => {
                 self.cursor_world = Some(world);
-                let new_hover = self.hit_test(world);
+                let new_hover = if self.show_highlights {
+                    self.hit_test(world)
+                } else {
+                    None
+                };
                 if new_hover != self.hover {
                     self.hover = new_hover;
                 }
@@ -1577,6 +1667,156 @@ impl App {
             Some(n) => format!("Grid: {n} map units"),
             None => "Grid: auto (follows zoom)".into(),
         };
+    }
+
+    /// Delete every selected map element (vertices/linedefs/sectors/things)
+    /// as a single undoable command. Clears the selection on success.
+    fn delete_selection(&mut self) {
+        let mut sel_v: HashSet<doombuilder_core::map::VertexId> = HashSet::new();
+        let mut sel_l: HashSet<LinedefId> = HashSet::new();
+        let mut sel_sec: HashSet<SectorId> = HashSet::new();
+        let mut sel_t: HashSet<ThingId> = HashSet::new();
+        for h in self.selection.iter() {
+            match h {
+                HighlightKind::Vertex(v) => {
+                    sel_v.insert(*v);
+                }
+                HighlightKind::Linedef(l) => {
+                    sel_l.insert(*l);
+                }
+                HighlightKind::Sector(s) => {
+                    sel_sec.insert(*s);
+                }
+                HighlightKind::Thing(t) => {
+                    sel_t.insert(*t);
+                }
+            }
+        }
+        let any = !sel_v.is_empty()
+            || !sel_l.is_empty()
+            || !sel_sec.is_empty()
+            || !sel_t.is_empty();
+        if !any {
+            return;
+        }
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            let state = collect_and_delete(map_mut, &sel_v, &sel_l, &sel_sec, &sel_t);
+            let nothing = state.vertex_snaps.is_empty()
+                && state.sector_snaps.is_empty()
+                && state.sidedef_snaps.is_empty()
+                && state.linedef_snaps.is_empty()
+                && state.thing_snaps.is_empty();
+            if !nothing {
+                self.undo
+                    .push(Command::DeleteElements(Box::new(state)));
+                self.selection = Arc::new(HashSet::new());
+                self.rebuild_geometry_indices();
+                self.cache2d.clear();
+            }
+        }
+    }
+
+    /// Round every selected vertex's position to the nearest grid point,
+    /// pushed as a single MoveVertices command so undo treats it atomically.
+    fn snap_selection_to_grid(&mut self) {
+        let Some(map) = self.map.as_ref() else { return };
+        let step = self.effective_grid_step().max(1.0);
+        let mut moves: Vec<doombuilder_core::edit::VertexMove> = Vec::new();
+        // Collect vertex ids from the selection. Linedef selections imply
+        // their two endpoints. Sectors are skipped; they aren't a vertex-set.
+        let mut targets: HashSet<doombuilder_core::map::VertexId> = HashSet::new();
+        for h in self.selection.iter() {
+            match h {
+                HighlightKind::Vertex(id) => {
+                    targets.insert(*id);
+                }
+                HighlightKind::Linedef(id) => {
+                    if let Some(l) = map.linedefs.get(*id) {
+                        targets.insert(l.v1);
+                        targets.insert(l.v2);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for id in targets {
+            if let Some(v) = map.vertices.get(id) {
+                let snap_x = ((v.x as f32) / step).round() * step;
+                let snap_y = ((v.y as f32) / step).round() * step;
+                let dx = (snap_x.round() as i32) - v.x;
+                let dy = (snap_y.round() as i32) - v.y;
+                if dx != 0 || dy != 0 {
+                    moves.push(doombuilder_core::edit::VertexMove { id, dx, dy });
+                }
+            }
+        }
+        if moves.is_empty() {
+            self.status = "Snap: nothing to snap.".into();
+            return;
+        }
+        let count = moves.len();
+        let mut cmd = Command::MoveVertices(moves);
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            cmd.apply(map_mut);
+            self.undo.push(cmd);
+            self.rebuild_geometry_indices();
+            self.cache2d.clear();
+            self.status = format!("Snapped {count} vertices to grid.");
+        }
+    }
+
+    /// Step back one click in the active drawing chain. If the last click
+    /// added a new vertex, that vertex and its incoming line are removed; if
+    /// it snapped to an existing vertex, only the line is removed.
+    /// No-op when no drawing is active.
+    fn drawing_remove_last(&mut self) {
+        use doombuilder_core::edit::LineEndpoint;
+        let Some(drawing) = self.drawing.as_mut() else {
+            return;
+        };
+        if drawing.chain.current_v.is_empty() && drawing.chain.current_l.is_empty() {
+            return;
+        }
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            // Inspect the most recent linedef-record to decide whether the
+            // last click also placed a new vertex.
+            let dropped_new_vertex = match drawing.chain.linedefs.last() {
+                Some((_, LineEndpoint::New(_), _)) => true,
+                Some((_, LineEndpoint::Existing(_), _)) => false,
+                // No line yet — only a single starting vertex exists.
+                None => true,
+            };
+            if let Some(lid) = drawing.chain.current_l.pop() {
+                map_mut.linedefs.remove(lid);
+                drawing.chain.linedefs.pop();
+            }
+            if dropped_new_vertex {
+                if let Some(vid) = drawing.chain.current_v.pop() {
+                    map_mut.vertices.remove(vid);
+                    drawing.chain.vertex_inserts.pop();
+                }
+            }
+            // Re-establish `last` from the new tail of the chain.
+            drawing.last = drawing.chain.linedefs.last().map(|(_, to_ep, line)| {
+                let to_vid = match to_ep {
+                    LineEndpoint::Existing(v) => *v,
+                    LineEndpoint::New(_) => line.v2,
+                };
+                (to_vid, to_ep.clone())
+            });
+            // If no lines remain but a starting vertex exists, anchor on it.
+            if drawing.last.is_none() {
+                if let Some(&vid) = drawing.chain.current_v.last() {
+                    let idx = drawing.chain.vertex_inserts.len() - 1;
+                    drawing.last = Some((vid, LineEndpoint::New(idx)));
+                }
+            }
+        }
+        self.cache2d.clear();
+        self.status = "Removed last vertex from drawing.".into();
     }
 
     /// Snap a drag delta to the current grid step when grid snapping is on.
@@ -2434,6 +2674,7 @@ impl App {
                     sprite_handles: self.sprite_handles.clone(),
                     sprite_dims: self.sprite_dims.clone(),
                     settings: self.settings.clone(),
+                    pan_override: self.space_held,
                 };
                 view.into_widget(Message::View2D)
             }
@@ -2592,6 +2833,7 @@ impl App {
             Some(ActivePicker::ThingKind(_)) => self.thing_kind_picker_panel(),
             Some(ActivePicker::SectorSpecial(_)) => self.sector_special_picker_panel(),
             Some(ActivePicker::Settings) => self.settings_panel(),
+            Some(ActivePicker::GoToCoords) => self.go_to_coords_panel(),
             None => Space::new().into(),
         };
 
@@ -2781,6 +3023,50 @@ impl App {
         column![title_row, search, count_text, list]
             .spacing(8)
             .padding(12)
+            .into()
+    }
+
+    fn go_to_coords_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Go To Coordinates").size(18),
+            Space::new().width(Length::Fill),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let x_input = row![
+            text("X: ").size(13).width(Length::Fixed(24.0)),
+            text_input("X", &self.go_to_coords_x)
+                .on_input(Message::GoToCoordsXChanged)
+                .on_submit(Message::GoToCoordsSubmit)
+                .padding(6)
+                .style(style::win32_text_input)
+                .width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        let y_input = row![
+            text("Y: ").size(13).width(Length::Fixed(24.0)),
+            text_input("Y", &self.go_to_coords_y)
+                .on_input(Message::GoToCoordsYChanged)
+                .on_submit(Message::GoToCoordsSubmit)
+                .padding(6)
+                .style(style::win32_text_input)
+                .width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let go = button("Go")
+            .style(style::win32_standard_button)
+            .on_press(Message::GoToCoordsSubmit);
+
+        column![title_row, x_input, y_input, row![Space::new().width(Length::Fill), go]]
+            .spacing(12)
+            .padding(16)
             .into()
     }
 
@@ -3704,11 +3990,19 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Merge Vertices"),
     MenuItem("Flip Linedefs"),
     SEP,
+    MenuItem("Snap Selection to Grid"),
+    SEP,
     MenuItem("Toggle Draw Mode"),
 ];
 const VIEW_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("2D Mode"),
     MenuItem("3D Mode"),
+    SEP,
+    MenuItem("Fit to Screen"),
+    MenuItem("Go To Coordinates\u{2026}"),
+    SEP,
+    MenuItem("Toggle Highlights"),
+    MenuItem("Place Visual Camera Here"),
     SEP,
     MenuItem("Settings\u{2026}"),
 ];
@@ -3739,6 +4033,7 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Split Linedefs" => Message::SplitLines,
         "Merge Vertices" => Message::MergeVertices,
         "Flip Linedefs" => Message::FlipLines,
+        "Snap Selection to Grid" => Message::SnapSelectionToGrid,
         "Toggle Draw Mode" => Message::ToggleDrawing,
         _ => Message::Noop,
     }
@@ -3748,6 +4043,10 @@ fn dispatch_view(item: MenuItem) -> Message {
     match item.0 {
         "2D Mode" => Message::Mode(Mode::View2D),
         "3D Mode" => Message::Mode(Mode::View3D),
+        "Fit to Screen" => Message::FitToScreen,
+        "Go To Coordinates\u{2026}" => Message::OpenGoToCoords,
+        "Toggle Highlights" => Message::ToggleHighlights,
+        "Place Visual Camera Here" => Message::PlaceVisualCamera,
         "Settings\u{2026}" => Message::OpenSettings,
         _ => Message::Noop,
     }

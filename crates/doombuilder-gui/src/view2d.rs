@@ -76,6 +76,8 @@ pub struct View2D {
     pub sprite_handles: Arc<HashMap<String, ImageHandle>>,
     pub sprite_dims: Arc<HashMap<String, (u32, u32)>>,
     pub settings: Settings,
+    /// When true, left-mouse drag pans instead of selecting (Space-hold pan).
+    pub pan_override: bool,
 }
 
 impl View2D {
@@ -149,12 +151,25 @@ impl<Message> Program<Message> for View2DProgram<Message> {
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(p) = cursor_pos {
-                    state.drag_start = Some(p);
-                    state.drag_active = false;
+                    if self.inner.pan_override {
+                        // Space-hold + left drag → camera pan (same path as
+                        // middle/right-mouse pan).
+                        state.panning = true;
+                        state.last_cursor = Some(p);
+                    } else {
+                        state.drag_start = Some(p);
+                        state.drag_active = false;
+                    }
                     return Some(canvas::Action::request_redraw().and_capture());
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                // End any space-hold pan that was started with the left button.
+                if state.panning && self.inner.pan_override {
+                    state.panning = false;
+                    state.last_cursor = None;
+                    return Some(canvas::Action::request_redraw().and_capture());
+                }
                 let Some(p) = cursor_pos else {
                     state.drag_start = None;
                     state.drag_active = false;
