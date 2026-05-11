@@ -52,16 +52,17 @@ fn vs(in: VIn) -> VOut {
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv);
-    // Editor lighting (not vanilla Doom playback): bump ambient + flatten the
-    // gamma curve so dim sectors are still legible while mapping. Real
-    // engines apply much harsher light tables, but here readability wins.
-    let lit = 0.55 + 0.45 * pow(in.light, 0.5);
+    // Editor lighting (not vanilla Doom playback): high ambient floor +
+    // flat gamma so even light=0 sectors are clearly readable. Engines
+    // apply far harsher light tables; here legibility wins.
+    let lit = 0.72 + 0.28 * pow(in.light, 0.4);
     return vec4<f32>(c.rgb * in.tint * lit, 1.0);
 }
 "#;
 
 const MISSING_TEXTURE_KEY: &str = "__missing__";
 const SOLID_TEXTURE_KEY: &str = "__solid__";
+const SKY_TEXTURE_KEY: &str = "__sky__";
 const SKY_FLAT_NAME: &str = "F_SKY1";
 
 #[repr(C)]
@@ -110,10 +111,21 @@ pub fn build_geometry(
         let ceil_y = sector.ceiling_height as f32;
         let floor_name = sector.floor_texture.as_str().to_ascii_uppercase();
         let ceil_name = sector.ceiling_texture.as_str().to_ascii_uppercase();
-        let floor_tex = key(&floor_name);
-        let ceil_tex = key(&ceil_name);
-        let skip_floor = floor_name == SKY_FLAT_NAME;
-        let skip_ceiling = ceil_name == SKY_FLAT_NAME;
+        // F_SKY1 surfaces render via a dedicated sky-blue bucket at full
+        // brightness instead of being dropped (which left a "hole in the
+        // world" you could see the chrome through).
+        let floor_tex = if floor_name == SKY_FLAT_NAME {
+            SKY_TEXTURE_KEY.to_string()
+        } else {
+            key(&floor_name)
+        };
+        let ceil_tex = if ceil_name == SKY_FLAT_NAME {
+            SKY_TEXTURE_KEY.to_string()
+        } else {
+            key(&ceil_name)
+        };
+        let floor_light = if floor_name == SKY_FLAT_NAME { 1.0 } else { light };
+        let ceil_light = if ceil_name == SKY_FLAT_NAME { 1.0 } else { light };
 
         let mut i = 0;
         while i + 2 < mesh.indices.len() {
@@ -121,26 +133,22 @@ pub fn build_geometry(
             let b = mesh.positions[mesh.indices[i + 1] as usize];
             let c = mesh.positions[mesh.indices[i + 2] as usize];
 
-            if !skip_floor {
-                push_floor_tri(
-                    by_texture.entry(floor_tex.clone()).or_default(),
-                    a,
-                    c,
-                    b,
-                    floor_y,
-                    light,
-                );
-            }
-            if !skip_ceiling {
-                push_floor_tri(
-                    by_texture.entry(ceil_tex.clone()).or_default(),
-                    a,
-                    b,
-                    c,
-                    ceil_y,
-                    light,
-                );
-            }
+            push_floor_tri(
+                by_texture.entry(floor_tex.clone()).or_default(),
+                a,
+                c,
+                b,
+                floor_y,
+                floor_light,
+            );
+            push_floor_tri(
+                by_texture.entry(ceil_tex.clone()).or_default(),
+                a,
+                b,
+                c,
+                ceil_y,
+                ceil_light,
+            );
             i += 3;
         }
     }
@@ -574,6 +582,10 @@ impl Primitive for Map3DPrimitive {
             }
             let bg = if batch.texture_name == SOLID_TEXTURE_KEY {
                 pipeline.upload_solid_white(device, queue)
+            } else if batch.texture_name == SKY_TEXTURE_KEY {
+                // Flat sky-blue stand-in for F_SKY1 surfaces. Not a real
+                // panorama, but reads as "sky" instead of a checker hole.
+                pipeline.upload_solid_color(device, queue, [120, 158, 200, 255])
             } else {
                 let img = if batch.texture_name == MISSING_TEXTURE_KEY {
                     None
@@ -600,12 +612,13 @@ impl Primitive for Map3DPrimitive {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.05,
-                        g: 0.05,
-                        b: 0.07,
-                        a: 1.0,
-                    }),
+                    // CRITICAL: LoadOp::Clear here clears the *entire* color
+                    // attachment regardless of scissor — that wipes out any
+                    // canvas widget rendered before us in the frame. Use
+                    // LoadOp::Load so the scissor-confined draw calls render
+                    // on top of the underlying widget chrome. The parent
+                    // container's background fills the panel area first.
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -621,6 +634,19 @@ impl Primitive for Map3DPrimitive {
             occlusion_query_set: None,
         });
 
+        // Critical for widgets that aren't at (0, 0) full-window: without
+        // an explicit viewport, NDC (-1..1) maps to the entire render
+        // target, so geometry projects to the centre of the full window and
+        // the scissor clips it all away when the widget is offset (e.g. in
+        // a side panel). The viewport must match the widget's pixel rect.
+        pass.set_viewport(
+            clip_bounds.x as f32,
+            clip_bounds.y as f32,
+            clip_bounds.width.max(1) as f32,
+            clip_bounds.height.max(1) as f32,
+            0.0,
+            1.0,
+        );
         pass.set_scissor_rect(
             clip_bounds.x,
             clip_bounds.y,
@@ -834,6 +860,49 @@ impl PipelineTrait for Map3DPipeline {
 }
 
 impl Map3DPipeline {
+    fn upload_solid_color(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rgba: [u8; 4],
+    ) -> wgpu::BindGroup {
+        let pixels = rgba.to_vec();
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("solid color"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &pixels,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("solid color bg"),
+            layout: &self.texture_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        })
+    }
+
     fn upload_solid_white(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::BindGroup {
         let pixels: Vec<u8> = vec![255, 255, 255, 255];
         let texture = device.create_texture_with_data(

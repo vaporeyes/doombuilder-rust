@@ -219,6 +219,32 @@ pub fn win32_modal_panel(_theme: &Theme) -> container::Style {
     }
 }
 
+/// Backdrop for 3D viewports. Picks a desaturated, slightly-bluer surface
+/// than `surface` so brown walls and dark floors stay readable against it
+/// and the viewport reads as a distinct area on the chrome.
+pub fn viewport_3d_bg(_theme: &Theme) -> container::Style {
+    let p = palette::active();
+    // Blend the palette's surface 60% toward steel blue.
+    let steel = Color {
+        r: 0.32,
+        g: 0.38,
+        b: 0.45,
+        a: 1.0,
+    };
+    let bg = blend(p.surface, steel, 0.65);
+    container::Style {
+        text_color: Some(p.text),
+        background: Some(Background::Color(bg)),
+        border: Border {
+            color: p.border,
+            width: BORDER_HAIRLINE,
+            radius: 0.0.into(),
+        },
+        shadow: Shadow::default(),
+        snap: true,
+    }
+}
+
 /// Scrim behind a modal: 60% black so the canvas dims clearly.
 pub fn win32_modal_backdrop(_theme: &Theme) -> container::Style {
     container::Style {

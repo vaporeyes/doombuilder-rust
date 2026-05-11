@@ -264,6 +264,9 @@ pub struct Settings {
     /// Render the 3D view ignoring sector light (light = 255 everywhere).
     #[serde(default)]
     pub full_brightness: bool,
+    /// Show the 3D preview in a dedicated right-side panel in 2D mode.
+    #[serde(default = "default_true")]
+    pub show_3d_overlay: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -325,6 +328,7 @@ impl Default for Settings {
             theme: ThemeKind::default(),
             view_mode: View2DMode::default(),
             full_brightness: false,
+            show_3d_overlay: true,
         }
     }
 }
@@ -437,6 +441,9 @@ enum DragMode {
     MoveThings {
         originals: Vec<(ThingId, i32, i32)>,
     },
+    /// Drag-to-draw for shape tools (Rectangle / Ellipse / Grid). The
+    /// drag's start point is the shape's first corner; drag end commits.
+    ShapeDraw { origin: Vec2 },
 }
 
 impl Default for App {
@@ -529,6 +536,12 @@ pub enum Message {
     CancelDrawing,
     CycleGridStep(i32),
     PanCamera { dx_units: i32, dy_units: i32, fast: bool },
+    /// 3D-mode-only: change camera height. Positive = up.
+    VerticalCamera { units: i32, fast: bool },
+    /// Shift+WASD dispatch. Routes to 3D movement when in `Mode::View3D`,
+    /// otherwise falls back to existing 2D-mode shortcuts so nothing
+    /// regresses (Shift+A = AutoAlignY, Shift+D = MakeDoor).
+    FlyMove(FlyDirection),
     FitToScreen,
     OpenGoToCoords,
     GoToCoordsXChanged(String),
@@ -558,8 +571,10 @@ pub enum Message {
     OpenMapStats,
     SetView2DMode(View2DMode),
     ToggleFullBrightness,
+    Toggle3DOverlay,
     FlipSidedefs,
     AlignLinedefs,
+    StitchLines,
     AlignThingsToNearestLine,
     PointThingsToCursor,
     OpenMapAnalysis,
@@ -644,6 +659,14 @@ enum SelectionTransform {
     Rotate90,
     FlipH,
     FlipV,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FlyDirection {
+    Forward,
+    Back,
+    StrafeLeft,
+    StrafeRight,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1587,6 +1610,16 @@ impl App {
                 };
                 Task::none()
             }
+            Message::Toggle3DOverlay => {
+                self.settings.show_3d_overlay = !self.settings.show_3d_overlay;
+                self.persist_settings();
+                self.status = if self.settings.show_3d_overlay {
+                    "3D preview on".into()
+                } else {
+                    "3D preview off".into()
+                };
+                Task::none()
+            }
             Message::FlipSidedefs => {
                 self.do_flip_sidedefs();
                 Task::none()
@@ -1685,6 +1718,10 @@ impl App {
                 self.do_align_linedefs();
                 Task::none()
             }
+            Message::StitchLines => {
+                self.do_stitch_lines();
+                Task::none()
+            }
             Message::AutoAlignX => {
                 self.do_auto_align(doombuilder_core::edit::AutoAlignAxis::X);
                 Task::none()
@@ -1712,6 +1749,37 @@ impl App {
                     // Fall back to grid step cycling so the key isn't dead in
                     // other modes.
                     self.cycle_grid_step(if shift { -1 } else { 1 });
+                }
+                Task::none()
+            }
+            Message::FlyMove(dir) => {
+                if self.mode == Mode::View3D {
+                    let step = 96.0;
+                    let yaw = self.camera3d.yaw;
+                    let fwd = Vec2::new(yaw.cos(), yaw.sin());
+                    let right = Vec2::new(fwd.y, -fwd.x);
+                    let delta = match dir {
+                        FlyDirection::Forward => fwd * step,
+                        FlyDirection::Back => fwd * -step,
+                        FlyDirection::StrafeLeft => right * -step,
+                        FlyDirection::StrafeRight => right * step,
+                    };
+                    self.camera3d.target.x += delta.x;
+                    self.camera3d.target.y += delta.y;
+                } else {
+                    // Preserve existing 2D-mode Shift+letter bindings.
+                    match dir {
+                        FlyDirection::StrafeLeft => return self.handle_message(Message::AutoAlignY),
+                        FlyDirection::StrafeRight => return self.handle_message(Message::MakeDoor),
+                        _ => {}
+                    }
+                }
+                Task::none()
+            }
+            Message::VerticalCamera { units, fast } => {
+                if self.mode == Mode::View3D {
+                    let step = 32.0 * if fast { 4.0 } else { 1.0 };
+                    self.camera3d.target.z += units as f32 * step;
                 }
                 Task::none()
             }
@@ -1907,6 +1975,20 @@ impl App {
                 }
                 keyboard::Key::Character("d") if modifiers.shift() => Message::MakeDoor,
                 keyboard::Key::Character("d") if !modifiers.command() => Message::ToggleDrawing,
+                // Shift+WASD fly-cam (3D mode); falls back to existing 2D
+                // bindings inside the handler when not in 3D.
+                keyboard::Key::Character("w") if modifiers.shift() && !modifiers.command() => {
+                    Message::FlyMove(FlyDirection::Forward)
+                }
+                keyboard::Key::Character("a") if modifiers.shift() && !modifiers.command() => {
+                    Message::FlyMove(FlyDirection::StrafeLeft)
+                }
+                keyboard::Key::Character("s") if modifiers.shift() && !modifiers.command() => {
+                    Message::FlyMove(FlyDirection::Back)
+                }
+                keyboard::Key::Character("d") if modifiers.shift() && !modifiers.command() => {
+                    Message::FlyMove(FlyDirection::StrafeRight)
+                }
                 keyboard::Key::Character("c") if modifiers.command() && modifiers.shift() => {
                     Message::PasteProperties
                 }
@@ -1962,6 +2044,14 @@ impl App {
                 }
                 keyboard::Key::Named(keyboard::key::Named::F4) => Message::OpenMapAnalysis,
                 keyboard::Key::Named(keyboard::key::Named::F11) => Message::OpenMapAnalysis,
+                keyboard::Key::Named(keyboard::key::Named::PageUp) => Message::VerticalCamera {
+                    units: 1,
+                    fast: modifiers.shift(),
+                },
+                keyboard::Key::Named(keyboard::key::Named::PageDown) => Message::VerticalCamera {
+                    units: -1,
+                    fast: modifiers.shift(),
+                },
                 // Number keys 0..9 are reassigned to selection groups:
                 //   plain N   → recall group N
                 //   Cmd+N     → store current selection into group N
@@ -2618,6 +2708,13 @@ impl App {
                     }
                 }
             }
+            Some(DragMode::ShapeDraw { .. }) => {
+                // Live preview: keep cursor_world in sync with the drag's
+                // current position so build_shape_preview() draws against
+                // the right anchor + cursor pair.
+                self.cursor_world = Some(self.snap_world(current));
+                self.cache2d.clear();
+            }
             None => {}
         }
     }
@@ -2702,11 +2799,58 @@ impl App {
                 }
                 self.rebuild_geometry_indices();
             }
+            Some(DragMode::ShapeDraw { origin }) => {
+                // Commit the shape: shape_tool_click expects an origin
+                // recorded on the tool already (we did that in begin_drag)
+                // and treats the second click as the closing corner.
+                let end_snapped = self.snap_world(end);
+                let _ = origin;
+                self.shape_tool_click(end_snapped);
+            }
             None => {}
         }
     }
 
-    fn begin_drag(&mut self, hit: Option<HighlightKind>, _start: Vec2) -> DragMode {
+    /// Snap a world position to the active grid step when grid snapping is on.
+    fn snap_world(&self, world: Vec2) -> Vec2 {
+        if self.settings.snap_to_grid {
+            let step = self.effective_grid_step().max(1.0);
+            Vec2::new(
+                (world.x / step).round() * step,
+                (world.y / step).round() * step,
+            )
+        } else {
+            world
+        }
+    }
+
+    fn begin_drag(&mut self, hit: Option<HighlightKind>, start: Vec2) -> DragMode {
+        // Drag-to-draw: if a shape tool is active we always interpret a
+        // drag as "draw the shape", ignoring whatever was hit. The drag
+        // start becomes the shape's first corner.
+        if let Some(d) = self.drawing.as_ref() {
+            if matches!(
+                d.tool,
+                DrawTool::Rectangle { .. }
+                    | DrawTool::Ellipse { .. }
+                    | DrawTool::Grid { .. }
+            ) {
+                let snapped = self.snap_world(start);
+                // Seed the tool's origin so the live preview tracks the
+                // drag start even before the first DragMoved event arrives.
+                if let Some(d_mut) = self.drawing.as_mut() {
+                    match &mut d_mut.tool {
+                        DrawTool::Rectangle { origin, .. }
+                        | DrawTool::Ellipse { origin, .. }
+                        | DrawTool::Grid { origin, .. } => {
+                            *origin = Some(snapped);
+                        }
+                        _ => {}
+                    }
+                }
+                return DragMode::ShapeDraw { origin: snapped };
+            }
+        }
         match hit {
             Some(h @ HighlightKind::Thing(_)) => {
                 // Promote to selection (replace or shift-add) before dragging.
@@ -3506,6 +3650,32 @@ impl App {
         }
     }
 
+    fn do_stitch_lines(&mut self) {
+        let line_ids: Vec<LinedefId> = self.selected_linedefs();
+        if line_ids.len() < 2 {
+            self.status = "Stitch: select at least two overlapping linedefs.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else { return };
+        let merges = doombuilder_core::edit::compute_stitch_lines(map, &line_ids);
+        if merges.is_empty() {
+            self.status = "Stitch: no overlapping pairs (opposite direction, shared vertices) found.".into();
+            return;
+        }
+        let count = merges.len();
+        let mut cmd = Command::StitchLines(merges);
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            cmd.apply(map_mut);
+            self.undo.push(cmd);
+            // Selection now contains some deleted linedef ids; clear to be safe.
+            self.selection = Arc::new(HashSet::new());
+            self.rebuild_geometry_indices();
+            self.cache2d.clear();
+            self.status = format!("Stitched {count} overlapping linedef pair(s).");
+        }
+    }
+
     fn do_align_linedefs(&mut self) {
         let line_ids: Vec<LinedefId> = self.selected_linedefs();
         if line_ids.is_empty() {
@@ -4002,7 +4172,33 @@ impl App {
         let count_l = new_lines.len();
         let count_v = chain.current_v.len();
         self.undo.push(Command::CreateLinedefChain(Box::new(chain)));
-        self.drawing = None;
+        // Reset the active shape tool's origin/points so the next drag
+        // starts a fresh shape — keeps the user in "Rectangle mode" (or
+        // whichever) until they press Esc, matching DCC conventions.
+        // Free/Curve tools fall back to nuking the drawing state so they
+        // re-enter their own discrete-click flows.
+        let keep_tool = match self.drawing.as_ref().map(|d| &d.tool) {
+            Some(DrawTool::Rectangle { .. })
+            | Some(DrawTool::Ellipse { .. })
+            | Some(DrawTool::Grid { .. }) => true,
+            _ => false,
+        };
+        if keep_tool {
+            if let Some(d) = self.drawing.as_mut() {
+                d.chain = LinedefChain::default();
+                d.last = None;
+                match &mut d.tool {
+                    DrawTool::Rectangle { origin, .. }
+                    | DrawTool::Ellipse { origin, .. }
+                    | DrawTool::Grid { origin, .. } => {
+                        *origin = None;
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            self.drawing = None;
+        }
         self.rebuild_geometry_indices();
         // Auto-select for fluent Make-Sector workflow.
         let mut sel = HashSet::new();
@@ -4301,7 +4497,22 @@ impl App {
         let menu = self.menu_bar();
         let toolbar = self.toolbar();
         let viewport = self.viewport_widget();
-        let mut layout = column![menu, toolbar, viewport].spacing(0);
+        // When the 3D preview panel is enabled, give it a fixed slot in the
+        // top-right of the viewport row. The preview pad fills the rest of
+        // that right column with transparent space so the viewport keeps the
+        // remaining width and full height beside it.
+        let middle: Element<'_, Message> = if self.settings.show_3d_overlay
+            && self.map.is_some()
+            && self.mode == Mode::View2D
+        {
+            row![viewport, self.view3d_side_panel()]
+                .spacing(0)
+                .height(Length::Fill)
+                .into()
+        } else {
+            viewport
+        };
+        let mut layout = column![menu, toolbar, middle].spacing(0);
         if let Some(panel) = self.bottom_panel() {
             layout = layout.push(panel);
         }
@@ -5838,6 +6049,54 @@ impl App {
         .into()
     }
 
+    /// Dedicated right-side panel hosting the 3D preview. Top-right of the
+    /// viewport row, fixed width, fixed-height preview at the top, blank
+    /// space below. Shares geometry + camera state with full 3D mode.
+    fn view3d_side_panel(&self) -> Element<'_, Message> {
+        const PANEL_W: f32 = 300.0;
+        const PREVIEW_H: f32 = 240.0;
+        let textures = match &self.textures {
+            Some(t) => t.clone(),
+            None => Arc::new(TextureSet::empty(Vec::new())),
+        };
+        let view = View3D {
+            geometry: self.geometry3d.clone(),
+            textures,
+            camera: self.camera3d,
+        };
+        let inner = view.into_widget(Message::View3D);
+        let header = container(text("3D Preview").size(11))
+            .padding([2, 6])
+            .style(style::win32_status_bar)
+            .width(Length::Fill);
+        // Wrap the shader widget in a contrasting backdrop so the brown
+        // walls/floors stand out and the viewport reads as a distinct area.
+        let viewport_3d = container(inner)
+            .width(Length::Fill)
+            .height(Length::Fixed(PREVIEW_H - 18.0))
+            .style(style::viewport_3d_bg);
+        let preview_card = container(
+            column![header, viewport_3d]
+                .width(Length::Fill)
+                .height(Length::Fixed(PREVIEW_H))
+        )
+        .style(style::win32_modal_panel)
+        .padding(0);
+        // Pin to the top of the right column with a blank space filling the
+        // remaining vertical area below.
+        container(
+            column![preview_card, Space::new().height(Length::Fill)]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .spacing(0),
+        )
+        .width(Length::Fixed(PANEL_W))
+        .height(Length::Fill)
+        .padding(8)
+        .style(style::win32_side_panel)
+        .into()
+    }
+
     fn view3d_widget(&self) -> Element<'_, Message> {
         let textures = match &self.textures {
             Some(t) => t.clone(),
@@ -5848,7 +6107,11 @@ impl App {
             textures,
             camera: self.camera3d,
         };
-        view.into_widget(Message::View3D)
+        container(view.into_widget(Message::View3D))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(style::viewport_3d_bg)
+            .into()
     }
 }
 
@@ -6268,6 +6531,7 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Flip Linedefs"),
     MenuItem("Flip Sidedefs"),
     MenuItem("Align Linedefs"),
+    MenuItem("Stitch Overlapping Lines"),
     SEP,
     MenuItem("Auto-align Textures (X)"),
     MenuItem("Auto-align Textures (Y)"),
@@ -6306,6 +6570,7 @@ const VIEW_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("View: Wireframe"),
     SEP,
     MenuItem("Toggle Full Brightness"),
+    MenuItem("Toggle 3D Preview"),
     MenuItem("Toggle Highlights"),
     MenuItem("Place Visual Camera Here"),
     SEP,
@@ -6357,6 +6622,7 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Flip Linedefs" => Message::FlipLines,
         "Flip Sidedefs" => Message::FlipSidedefs,
         "Align Linedefs" => Message::AlignLinedefs,
+        "Stitch Overlapping Lines" => Message::StitchLines,
         "Auto-align Textures (X)" => Message::AutoAlignX,
         "Auto-align Textures (Y)" => Message::AutoAlignY,
         "Auto-align Textures (X+Y)" => Message::AutoAlignBoth,
@@ -6390,6 +6656,7 @@ fn dispatch_view(item: MenuItem) -> Message {
         "View: Brightness Levels" => Message::SetView2DMode(View2DMode::Brightness),
         "View: Wireframe" => Message::SetView2DMode(View2DMode::Wireframe),
         "Toggle Full Brightness" => Message::ToggleFullBrightness,
+        "Toggle 3D Preview" => Message::Toggle3DOverlay,
         "Toggle Highlights" => Message::ToggleHighlights,
         "Place Visual Camera Here" => Message::PlaceVisualCamera,
         "Settings\u{2026}" => Message::OpenSettings,

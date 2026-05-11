@@ -114,6 +114,11 @@ pub enum Command {
     /// Insert a previously-captured clipboard of map elements at a chosen
     /// offset. Undo removes them by their freshly-assigned ids.
     PasteClipboard(Box<PasteClipboardState>),
+    /// Stitch pairs of overlapping (coincident-endpoint) linedefs. For each
+    /// pair walked in opposite directions, the absorbed line's right sidedef
+    /// is reassigned as the keeper's left sidedef and the absorbed line is
+    /// removed, producing a single two-sided wall.
+    StitchLines(Vec<StitchMerge>),
     /// Change one of a sector's integer fields.
     SetSectorIntField {
         id: SectorId,
@@ -141,6 +146,24 @@ pub enum Command {
     /// Merge sectors into a survivor. Sidedefs are re-pointed; merged sectors
     /// (and optionally their shared linedefs) are removed.
     JoinSectors(Box<JoinSectorsState>),
+}
+
+#[derive(Debug, Clone)]
+pub struct StitchMerge {
+    pub keeper: LinedefId,
+    /// keeper.left before merging (typically `None`).
+    pub keeper_old_left: Option<SidedefId>,
+    /// keeper.left after merging — the absorbed line's right sidedef.
+    pub keeper_new_left: Option<SidedefId>,
+    /// Snapshot of the absorbed linedef for revert insertion.
+    pub absorbed_line_id: LinedefId,
+    pub absorbed_line_snap: crate::map::MapLinedef,
+    /// If the absorbed line had a left sidedef, snapshot it (it gets
+    /// removed during apply; revert re-inserts).
+    pub absorbed_left_snap: Option<(SidedefId, crate::map::MapSidedef)>,
+    /// Post-apply ids reused after a revert/re-apply round-trip.
+    pub current_absorbed_line: Option<LinedefId>,
+    pub current_absorbed_left: Option<SidedefId>,
 }
 
 #[derive(Debug, Clone)]
@@ -812,6 +835,77 @@ pub fn compute_join_sectors(
     })
 }
 
+/// Find pairs of overlapping linedefs within `line_ids` and produce stitch
+/// merges. Two linedefs "overlap" when they share their endpoint vertex
+/// pair (regardless of v1/v2 order). For each opposite-direction pair, the
+/// second is merged into the first by reassigning its right sidedef as the
+/// first's left, then removing the second line.
+///
+/// Same-direction overlaps and pairs where neither line has a right sidedef
+/// are skipped — there's nothing useful to stitch.
+pub fn compute_stitch_lines(map: &Map, line_ids: &[LinedefId]) -> Vec<StitchMerge> {
+    if line_ids.len() < 2 {
+        return Vec::new();
+    }
+    let mut merges: Vec<StitchMerge> = Vec::new();
+    let mut consumed: HashSet<LinedefId> = HashSet::new();
+    // Group by unordered vertex pair.
+    let mut groups: HashMap<(VertexId, VertexId), Vec<LinedefId>> = HashMap::new();
+    for lid in line_ids {
+        let Some(l) = map.linedefs.get(*lid) else { continue };
+        let key = if l.v1 <= l.v2 { (l.v1, l.v2) } else { (l.v2, l.v1) };
+        groups.entry(key).or_default().push(*lid);
+    }
+    for (_, lids) in groups.into_iter().filter(|(_, v)| v.len() >= 2) {
+        // Sort by raw id for deterministic ordering between runs.
+        let mut lids = lids;
+        lids.sort();
+        let keeper = lids[0];
+        if consumed.contains(&keeper) {
+            continue;
+        }
+        let Some(keeper_line) = map.linedefs.get(keeper) else { continue };
+        let keeper_dir = (keeper_line.v1, keeper_line.v2);
+        for &absorbed in &lids[1..] {
+            if consumed.contains(&absorbed) {
+                continue;
+            }
+            let Some(abs_line) = map.linedefs.get(absorbed) else { continue };
+            // Opposite direction = absorbed.v1 == keeper.v2 && absorbed.v2 == keeper.v1.
+            let opposite = abs_line.v1 == keeper_dir.1 && abs_line.v2 == keeper_dir.0;
+            if !opposite {
+                // Same direction; skip — no useful stitch.
+                continue;
+            }
+            if abs_line.right.is_none() {
+                continue;
+            }
+            // Keeper must currently lack a left side (otherwise we'd
+            // overwrite an existing sidedef ref).
+            if keeper_line.left.is_some() {
+                continue;
+            }
+            let absorbed_left_snap = abs_line.left.and_then(|sid| {
+                map.sidedefs.get(sid).map(|s| (sid, s.clone()))
+            });
+            merges.push(StitchMerge {
+                keeper,
+                keeper_old_left: keeper_line.left,
+                keeper_new_left: abs_line.right,
+                absorbed_line_id: absorbed,
+                absorbed_line_snap: abs_line.clone(),
+                absorbed_left_snap,
+                current_absorbed_line: None,
+                current_absorbed_left: None,
+            });
+            consumed.insert(keeper);
+            consumed.insert(absorbed);
+            break;
+        }
+    }
+    merges
+}
+
 /// Pack a selection (any combination of vertex / linedef / sector / thing
 /// ids) into a portable `ClipboardData`. Implicitly pulls in dependencies:
 /// selected linedefs bring their endpoints; selected sectors bring their
@@ -1373,6 +1467,35 @@ impl Command {
                     }
                 }
             }
+            Command::StitchLines(merges) => {
+                for m in merges.iter_mut() {
+                    // 1. Detach absorbed.right so deletion doesn't cascade
+                    //    the sidedef we're about to reassign.
+                    let absorbed_right = if let Some(line) = map.linedefs.get_mut(m.absorbed_line_id)
+                    {
+                        let r = line.right;
+                        line.right = None;
+                        r
+                    } else {
+                        None
+                    };
+                    // 2. Reassign that sidedef onto keeper.left.
+                    if let Some(line) = map.linedefs.get_mut(m.keeper) {
+                        m.keeper_old_left = line.left;
+                        line.left = absorbed_right;
+                        m.keeper_new_left = absorbed_right;
+                    }
+                    // 3. Remove the absorbed line's leftover left sidedef
+                    //    (if any) and the line itself.
+                    if let Some(left_id) = m.absorbed_left_snap.as_ref().map(|(id, _)| *id) {
+                        map.sidedefs.remove(left_id);
+                    }
+                    map.linedefs.remove(m.absorbed_line_id);
+                    m.current_absorbed_line = None;
+                    m.current_absorbed_left = None;
+                }
+                map.rebuild_sidedef_index();
+            }
             Command::PasteClipboard(state) => {
                 state.current_v.clear();
                 state.current_sec.clear();
@@ -1721,6 +1844,33 @@ impl Command {
                         }
                     }
                 }
+            }
+            Command::StitchLines(merges) => {
+                // Walk in reverse so that later merges undo before earlier
+                // ones in case they shared sidedefs/lines.
+                for m in merges.iter_mut().rev() {
+                    // 1. Re-insert absorbed.left sidedef if it existed.
+                    let new_left_id = match &m.absorbed_left_snap {
+                        Some((_orig_id, snap)) => Some(map.sidedefs.insert(snap.clone())),
+                        None => None,
+                    };
+                    m.current_absorbed_left = new_left_id;
+                    // 2. Detach the reassigned sidedef from keeper.left and
+                    //    re-attach it to the absorbed line's right slot.
+                    let stolen_right = m.keeper_new_left;
+                    if let Some(line) = map.linedefs.get_mut(m.keeper) {
+                        line.left = m.keeper_old_left;
+                    }
+                    // 3. Re-insert the absorbed linedef. Remap its left/right
+                    //    fields: right gets the stolen sidedef back, left
+                    //    gets the freshly re-inserted left sidedef.
+                    let mut snap = m.absorbed_line_snap.clone();
+                    snap.right = stolen_right;
+                    snap.left = new_left_id;
+                    let new_line_id = map.linedefs.insert(snap);
+                    m.current_absorbed_line = Some(new_line_id);
+                }
+                map.rebuild_sidedef_index();
             }
             Command::PasteClipboard(state) => {
                 // Remove in reverse order: things, linedefs, sidedefs,
