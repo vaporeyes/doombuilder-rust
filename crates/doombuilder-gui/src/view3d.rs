@@ -52,7 +52,10 @@ fn vs(in: VIn) -> VOut {
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv);
-    let lit = 0.35 + 0.65 * pow(in.light, 0.6);
+    // Editor lighting (not vanilla Doom playback): bump ambient + flatten the
+    // gamma curve so dim sectors are still legible while mapping. Real
+    // engines apply much harsher light tables, but here readability wins.
+    let lit = 0.55 + 0.45 * pow(in.light, 0.5);
     return vec4<f32>(c.rgb * in.tint * lit, 1.0);
 }
 "#;
@@ -90,6 +93,7 @@ pub fn build_geometry(
     textures: &TextureSet,
     spatial: Option<&SpatialIndex>,
     config: &GameConfig,
+    full_brightness: bool,
 ) -> View3DGeometry {
     let mut by_texture: HashMap<String, Vec<Vertex3D>> = HashMap::new();
 
@@ -97,7 +101,11 @@ pub fn build_geometry(
         let Some(sector) = map.sectors.get(*sid) else {
             continue;
         };
-        let light = (sector.light as f32 / 255.0).clamp(0.0, 1.0);
+        let light = if full_brightness {
+            1.0
+        } else {
+            (sector.light as f32 / 255.0).clamp(0.0, 1.0)
+        };
         let floor_y = sector.floor_height as f32;
         let ceil_y = sector.ceiling_height as f32;
         let floor_name = sector.floor_texture.as_str().to_ascii_uppercase();
@@ -141,7 +149,11 @@ pub fn build_geometry(
         let Some(sec) = map.sectors.get(wall.facing_sector) else {
             continue;
         };
-        let light = (sec.light as f32 / 255.0).clamp(0.0, 1.0);
+        let light = if full_brightness {
+            1.0
+        } else {
+            (sec.light as f32 / 255.0).clamp(0.0, 1.0)
+        };
         let tex_name = wall_texture_name(map, wall);
         let tex_key = key(tex_name.as_str());
         let (tex_w, tex_h) = textures

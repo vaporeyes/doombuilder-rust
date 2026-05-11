@@ -33,7 +33,7 @@ use doombuilder_core::textures::TextureSet;
 use doombuilder_core::wad::WadKind;
 use doombuilder_core::{load_auto, MapFormat, Wad};
 use doombuilder_render::{
-    build_walls, extract_sector_loops, rasterise_sector_fill, triangulate_sector, FloorMesh,
+    build_walls, extract_sector_loops, triangulate_sector, FloorMesh,
     SpatialIndex, Wall,
 };
 use glam::Vec2;
@@ -55,6 +55,9 @@ pub fn run() -> iced::Result {
         .title(App::window_title)
         .subscription(App::subscription)
         .theme(App::theme)
+        // Sized so the full toolbar (icons + menu picker + map picker)
+        // fits without horizontal scrolling on standard DPI displays.
+        .window_size(iced::Size::new(1081.0, 812.0))
         .run()
 }
 
@@ -147,6 +150,37 @@ pub struct DrawingState {
     pub chain: LinedefChain,
     /// Current chain head (live VertexId in the map + how we'd serialise it).
     pub last: Option<(VertexId, LineEndpoint)>,
+    /// Active drawing tool. `Free` is the classic click-to-place-vertex flow;
+    /// other variants are two- or three-click shape builders that emit a
+    /// whole geometry on the final click.
+    pub tool: DrawTool,
+}
+
+#[derive(Debug, Clone)]
+pub enum DrawTool {
+    Free,
+    Rectangle { origin: Option<Vec2>, bevel: u32 },
+    Ellipse { origin: Option<Vec2>, subdivisions: u32 },
+    Curve { points: Vec<Vec2>, subdivisions: u32 },
+    Grid { origin: Option<Vec2>, cols: u32, rows: u32 },
+}
+
+impl Default for DrawTool {
+    fn default() -> Self {
+        DrawTool::Free
+    }
+}
+
+impl DrawTool {
+    fn label(&self) -> &'static str {
+        match self {
+            DrawTool::Free => "Free draw",
+            DrawTool::Rectangle { .. } => "Rectangle draw",
+            DrawTool::Ellipse { .. } => "Ellipse draw",
+            DrawTool::Curve { .. } => "Curve draw",
+            DrawTool::Grid { .. } => "Grid draw",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +213,7 @@ pub enum ActivePicker {
     SectorSpecial(SectorId),
     Settings,
     GoToCoords,
+    MapStats,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -211,6 +246,38 @@ pub struct Settings {
     /// Active visual theme. Picked from a built-in palette set.
     #[serde(default)]
     pub theme: ThemeKind,
+    /// 2D viewport fill mode (Floor textures / Ceiling textures / Brightness
+    /// levels / Wireframe).
+    #[serde(default)]
+    pub view_mode: View2DMode,
+    /// Render the 3D view ignoring sector light (light = 255 everywhere).
+    #[serde(default)]
+    pub full_brightness: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum View2DMode {
+    Floor,
+    Ceiling,
+    Brightness,
+    Wireframe,
+}
+
+impl Default for View2DMode {
+    fn default() -> Self {
+        View2DMode::Floor
+    }
+}
+
+impl View2DMode {
+    fn label(self) -> &'static str {
+        match self {
+            View2DMode::Floor => "Floor textures",
+            View2DMode::Ceiling => "Ceiling textures",
+            View2DMode::Brightness => "Brightness levels",
+            View2DMode::Wireframe => "Wireframe",
+        }
+    }
 }
 
 /// Fixed grid sizes a user can cycle through (None = auto / zoom-derived).
@@ -245,6 +312,8 @@ impl Default for Settings {
             engine_path: None,
             iwad_path: None,
             theme: ThemeKind::default(),
+            view_mode: View2DMode::default(),
+            full_brightness: false,
         }
     }
 }
@@ -465,6 +534,21 @@ pub enum Message {
     JoinSectors,
     MergeSectors,
     MakeDoor,
+    StartRectangleDraw,
+    StartEllipseDraw,
+    StartCurveDraw,
+    StartGridDraw,
+    CurveSelectedLines,
+    /// +/- while in a shape-draw tool adjusts subdivisions / bevel / cols.
+    AdjustDrawParam(i32),
+    OpenMapStats,
+    SetView2DMode(View2DMode),
+    ToggleFullBrightness,
+    FlipSidedefs,
+    AlignLinedefs,
+    AutoAlignX,
+    AutoAlignY,
+    AutoAlignBoth,
     /// Multipurpose G hotkey. The handler routes to gradient/grid-cycle based
     /// on edit mode and selection.
     GHotkey { shift: bool, ctrl: bool },
@@ -1385,6 +1469,83 @@ impl App {
                 self.do_make_door();
                 Task::none()
             }
+            Message::StartRectangleDraw => {
+                self.start_shape_draw(DrawTool::Rectangle { origin: None, bevel: 0 });
+                Task::none()
+            }
+            Message::StartEllipseDraw => {
+                self.start_shape_draw(DrawTool::Ellipse {
+                    origin: None,
+                    subdivisions: 16,
+                });
+                Task::none()
+            }
+            Message::StartCurveDraw => {
+                self.start_shape_draw(DrawTool::Curve {
+                    points: Vec::new(),
+                    subdivisions: 12,
+                });
+                Task::none()
+            }
+            Message::StartGridDraw => {
+                self.start_shape_draw(DrawTool::Grid {
+                    origin: None,
+                    cols: 4,
+                    rows: 4,
+                });
+                Task::none()
+            }
+            Message::CurveSelectedLines => {
+                self.curve_selected_lines();
+                Task::none()
+            }
+            Message::AdjustDrawParam(delta) => {
+                self.adjust_draw_param(delta);
+                Task::none()
+            }
+            Message::OpenMapStats => {
+                self.active_picker = Some(ActivePicker::MapStats);
+                Task::none()
+            }
+            Message::SetView2DMode(mode) => {
+                self.settings.view_mode = mode;
+                self.persist_settings();
+                self.rebuild_sector_fills();
+                self.cache2d.clear();
+                self.status = format!("View: {}", mode.label());
+                Task::none()
+            }
+            Message::ToggleFullBrightness => {
+                self.settings.full_brightness = !self.settings.full_brightness;
+                self.persist_settings();
+                self.rebuild_geometry3d();
+                self.status = if self.settings.full_brightness {
+                    "Full brightness on".into()
+                } else {
+                    "Full brightness off".into()
+                };
+                Task::none()
+            }
+            Message::FlipSidedefs => {
+                self.do_flip_sidedefs();
+                Task::none()
+            }
+            Message::AlignLinedefs => {
+                self.do_align_linedefs();
+                Task::none()
+            }
+            Message::AutoAlignX => {
+                self.do_auto_align(doombuilder_core::edit::AutoAlignAxis::X);
+                Task::none()
+            }
+            Message::AutoAlignY => {
+                self.do_auto_align(doombuilder_core::edit::AutoAlignAxis::Y);
+                Task::none()
+            }
+            Message::AutoAlignBoth => {
+                self.do_auto_align(doombuilder_core::edit::AutoAlignAxis::Both);
+                Task::none()
+            }
             Message::GHotkey { shift, ctrl } => {
                 let has_sector_sel = self.edit_mode == EditMode::Sectors
                     && self.selection.iter().any(|h| matches!(h, HighlightKind::Sector(_)));
@@ -1554,7 +1715,9 @@ impl App {
                 keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
                     Message::PanCamera { dx_units: 0, dy_units: -1, fast: modifiers.shift() }
                 }
-                keyboard::Key::Character("a") if modifiers.command() => Message::SelectAll,
+                keyboard::Key::Character("a") if modifiers.command() && !modifiers.shift() => {
+                    Message::SelectAll
+                }
                 keyboard::Key::Character("z") if modifiers.command() && modifiers.shift() => {
                     Message::Redo
                 }
@@ -1577,12 +1740,43 @@ impl App {
                 keyboard::Key::Character("[") => Message::CycleGridStep(1),
                 keyboard::Key::Character("]") => Message::CycleGridStep(-1),
                 keyboard::Key::Character("h") if !modifiers.command() => Message::ToggleHighlights,
+                keyboard::Key::Character("b") if !modifiers.command() => Message::ToggleFullBrightness,
                 keyboard::Key::Character("w") if modifiers.command() => Message::PlaceVisualCamera,
                 keyboard::Key::Named(keyboard::key::Named::Space) => Message::SpaceHeld(true),
                 keyboard::Key::Named(keyboard::key::Named::Insert) => Message::InsertThing,
                 keyboard::Key::Character("i") if !modifiers.command() => Message::InsertThing,
+                keyboard::Key::Character("d") if modifiers.command() && modifiers.shift() => {
+                    Message::StartRectangleDraw
+                }
+                keyboard::Key::Character("d") if modifiers.alt() && modifiers.shift() => {
+                    Message::StartEllipseDraw
+                }
+                keyboard::Key::Character("d") if modifiers.command() && modifiers.alt() => {
+                    Message::StartCurveDraw
+                }
                 keyboard::Key::Character("d") if modifiers.shift() => Message::MakeDoor,
                 keyboard::Key::Character("d") if !modifiers.command() => Message::ToggleDrawing,
+                keyboard::Key::Character("c") if modifiers.shift() => Message::CurveSelectedLines,
+                keyboard::Key::Character("f") if modifiers.shift() => Message::FlipSidedefs,
+                // Auto-align: A = X, Shift+A = Y, Cmd+Shift+A = X+Y.
+                // (Plain Cmd+A is already "Select All" above.)
+                keyboard::Key::Character("a") if modifiers.command() && modifiers.shift() => {
+                    Message::AutoAlignBoth
+                }
+                keyboard::Key::Character("a") if modifiers.shift() && !modifiers.command() => {
+                    Message::AutoAlignY
+                }
+                keyboard::Key::Character("a")
+                    if !modifiers.command() && !modifiers.shift() && !modifiers.alt() =>
+                {
+                    Message::AutoAlignX
+                }
+                keyboard::Key::Character("=") | keyboard::Key::Character("+") => {
+                    Message::AdjustDrawParam(1)
+                }
+                keyboard::Key::Character("-") | keyboard::Key::Character("_") => {
+                    Message::AdjustDrawParam(-1)
+                }
                 keyboard::Key::Character("m") if modifiers.command() => Message::MakeSector,
                 keyboard::Key::Character("j") if modifiers.shift() => Message::MergeSectors,
                 keyboard::Key::Character("j") if !modifiers.command() => Message::JoinSectors,
@@ -1643,9 +1837,20 @@ impl App {
     }
 
     fn rebuild_geometry3d(&mut self) {
-        let (Some(map), Some(textures)) = (&self.map, &self.textures) else {
+        let Some(map) = &self.map else {
             self.geometry3d = Arc::new(View3DGeometry::default());
             return;
+        };
+        // Without a Resource WAD loaded we still want the 3D view to show
+        // untextured geometry, so fall back to an empty TextureSet rather
+        // than rendering a black void.
+        let empty;
+        let textures: &doombuilder_core::textures::TextureSet = match &self.textures {
+            Some(t) => t.as_ref(),
+            None => {
+                empty = doombuilder_core::textures::TextureSet::empty(Vec::new());
+                &empty
+            }
         };
         let geom = build_geometry(
             map,
@@ -1654,6 +1859,7 @@ impl App {
             textures,
             self.spatial.as_deref(),
             &self.config,
+            self.settings.full_brightness,
         );
         self.geometry3d = Arc::new(geom);
     }
@@ -2513,6 +2719,87 @@ impl App {
         }
     }
 
+    fn do_flip_sidedefs(&mut self) {
+        let line_ids: Vec<LinedefId> = self.selected_linedefs();
+        if line_ids.is_empty() {
+            self.status = "Flip Sidedefs: select linedefs first.".into();
+            return;
+        }
+        let count = line_ids.len();
+        let mut cmd = Command::FlipSidedefs(line_ids);
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            cmd.apply(map_mut);
+            self.undo.push(cmd);
+            self.rebuild_geometry_indices();
+            self.cache2d.clear();
+            self.status = format!("Flipped sidedefs on {count} linedef(s).");
+        }
+    }
+
+    fn do_align_linedefs(&mut self) {
+        let line_ids: Vec<LinedefId> = self.selected_linedefs();
+        if line_ids.is_empty() {
+            self.status = "Align Linedefs: select linedefs first.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else { return };
+        let to_flip = doombuilder_core::edit::compute_align_linedefs(map, &line_ids);
+        if to_flip.is_empty() {
+            self.status = "Align Linedefs: all selected lines already aligned.".into();
+            return;
+        }
+        let count = to_flip.len();
+        let mut cmd = Command::FlipLinedefs(to_flip);
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            cmd.apply(map_mut);
+            self.undo.push(cmd);
+            self.rebuild_geometry_indices();
+            self.cache2d.clear();
+            self.status = format!("Aligned {count} linedef(s) (front side outward).");
+        }
+    }
+
+    fn do_auto_align(&mut self, axis: doombuilder_core::edit::AutoAlignAxis) {
+        let line_ids: Vec<LinedefId> = self.selected_linedefs();
+        if line_ids.is_empty() {
+            self.status = "Auto-align: select linedefs first.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else { return };
+        let changes = doombuilder_core::edit::compute_auto_align_textures(map, &line_ids, axis);
+        if changes.is_empty() {
+            self.status = "Auto-align: selection isn't a single chain or has no sidedefs.".into();
+            return;
+        }
+        let count = changes.len();
+        let mut cmd = Command::SetSidedefOffsets(changes);
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            cmd.apply(map_mut);
+            self.undo.push(cmd);
+            self.rebuild_geometry_indices();
+            self.cache2d.clear();
+            let label = match axis {
+                doombuilder_core::edit::AutoAlignAxis::X => "X",
+                doombuilder_core::edit::AutoAlignAxis::Y => "Y",
+                doombuilder_core::edit::AutoAlignAxis::Both => "X and Y",
+            };
+            self.status = format!("Auto-aligned {label} on {count} sidedef(s).");
+        }
+    }
+
+    fn selected_linedefs(&self) -> Vec<LinedefId> {
+        self.selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Linedef(id) => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn do_flip_lines(&mut self) {
         let line_ids: Vec<doombuilder_core::map::LinedefId> = self
             .selection
@@ -2584,6 +2871,32 @@ impl App {
     }
 
     fn drawing_click(&mut self, world: Vec2) {
+        // Snap the world position to grid if applicable, before tool dispatch.
+        let snapped_world = if self.settings.snap_to_grid {
+            let step = self.effective_grid_step().max(1.0);
+            Vec2::new(
+                (world.x / step).round() * step,
+                (world.y / step).round() * step,
+            )
+        } else {
+            world
+        };
+        // Shape tools have their own click logic.
+        let is_shape = matches!(
+            self.drawing.as_ref().map(|d| &d.tool),
+            Some(DrawTool::Rectangle { .. })
+                | Some(DrawTool::Ellipse { .. })
+                | Some(DrawTool::Curve { .. })
+                | Some(DrawTool::Grid { .. })
+        );
+        if is_shape {
+            self.shape_tool_click(snapped_world);
+            return;
+        }
+        self.drawing_click_free(world);
+    }
+
+    fn drawing_click_free(&mut self, world: Vec2) {
         // Snapshot non-mutable values before borrowing `self.drawing`/`self.map`.
         let snap_grid_on = self.settings.snap_to_grid;
         let grid_step = self.effective_grid_step().max(1.0);
@@ -2722,6 +3035,328 @@ impl App {
         );
     }
 
+    /// Build the shape preview snapshot fed to View2D each frame.
+    fn build_shape_preview(&self) -> Option<view2d::ShapePreview> {
+        let drawing = self.drawing.as_ref()?;
+        let cursor = self.cursor_world?;
+        match &drawing.tool {
+            DrawTool::Rectangle { origin, bevel } => {
+                origin.map(|o| view2d::ShapePreview::Rectangle {
+                    origin: o,
+                    cursor,
+                    bevel: *bevel,
+                })
+            }
+            DrawTool::Ellipse { origin, subdivisions } => {
+                origin.map(|o| view2d::ShapePreview::Ellipse {
+                    origin: o,
+                    cursor,
+                    subdivisions: *subdivisions,
+                })
+            }
+            DrawTool::Curve { points, subdivisions } => {
+                if points.is_empty() {
+                    None
+                } else {
+                    Some(view2d::ShapePreview::Curve {
+                        points: points.clone(),
+                        cursor,
+                        subdivisions: *subdivisions,
+                    })
+                }
+            }
+            DrawTool::Grid { origin, cols, rows } => {
+                origin.map(|o| view2d::ShapePreview::Grid {
+                    origin: o,
+                    cursor,
+                    cols: *cols,
+                    rows: *rows,
+                })
+            }
+            DrawTool::Free => None,
+        }
+    }
+
+    /// Activate a non-free drawing tool. Cancels any in-progress free draw,
+    /// then opens a fresh DrawingState with the requested tool. Shows a
+    /// status hint describing the two- or three-click flow.
+    fn start_shape_draw(&mut self, tool: DrawTool) {
+        if self.map.is_none() {
+            self.status = "Open or create a map first.".into();
+            return;
+        }
+        // If a free-draw chain is open, cancel it so we don't mix tool modes.
+        if self.drawing.is_some() {
+            self.cancel_drawing();
+        }
+        let label = tool.label();
+        self.drawing = Some(DrawingState {
+            tool,
+            ..DrawingState::default()
+        });
+        self.status = match &self.drawing.as_ref().unwrap().tool {
+            DrawTool::Rectangle { .. } => {
+                "Rectangle: click corner, then opposite corner. +/- for bevel. Esc to cancel.".into()
+            }
+            DrawTool::Ellipse { .. } => {
+                "Ellipse: click corner, then opposite corner. +/- for subdivisions. Esc to cancel.".into()
+            }
+            DrawTool::Curve { .. } => {
+                "Curve: click start, end, then a control point. +/- for subdivisions. Esc to cancel.".into()
+            }
+            DrawTool::Grid { .. } => {
+                "Grid: click corner, then opposite corner. +/- for cell count. Esc to cancel.".into()
+            }
+            DrawTool::Free => format!("{label} active."),
+        };
+        self.cache2d.clear();
+    }
+
+    /// Tool-aware click handler. First click on a shape tool records the
+    /// origin / control points; the final click commits the generated
+    /// geometry and clears the drawing state.
+    fn shape_tool_click(&mut self, world: Vec2) {
+        let Some(drawing) = self.drawing.as_mut() else { return };
+        match &mut drawing.tool {
+            DrawTool::Rectangle { origin, bevel } => {
+                if origin.is_none() {
+                    *origin = Some(world);
+                    self.status = "Rectangle: click opposite corner.".into();
+                    self.cache2d.clear();
+                } else {
+                    let o = origin.unwrap();
+                    let b = *bevel;
+                    self.commit_shape(rectangle_vertices(o, world, b), true);
+                }
+            }
+            DrawTool::Ellipse { origin, subdivisions } => {
+                if origin.is_none() {
+                    *origin = Some(world);
+                    self.status = "Ellipse: click opposite corner.".into();
+                    self.cache2d.clear();
+                } else {
+                    let o = origin.unwrap();
+                    let n = *subdivisions;
+                    self.commit_shape(ellipse_vertices(o, world, n), true);
+                }
+            }
+            DrawTool::Curve { points, subdivisions } => {
+                points.push(world);
+                if points.len() < 3 {
+                    self.status = match points.len() {
+                        1 => "Curve: click end point.".into(),
+                        2 => "Curve: click control point.".into(),
+                        _ => "Curve: ...".into(),
+                    };
+                    self.cache2d.clear();
+                } else {
+                    let pts = points.clone();
+                    let n = *subdivisions;
+                    self.commit_shape(quadratic_bezier_vertices(pts[0], pts[2], pts[1], n), false);
+                }
+            }
+            DrawTool::Grid { origin, cols, rows } => {
+                if origin.is_none() {
+                    *origin = Some(world);
+                    self.status = "Grid: click opposite corner.".into();
+                    self.cache2d.clear();
+                } else {
+                    let o = origin.unwrap();
+                    let c = *cols;
+                    let r = *rows;
+                    self.commit_shape_grid(o, world, c, r);
+                }
+            }
+            DrawTool::Free => {}
+        }
+    }
+
+    /// Build a `Command::CreateLinedefChain` from a vertex polyline. If
+    /// `closed`, the last vertex is connected back to the first.
+    fn commit_shape(&mut self, points: Vec<Vec2>, closed: bool) {
+        if points.len() < 2 {
+            self.cancel_drawing();
+            return;
+        }
+        let chain = chain_from_polyline(&points, closed);
+        self.apply_chain_and_commit(chain);
+    }
+
+    fn commit_shape_grid(&mut self, a: Vec2, b: Vec2, cols: u32, rows: u32) {
+        let chain = chain_from_grid(a, b, cols.max(1), rows.max(1));
+        self.apply_chain_and_commit(chain);
+    }
+
+    /// Apply a freshly-built chain via `Command::CreateLinedefChain` and
+    /// share the "auto-select new lines, switch to Linedefs mode" flourish
+    /// with the free-draw commit path.
+    fn apply_chain_and_commit(&mut self, mut chain: LinedefChain) {
+        if chain.vertex_inserts.is_empty() {
+            self.cancel_drawing();
+            return;
+        }
+        // Apply directly to the map (CreateLinedefChain's apply re-inserts).
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            // Insert vertices first, recording their fresh ids.
+            chain.current_v.clear();
+            for v in &chain.vertex_inserts {
+                let id = map_mut.vertices.insert(*v);
+                chain.current_v.push(id);
+            }
+            // Resolve endpoints and insert linedefs.
+            chain.current_l.clear();
+            let endpoint = |ep: &LineEndpoint, current_v: &[VertexId]| -> Option<VertexId> {
+                match ep {
+                    LineEndpoint::Existing(v) => Some(*v),
+                    LineEndpoint::New(i) => current_v.get(*i).copied(),
+                }
+            };
+            let line_specs: Vec<_> = chain
+                .linedefs
+                .iter()
+                .map(|(from, to, template)| (from.clone(), to.clone(), template.clone()))
+                .collect();
+            for (from, to, mut template) in line_specs {
+                let (Some(v1), Some(v2)) =
+                    (endpoint(&from, &chain.current_v), endpoint(&to, &chain.current_v))
+                else {
+                    continue;
+                };
+                template.v1 = v1;
+                template.v2 = v2;
+                let id = map_mut.linedefs.insert(template);
+                chain.current_l.push(id);
+            }
+        }
+        let new_lines: Vec<LinedefId> = chain.current_l.clone();
+        let count_l = new_lines.len();
+        let count_v = chain.current_v.len();
+        self.undo.push(Command::CreateLinedefChain(Box::new(chain)));
+        self.drawing = None;
+        self.rebuild_geometry_indices();
+        // Auto-select for fluent Make-Sector workflow.
+        let mut sel = HashSet::new();
+        for id in &new_lines {
+            sel.insert(HighlightKind::Linedef(*id));
+        }
+        self.selection = Arc::new(sel);
+        self.edit_mode = EditMode::Linedefs;
+        self.cache2d.clear();
+        self.status = format!("Shape: {count_v} vertices, {count_l} linedefs.");
+    }
+
+    fn adjust_draw_param(&mut self, delta: i32) {
+        let Some(drawing) = self.drawing.as_mut() else { return };
+        let nudge_u32 = |v: u32, d: i32, min: u32, max: u32| -> u32 {
+            ((v as i32 + d).clamp(min as i32, max as i32)) as u32
+        };
+        match &mut drawing.tool {
+            DrawTool::Rectangle { bevel, .. } => {
+                *bevel = nudge_u32(*bevel, delta, 0, 64);
+                self.status = format!("Rectangle bevel: {}", *bevel);
+                self.cache2d.clear();
+            }
+            DrawTool::Ellipse { subdivisions, .. } => {
+                *subdivisions = nudge_u32(*subdivisions, delta, 4, 128);
+                self.status = format!("Ellipse subdivisions: {}", *subdivisions);
+                self.cache2d.clear();
+            }
+            DrawTool::Curve { subdivisions, .. } => {
+                *subdivisions = nudge_u32(*subdivisions, delta, 2, 128);
+                self.status = format!("Curve subdivisions: {}", *subdivisions);
+                self.cache2d.clear();
+            }
+            DrawTool::Grid { cols, rows, .. } => {
+                // Single nudge bumps both axes together.
+                *cols = nudge_u32(*cols, delta, 1, 64);
+                *rows = nudge_u32(*rows, delta, 1, 64);
+                self.status = format!("Grid cells: {} x {}", *cols, *rows);
+                self.cache2d.clear();
+            }
+            DrawTool::Free => {}
+        }
+    }
+
+    /// Convert a selection of linedefs that form a contiguous open chain
+    /// into a smoothed bezier curve. Internal vertices are repositioned to
+    /// lie on a quadratic bezier defined by the chain's endpoints and a
+    /// control point perpendicular to their midline.
+    fn curve_selected_lines(&mut self) {
+        let line_ids: Vec<LinedefId> = self
+            .selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Linedef(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        if line_ids.len() < 2 {
+            self.status = "Curve: select at least 2 linedefs.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else { return };
+        // Order the lines into a path: walk vertex adjacency. Bail out if
+        // the selection isn't a simple chain.
+        let mut path = match order_line_chain(map, &line_ids) {
+            Some(p) => p,
+            None => {
+                self.status = "Curve: selected lines do not form a single open chain.".into();
+                return;
+            }
+        };
+        if path.len() < 3 {
+            self.status = "Curve: need at least 3 vertices.".into();
+            return;
+        }
+        // Control point = midpoint of chord + perpendicular offset half the
+        // chord length (so the curve clearly bows away from the chord).
+        let start = match map.vertices.get(path[0]) {
+            Some(v) => Vec2::new(v.x as f32, v.y as f32),
+            None => return,
+        };
+        let end_idx = *path.last().unwrap();
+        let end = match map.vertices.get(end_idx) {
+            Some(v) => Vec2::new(v.x as f32, v.y as f32),
+            None => return,
+        };
+        let mid = (start + end) * 0.5;
+        let dir = end - start;
+        let perp = Vec2::new(-dir.y, dir.x);
+        let plen = (perp.x * perp.x + perp.y * perp.y).sqrt().max(1e-3);
+        let cp = mid + perp * (0.5 / plen) * ((dir.x * dir.x + dir.y * dir.y).sqrt());
+        // Reposition the n-2 interior vertices uniformly along the bezier.
+        let n = path.len();
+        let mut moves: Vec<doombuilder_core::edit::VertexMove> = Vec::new();
+        for i in 1..(n - 1) {
+            let t = i as f32 / (n - 1) as f32;
+            let p = quadratic_bezier_point(start, cp, end, t);
+            let vid = path[i];
+            if let Some(v) = map.vertices.get(vid) {
+                let dx = (p.x.round() as i32) - v.x;
+                let dy = (p.y.round() as i32) - v.y;
+                if dx != 0 || dy != 0 {
+                    moves.push(doombuilder_core::edit::VertexMove { id: vid, dx, dy });
+                }
+            }
+        }
+        path.clear();
+        if moves.is_empty() {
+            self.status = "Curve: nothing to move.".into();
+            return;
+        }
+        let count = moves.len();
+        let mut cmd = Command::MoveVertices(moves);
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            cmd.apply(map_mut);
+            self.undo.push(cmd);
+            self.rebuild_geometry_indices();
+            self.cache2d.clear();
+            self.status = format!("Curved {count} vertex(es).");
+        }
+    }
+
     fn cancel_active_drag(&mut self) {
         let mode = self.active_drag.take();
         match mode {
@@ -2770,20 +3405,51 @@ impl App {
         self.sector_meshes = Arc::new(meshes_with_id);
         self.walls = Arc::new(walls);
         self.spatial = Some(Arc::new(spatial));
+        // Keep the status-bar counters honest: any geometry edit can change
+        // these, and they were previously only refreshed on map load.
+        if let Some(stats) = self.map_stats.as_mut() {
+            stats.vertices = map.vertices.len();
+            stats.linedefs = map.linedefs.len();
+            stats.sidedefs = map.sidedefs.len();
+            stats.sectors = map.sectors.len();
+            stats.things = map.things.len();
+        }
         self.rebuild_sector_fills();
         self.rebuild_geometry3d();
     }
 
     fn rebuild_sector_fills(&mut self) {
-        let (Some(map), Some(textures)) = (&self.map, &self.textures) else {
+        let Some(map) = &self.map else {
             self.sector_fills = Arc::new(Vec::new());
             return;
         };
+        // Wireframe view emits no fills at all.
+        if self.settings.view_mode == View2DMode::Wireframe {
+            self.sector_fills = Arc::new(Vec::new());
+            return;
+        }
         let mut tiles: Vec<FillTile> = Vec::new();
         for (sid, mesh) in self.sector_meshes.iter() {
-            let Some(fill) = rasterise_sector_fill(map, *sid, mesh, textures) else {
-                continue;
+            let fill = match self.settings.view_mode {
+                View2DMode::Floor | View2DMode::Ceiling => {
+                    let Some(textures) = &self.textures else { continue };
+                    let slot = if self.settings.view_mode == View2DMode::Ceiling {
+                        doombuilder_render::FillSlot::Ceiling
+                    } else {
+                        doombuilder_render::FillSlot::Floor
+                    };
+                    doombuilder_render::rasterise_sector_fill_slot(
+                        map, *sid, mesh, textures, slot,
+                    )
+                }
+                View2DMode::Brightness => {
+                    let Some(sec) = map.sectors.get(*sid) else { continue };
+                    let color = brightness_color(sec.light);
+                    doombuilder_render::rasterise_sector_solid(*sid, mesh, color)
+                }
+                View2DMode::Wireframe => None,
             };
+            let Some(fill) = fill else { continue };
             if fill.width == 0 || fill.height == 0 {
                 continue;
             }
@@ -3015,10 +3681,22 @@ impl App {
                     hover: self.hover,
                     selection: self.selection.clone(),
                     drag_rect: self.drag_rect,
-                    fills: if self.settings.show_textures {
-                        self.sector_fills.clone()
-                    } else {
-                        Arc::new(Vec::new())
+                    fills: match self.settings.view_mode {
+                        // Wireframe never shows fills.
+                        View2DMode::Wireframe => Arc::new(Vec::new()),
+                        // For Floor/Ceiling modes, `show_textures` still acts
+                        // as a quick "strip texture overlay" toggle so the
+                        // existing toolbar button keeps working.
+                        View2DMode::Floor | View2DMode::Ceiling => {
+                            if self.settings.show_textures {
+                                self.sector_fills.clone()
+                            } else {
+                                Arc::new(Vec::new())
+                            }
+                        }
+                        // Brightness is the entire point of the view — always
+                        // show the fills regardless of the textures toggle.
+                        View2DMode::Brightness => self.sector_fills.clone(),
                     },
                     config: self.config.clone(),
                     edit_mode: self.edit_mode,
@@ -3026,6 +3704,8 @@ impl App {
                     sprite_dims: self.sprite_dims.clone(),
                     settings: self.settings.clone(),
                     pan_override: self.space_held,
+                    shape_preview: self.build_shape_preview(),
+                    opaque_fills: self.settings.view_mode == View2DMode::Brightness,
                 };
                 view.into_widget(Message::View2D)
             }
@@ -3185,6 +3865,7 @@ impl App {
             Some(ActivePicker::SectorSpecial(_)) => self.sector_special_picker_panel(),
             Some(ActivePicker::Settings) => self.settings_panel(),
             Some(ActivePicker::GoToCoords) => self.go_to_coords_panel(),
+            Some(ActivePicker::MapStats) => self.map_stats_panel(),
             None => Space::new().into(),
         };
 
@@ -3419,6 +4100,244 @@ impl App {
             .spacing(12)
             .padding(16)
             .into()
+    }
+
+    fn map_stats_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Map Statistics").size(18),
+            Space::new().width(Length::Fill),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let Some(map) = self.map.as_ref() else {
+            return column![title_row, text("No map loaded.").size(13)]
+                .spacing(12)
+                .padding(16)
+                .into();
+        };
+
+        // ---- Header summary (name + format) ----
+        let format_str = match map.format {
+            MapFormat::Doom => "Doom",
+            MapFormat::Hexen => "Hexen",
+        };
+        let header = row![
+            text(format!("{} ({})", map.name, format_str)).size(15),
+        ];
+
+        // ---- Geometry counts grid ----
+        let counts = [
+            ("Vertices", map.vertices.len()),
+            ("Linedefs", map.linedefs.len()),
+            ("Sidedefs", map.sidedefs.len()),
+            ("Sectors", map.sectors.len()),
+            ("Things", map.things.len()),
+        ];
+        let count_rows: Vec<Element<'_, Message>> = counts
+            .iter()
+            .map(|(label, n)| {
+                row![
+                    text(*label).size(12).width(Length::Fixed(140.0)),
+                    text(n.to_string()).size(12).width(Length::Fill),
+                ]
+                .into()
+            })
+            .collect();
+
+        // ---- Map AABB ----
+        // Split onto two lines so the long coord string doesn't clip the
+        // value column when the modal is the default 760 px wide.
+        let (bounds_coords, bounds_size) = match map_aabb(map) {
+            Some((min, max)) => (
+                format!(
+                    "({:.0}, {:.0}) to ({:.0}, {:.0})",
+                    min.x, min.y, max.x, max.y
+                ),
+                format!("{:.0} x {:.0}", max.x - min.x, max.y - min.y),
+            ),
+            None => ("(empty)".to_string(), String::new()),
+        };
+
+        // ---- Linedef breakdown ----
+        let mut one_sided = 0usize;
+        let mut two_sided = 0usize;
+        let mut with_special = 0usize;
+        let mut tagged_lines = 0usize;
+        for (_, l) in &map.linedefs {
+            if l.left.is_some() && l.right.is_some() {
+                two_sided += 1;
+            } else if l.right.is_some() || l.left.is_some() {
+                one_sided += 1;
+            }
+            if l.special != 0 {
+                with_special += 1;
+            }
+            if l.tag != 0 {
+                tagged_lines += 1;
+            }
+        }
+
+        // ---- Sector breakdown ----
+        let mut sec_with_special = 0usize;
+        let mut tagged_secs = 0usize;
+        let mut light_min: i32 = i32::MAX;
+        let mut light_max: i32 = i32::MIN;
+        let mut light_sum: i64 = 0;
+        let mut floor_min: i32 = i32::MAX;
+        let mut floor_max: i32 = i32::MIN;
+        let mut ceil_min: i32 = i32::MAX;
+        let mut ceil_max: i32 = i32::MIN;
+        let mut unique_tags: HashSet<u16> = HashSet::new();
+        for (_, s) in &map.sectors {
+            if s.special != 0 {
+                sec_with_special += 1;
+            }
+            if s.tag != 0 {
+                tagged_secs += 1;
+                unique_tags.insert(s.tag);
+            }
+            let l = s.light as i32;
+            light_min = light_min.min(l);
+            light_max = light_max.max(l);
+            light_sum += l as i64;
+            floor_min = floor_min.min(s.floor_height as i32);
+            floor_max = floor_max.max(s.floor_height as i32);
+            ceil_min = ceil_min.min(s.ceiling_height as i32);
+            ceil_max = ceil_max.max(s.ceiling_height as i32);
+        }
+        let n_sec = map.sectors.len().max(1) as i64;
+        let avg_light = if map.sectors.is_empty() { 0 } else { (light_sum / n_sec) as i32 };
+
+        // ---- Thing breakdown by category and skill flag ----
+        let mut by_cat: HashMap<String, usize> = HashMap::new();
+        let mut skill_easy = 0usize;
+        let mut skill_medium = 0usize;
+        let mut skill_hard = 0usize;
+        let mut multiplayer = 0usize;
+        for (_, t) in &map.things {
+            let cat = self
+                .config
+                .thing_type(t.kind)
+                .map(|tt| tt.category.clone())
+                .unwrap_or_else(|| "(uncategorised)".to_string());
+            *by_cat.entry(cat).or_insert(0) += 1;
+            if t.flags & 0x01 != 0 {
+                skill_easy += 1;
+            }
+            if t.flags & 0x02 != 0 {
+                skill_medium += 1;
+            }
+            if t.flags & 0x04 != 0 {
+                skill_hard += 1;
+            }
+            if t.flags & 0x10 != 0 {
+                multiplayer += 1;
+            }
+        }
+        let mut cat_entries: Vec<(String, usize)> = by_cat.into_iter().collect();
+        cat_entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let cat_rows: Vec<Element<'_, Message>> = cat_entries
+            .into_iter()
+            .map(|(name, n)| {
+                row![
+                    text(name).size(12).width(Length::Fixed(140.0)),
+                    text(n.to_string()).size(12).width(Length::Fill),
+                ]
+                .into()
+            })
+            .collect();
+
+        // ---- Compose ----
+        let kv = |label: &'static str, val: String| -> Element<'_, Message> {
+            row![
+                text(label).size(12).width(Length::Fixed(140.0)),
+                text(val).size(12).width(Length::Fill),
+            ]
+            .into()
+        };
+
+        let mut geometry_rows: Vec<Element<'_, Message>> = count_rows;
+        geometry_rows.push(kv("Bounds", bounds_coords));
+        if !bounds_size.is_empty() {
+            geometry_rows.push(kv("Size", bounds_size));
+        }
+        let geometry_section = column![
+            text("Geometry").size(14),
+            column(geometry_rows).spacing(2),
+        ]
+        .spacing(6);
+
+        let lines_section = column![
+            text("Linedefs").size(14),
+            kv("One-sided", one_sided.to_string()),
+            kv("Two-sided", two_sided.to_string()),
+            kv("With special", with_special.to_string()),
+            kv("Tagged", tagged_lines.to_string()),
+        ]
+        .spacing(2);
+
+        let sectors_section = if map.sectors.is_empty() {
+            column![text("Sectors").size(14), text("(none)").size(12)].spacing(2)
+        } else {
+            column![
+                text("Sectors").size(14),
+                kv("With special", sec_with_special.to_string()),
+                kv("Tagged", format!("{tagged_secs} ({} unique)", unique_tags.len())),
+                kv(
+                    "Light",
+                    format!("min {light_min}  avg {avg_light}  max {light_max}"),
+                ),
+                kv(
+                    "Floor height",
+                    format!("min {floor_min}  max {floor_max}"),
+                ),
+                kv(
+                    "Ceiling height",
+                    format!("min {ceil_min}  max {ceil_max}"),
+                ),
+            ]
+            .spacing(2)
+        };
+
+        let things_section = if map.things.is_empty() {
+            column![text("Things").size(14), text("(none)").size(12)].spacing(2)
+        } else {
+            column![
+                text("Things").size(14),
+                kv("Easy spawns", skill_easy.to_string()),
+                kv("Medium spawns", skill_medium.to_string()),
+                kv("Hard spawns", skill_hard.to_string()),
+                kv("Multiplayer-only", multiplayer.to_string()),
+                Element::from(Space::new().height(Length::Fixed(4.0))),
+                Element::from(text("By category").size(13)),
+                Element::from(column(cat_rows).spacing(2)),
+            ]
+            .spacing(2)
+        };
+
+        let body = column![
+            header,
+            geometry_section,
+            lines_section,
+            sectors_section,
+            things_section,
+        ]
+        .spacing(14)
+        .width(Length::Fill);
+
+        column![
+            title_row,
+            scrollable(body).height(Length::Fill).width(Length::Fill),
+        ]
+        .spacing(12)
+        .padding(16)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     fn settings_panel(&self) -> Element<'_, Message> {
@@ -4340,6 +5259,12 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Split Linedefs"),
     MenuItem("Merge Vertices"),
     MenuItem("Flip Linedefs"),
+    MenuItem("Flip Sidedefs"),
+    MenuItem("Align Linedefs"),
+    SEP,
+    MenuItem("Auto-align Textures (X)"),
+    MenuItem("Auto-align Textures (Y)"),
+    MenuItem("Auto-align Textures (X+Y)"),
     SEP,
     MenuItem("Brightness Gradient"),
     MenuItem("Floor Gradient"),
@@ -4352,6 +5277,11 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Snap Selection to Grid"),
     SEP,
     MenuItem("Toggle Draw Mode"),
+    MenuItem("Rectangle Draw"),
+    MenuItem("Ellipse Draw"),
+    MenuItem("Curve Draw"),
+    MenuItem("Grid Draw"),
+    MenuItem("Curve Selected Lines"),
 ];
 const VIEW_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("2D Mode"),
@@ -4360,12 +5290,18 @@ const VIEW_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Fit to Screen"),
     MenuItem("Go To Coordinates\u{2026}"),
     SEP,
+    MenuItem("View: Floor Textures"),
+    MenuItem("View: Ceiling Textures"),
+    MenuItem("View: Brightness Levels"),
+    MenuItem("View: Wireframe"),
+    SEP,
+    MenuItem("Toggle Full Brightness"),
     MenuItem("Toggle Highlights"),
     MenuItem("Place Visual Camera Here"),
     SEP,
     MenuItem("Settings\u{2026}"),
 ];
-const TOOLS_MENU_ITEMS: &[MenuItem] = &[MenuItem("Map Statistics (n/a)")];
+const TOOLS_MENU_ITEMS: &[MenuItem] = &[MenuItem("Map Statistics\u{2026}")];
 const HELP_MENU_ITEMS: &[MenuItem] = &[MenuItem("About (n/a)")];
 
 fn dispatch_file(item: MenuItem) -> Message {
@@ -4392,6 +5328,11 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Split Linedefs" => Message::SplitLines,
         "Merge Vertices" => Message::MergeVertices,
         "Flip Linedefs" => Message::FlipLines,
+        "Flip Sidedefs" => Message::FlipSidedefs,
+        "Align Linedefs" => Message::AlignLinedefs,
+        "Auto-align Textures (X)" => Message::AutoAlignX,
+        "Auto-align Textures (Y)" => Message::AutoAlignY,
+        "Auto-align Textures (X+Y)" => Message::AutoAlignBoth,
         "Snap Selection to Grid" => Message::SnapSelectionToGrid,
         "Brightness Gradient" => Message::MakeBrightnessGradient,
         "Floor Gradient" => Message::MakeFloorGradient,
@@ -4399,6 +5340,11 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Join Sectors" => Message::JoinSectors,
         "Merge Sectors" => Message::MergeSectors,
         "Make Door" => Message::MakeDoor,
+        "Rectangle Draw" => Message::StartRectangleDraw,
+        "Ellipse Draw" => Message::StartEllipseDraw,
+        "Curve Draw" => Message::StartCurveDraw,
+        "Grid Draw" => Message::StartGridDraw,
+        "Curve Selected Lines" => Message::CurveSelectedLines,
         "Toggle Draw Mode" => Message::ToggleDrawing,
         _ => Message::Noop,
     }
@@ -4410,6 +5356,11 @@ fn dispatch_view(item: MenuItem) -> Message {
         "3D Mode" => Message::Mode(Mode::View3D),
         "Fit to Screen" => Message::FitToScreen,
         "Go To Coordinates\u{2026}" => Message::OpenGoToCoords,
+        "View: Floor Textures" => Message::SetView2DMode(View2DMode::Floor),
+        "View: Ceiling Textures" => Message::SetView2DMode(View2DMode::Ceiling),
+        "View: Brightness Levels" => Message::SetView2DMode(View2DMode::Brightness),
+        "View: Wireframe" => Message::SetView2DMode(View2DMode::Wireframe),
+        "Toggle Full Brightness" => Message::ToggleFullBrightness,
         "Toggle Highlights" => Message::ToggleHighlights,
         "Place Visual Camera Here" => Message::PlaceVisualCamera,
         "Settings\u{2026}" => Message::OpenSettings,
@@ -4417,8 +5368,11 @@ fn dispatch_view(item: MenuItem) -> Message {
     }
 }
 
-fn dispatch_tools(_item: MenuItem) -> Message {
-    Message::Noop
+fn dispatch_tools(item: MenuItem) -> Message {
+    match item.0 {
+        "Map Statistics\u{2026}" => Message::OpenMapStats,
+        _ => Message::Noop,
+    }
 }
 
 fn dispatch_help(_item: MenuItem) -> Message {
@@ -4586,6 +5540,235 @@ async fn save_map_to_path(map: Arc<Map>, path: PathBuf) -> Result<PathBuf, Strin
     let bytes = save_map_as_pwad(&map);
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// Map a sector's light value (0..255) to a 32-bit RGBA color for the
+/// "View Brightness Levels" mode. Black at 0, warm white at 255.
+fn brightness_color(light: i16) -> [u8; 4] {
+    let l = (light.clamp(0, 255) as f32) / 255.0;
+    let r = (l * 255.0) as u8;
+    let g = (l * 245.0) as u8;
+    let b = (l * 215.0) as u8;
+    [r, g, b, 255]
+}
+
+// ---- Shape vertex builders --------------------------------------------------
+
+fn rect_corners(a: Vec2, b: Vec2) -> (Vec2, Vec2) {
+    let min = Vec2::new(a.x.min(b.x), a.y.min(b.y));
+    let max = Vec2::new(a.x.max(b.x), a.y.max(b.y));
+    (min, max)
+}
+
+/// Vertices of a rectangle from `a` to `b`. When `bevel > 0`, each corner is
+/// chamfered by that many world units (clamped to half the shorter side).
+/// Ordered clockwise in math-Y-up coords so the front (right) sidedef of
+/// each emitted linedef faces inward — matches Doom's sector convention.
+fn rectangle_vertices(a: Vec2, b: Vec2, bevel: u32) -> Vec<Vec2> {
+    let (min, max) = rect_corners(a, b);
+    let w = max.x - min.x;
+    let h = max.y - min.y;
+    if w < 1.0 || h < 1.0 {
+        return Vec::new();
+    }
+    let bv = (bevel as f32).min((w * 0.5).min(h * 0.5));
+    if bv < 0.5 {
+        // Plain rectangle, 4 vertices, CW (math Y-up).
+        return vec![
+            Vec2::new(min.x, min.y),
+            Vec2::new(min.x, max.y),
+            Vec2::new(max.x, max.y),
+            Vec2::new(max.x, min.y),
+        ];
+    }
+    // Beveled rectangle, 8 vertices, CW.
+    vec![
+        Vec2::new(min.x, min.y + bv),
+        Vec2::new(min.x, max.y - bv),
+        Vec2::new(min.x + bv, max.y),
+        Vec2::new(max.x - bv, max.y),
+        Vec2::new(max.x, max.y - bv),
+        Vec2::new(max.x, min.y + bv),
+        Vec2::new(max.x - bv, min.y),
+        Vec2::new(min.x + bv, min.y),
+    ]
+}
+
+/// N-subdivision approximation of an axis-aligned ellipse inscribed in the
+/// bounding box from `a` to `b`. Walked clockwise (math Y-up) so the right
+/// sidedef of each emitted linedef faces inward.
+fn ellipse_vertices(a: Vec2, b: Vec2, subdivisions: u32) -> Vec<Vec2> {
+    let (min, max) = rect_corners(a, b);
+    let cx = (min.x + max.x) * 0.5;
+    let cy = (min.y + max.y) * 0.5;
+    let rx = (max.x - min.x) * 0.5;
+    let ry = (max.y - min.y) * 0.5;
+    if rx < 0.5 || ry < 0.5 {
+        return Vec::new();
+    }
+    let n = subdivisions.max(4) as usize;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        // Negate the sine so we sweep clockwise instead of CCW.
+        let t = (i as f32 / n as f32) * std::f32::consts::TAU;
+        out.push(Vec2::new(cx + rx * t.cos(), cy - ry * t.sin()));
+    }
+    out
+}
+
+fn quadratic_bezier_point(p0: Vec2, p1: Vec2, p2: Vec2, t: f32) -> Vec2 {
+    let mt = 1.0 - t;
+    Vec2::new(
+        mt * mt * p0.x + 2.0 * mt * t * p1.x + t * t * p2.x,
+        mt * mt * p0.y + 2.0 * mt * t * p1.y + t * t * p2.y,
+    )
+}
+
+/// Sample a quadratic bezier with `subdivisions` segments → `subdivisions+1`
+/// vertices spanning p0..p2 with control p1.
+fn quadratic_bezier_vertices(p0: Vec2, p2: Vec2, p1: Vec2, subdivisions: u32) -> Vec<Vec2> {
+    let n = subdivisions.max(2);
+    let mut out = Vec::with_capacity((n + 1) as usize);
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        out.push(quadratic_bezier_point(p0, p1, p2, t));
+    }
+    out
+}
+
+/// Construct a `LinedefChain` from a vertex polyline. `closed = true`
+/// connects the last vertex back to the first.
+fn chain_from_polyline(points: &[Vec2], closed: bool) -> LinedefChain {
+    let mut chain = LinedefChain::default();
+    for p in points {
+        chain
+            .vertex_inserts
+            .push(doombuilder_core::map::MapVertex {
+                x: p.x.round() as i32,
+                y: p.y.round() as i32,
+            });
+    }
+    let n = points.len();
+    let line_count = if closed { n } else { n - 1 };
+    for i in 0..line_count {
+        let a = i;
+        let b = (i + 1) % n;
+        chain.linedefs.push((
+            LineEndpoint::New(a),
+            LineEndpoint::New(b),
+            doombuilder_core::map::MapLinedef {
+                v1: doombuilder_core::map::VertexId::default(),
+                v2: doombuilder_core::map::VertexId::default(),
+                flags: 0,
+                special: 0,
+                args: [0; 5],
+                tag: 0,
+                right: None,
+                left: None,
+            },
+        ));
+    }
+    chain
+}
+
+/// Grid of rectangles inside `a..b`. Produces (cols+1)*(rows+1) vertices and
+/// (cols+1)*rows + (rows+1)*cols linedefs (horizontal + vertical grid lines).
+fn chain_from_grid(a: Vec2, b: Vec2, cols: u32, rows: u32) -> LinedefChain {
+    let (min, max) = rect_corners(a, b);
+    let mut chain = LinedefChain::default();
+    let cols = cols.max(1) as usize;
+    let rows = rows.max(1) as usize;
+    let nx = cols + 1;
+    let ny = rows + 1;
+    let dx = (max.x - min.x) / cols as f32;
+    let dy = (max.y - min.y) / rows as f32;
+    if dx < 1.0 || dy < 1.0 {
+        return chain;
+    }
+    // Vertices in row-major order: (col, row).
+    let idx = |c: usize, r: usize| -> usize { r * nx + c };
+    for r in 0..ny {
+        for c in 0..nx {
+            let x = min.x + c as f32 * dx;
+            let y = min.y + r as f32 * dy;
+            chain
+                .vertex_inserts
+                .push(doombuilder_core::map::MapVertex {
+                    x: x.round() as i32,
+                    y: y.round() as i32,
+                });
+        }
+    }
+    let new_line = |a: usize, b: usize| {
+        (
+            LineEndpoint::New(a),
+            LineEndpoint::New(b),
+            doombuilder_core::map::MapLinedef {
+                v1: doombuilder_core::map::VertexId::default(),
+                v2: doombuilder_core::map::VertexId::default(),
+                flags: 0,
+                special: 0,
+                args: [0; 5],
+                tag: 0,
+                right: None,
+                left: None,
+            },
+        )
+    };
+    // Horizontal lines across each row.
+    for r in 0..ny {
+        for c in 0..cols {
+            chain.linedefs.push(new_line(idx(c, r), idx(c + 1, r)));
+        }
+    }
+    // Vertical lines down each column.
+    for c in 0..nx {
+        for r in 0..rows {
+            chain.linedefs.push(new_line(idx(c, r), idx(c, r + 1)));
+        }
+    }
+    chain
+}
+
+/// Order `line_ids` into a vertex path. Returns `None` if the selection
+/// isn't a single open chain (any vertex shared by >2 lines, or the chain
+/// is disconnected). Endpoint vertices have degree 1; all others degree 2.
+fn order_line_chain(map: &Map, line_ids: &[LinedefId]) -> Option<Vec<VertexId>> {
+    use std::collections::HashMap;
+    let mut adj: HashMap<VertexId, Vec<(VertexId, LinedefId)>> = HashMap::new();
+    for lid in line_ids {
+        let l = map.linedefs.get(*lid)?;
+        adj.entry(l.v1).or_default().push((l.v2, *lid));
+        adj.entry(l.v2).or_default().push((l.v1, *lid));
+    }
+    if adj.values().any(|v| v.len() > 2) {
+        return None;
+    }
+    let endpoints: Vec<VertexId> =
+        adj.iter().filter(|(_, ns)| ns.len() == 1).map(|(v, _)| *v).collect();
+    if endpoints.len() != 2 {
+        return None;
+    }
+    let mut path = vec![endpoints[0]];
+    let mut visited_lines: HashSet<LinedefId> = HashSet::new();
+    loop {
+        let cur = *path.last().unwrap();
+        let next = adj
+            .get(&cur)?
+            .iter()
+            .find(|(_, lid)| !visited_lines.contains(lid))
+            .copied();
+        let Some((nxt_v, nxt_l)) = next else { break };
+        visited_lines.insert(nxt_l);
+        path.push(nxt_v);
+        if Some(&nxt_v) == endpoints.last() && visited_lines.len() == line_ids.len() {
+            break;
+        }
+    }
+    if visited_lines.len() != line_ids.len() {
+        return None;
+    }
+    Some(path)
 }
 
 async fn pick_file() -> Option<PathBuf> {

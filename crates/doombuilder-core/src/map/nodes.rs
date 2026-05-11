@@ -50,8 +50,30 @@ pub fn build_nodes(map: &Map) -> NodeOutput {
 
     let initial_segs = build_initial_segs(map, &vertex_idx, &linedef_idx);
 
+    let mut root: Option<u16> = None;
     if !initial_segs.is_empty() {
-        let _ = build_bsp(&mut ctx, initial_segs);
+        root = Some(build_bsp(&mut ctx, initial_segs));
+    }
+
+    // If the entire map is convex, build_bsp produced 0 nodes and a single
+    // ssector; the engine reads `nodes[numnodes - 1]` to find the BSP root
+    // and underflows when `numnodes == 0`. Synthesize a degenerate root node
+    // whose left + right children both point at the lone ssector.
+    if ctx.nodes_out.is_empty() && !ctx.ssectors_out.is_empty() {
+        let leaf_child = root.unwrap_or(0x8000); // ssector 0 with high bit set
+        let bbox = map_bbox(map);
+        ctx.nodes_out.push(OutNode {
+            px: bbox.left,
+            py: bbox.bottom,
+            // Non-zero direction so engines that consult the partition line
+            // don't trip on a zero-vector divisor.
+            pdx: 1,
+            pdy: 0,
+            right_bb: bbox,
+            left_bb: bbox,
+            right_child: leaf_child,
+            left_child: leaf_child,
+        });
     }
 
     let segs = encode_segs(&ctx.segs_out);
@@ -418,6 +440,31 @@ fn split_one(seg: &Seg, part: &Seg, ctx: &mut BuildCtx) -> (Seg, Seg) {
     (a, b)
 }
 
+/// Bounding box over every vertex in the map. Used as a fallback child bbox
+/// for the synthetic root node when the BSP yields a single ssector.
+fn map_bbox(map: &Map) -> BBox {
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    for (_, v) in &map.vertices {
+        min_x = min_x.min(v.x);
+        min_y = min_y.min(v.y);
+        max_x = max_x.max(v.x);
+        max_y = max_y.max(v.y);
+    }
+    if min_x > max_x {
+        // Empty map fallback.
+        return BBox { top: 0, bottom: 0, left: 0, right: 0 };
+    }
+    BBox {
+        top: clamp_i16(max_y),
+        bottom: clamp_i16(min_y),
+        left: clamp_i16(min_x),
+        right: clamp_i16(max_x),
+    }
+}
+
 fn bbox_of(segs: &[Seg]) -> BBox {
     let mut min_x = i32::MAX;
     let mut min_y = i32::MAX;
@@ -712,14 +759,23 @@ mod tests {
     }
 
     #[test]
-    fn convex_square_emits_one_ssector_no_nodes() {
+    fn convex_square_emits_one_ssector_with_synthetic_root() {
         let map = square_map();
         let out = build_nodes(&map);
-        // 4 one-sided linedefs => 4 segs, all in one ssector, no internal node.
+        // 4 one-sided linedefs => 4 segs, all in one ssector.
         assert_eq!(out.segs.len(), 4 * 12, "4 segs of 12 bytes");
         assert_eq!(out.ssectors.len(), 4, "1 ssector of 4 bytes");
-        assert_eq!(out.nodes.len(), 0, "convex map needs no internal nodes");
+        // Convex maps need a synthetic root node so `nodes[numnodes - 1]`
+        // is dereferenceable by the engine. Both children point at the leaf.
+        assert_eq!(out.nodes.len(), 28, "one synthetic root node");
         assert!(out.extra_vertices.is_empty(), "no splits on convex map");
+        // Node layout: partition (8b) + right_bb (8b) + left_bb (8b) +
+        // right_child (2b) + left_child (2b) = 28 bytes. Children live at
+        // offsets 24..26 and 26..28.
+        let r = u16::from_le_bytes([out.nodes[24], out.nodes[25]]);
+        let l = u16::from_le_bytes([out.nodes[26], out.nodes[27]]);
+        assert!(r & 0x8000 != 0, "right child must be an ssector ref");
+        assert!(l & 0x8000 != 0, "left child must be an ssector ref");
     }
 
     #[test]

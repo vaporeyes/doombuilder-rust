@@ -103,6 +103,14 @@ pub enum Command {
     /// Flip one or more linedefs: swap v1 <-> v2 and right <-> left sidedefs.
     /// Self-inverse, so apply and revert do the same work.
     FlipLinedefs(Vec<LinedefId>),
+    /// Swap the right/left sidedef pointers without reversing the linedef
+    /// direction. The line walks v1→v2 the same way after the flip, but
+    /// whichever sector was on the "outside" now faces the player. Self-
+    /// inverse like `FlipLinedefs`.
+    FlipSidedefs(Vec<LinedefId>),
+    /// Set sidedef texture offsets (per-sidedef X and/or Y) atomically. Used
+    /// by Auto-Align Textures and other propagation tools.
+    SetSidedefOffsets(Vec<SidedefOffsetChange>),
     /// Change one of a sector's integer fields.
     SetSectorIntField {
         id: SectorId,
@@ -154,6 +162,17 @@ pub struct JoinSectorsState {
 pub enum SidedefSide {
     Right,
     Left,
+}
+
+/// Old/new pair for a per-sidedef offset write. `None` in a slot leaves that
+/// axis untouched.
+#[derive(Debug, Clone, Copy)]
+pub struct SidedefOffsetChange {
+    pub id: SidedefId,
+    pub old_x: i16,
+    pub old_y: i16,
+    pub new_x: Option<i16>,
+    pub new_y: Option<i16>,
 }
 
 #[derive(Debug, Clone)]
@@ -756,6 +775,195 @@ pub fn compute_join_sectors(
     })
 }
 
+/// Order a set of linedefs into a single walk-path (sequence of vertex ids
+/// and the linedef traversed between each adjacent pair). Returns `None` if
+/// the selection isn't a single open or closed chain (any vertex shared by
+/// more than two lines).
+pub fn order_linedef_chain(
+    map: &Map,
+    line_ids: &[LinedefId],
+) -> Option<Vec<(VertexId, LinedefId)>> {
+    let mut adj: HashMap<VertexId, Vec<(VertexId, LinedefId)>> = HashMap::new();
+    for lid in line_ids {
+        let l = map.linedefs.get(*lid)?;
+        adj.entry(l.v1).or_default().push((l.v2, *lid));
+        adj.entry(l.v2).or_default().push((l.v1, *lid));
+    }
+    if adj.values().any(|v| v.len() > 2) {
+        return None;
+    }
+    // Pick a starting vertex: an endpoint (degree 1) for an open chain;
+    // otherwise any vertex (closed loop).
+    let start = adj
+        .iter()
+        .find(|(_, ns)| ns.len() == 1)
+        .map(|(v, _)| *v)
+        .or_else(|| adj.keys().next().copied())?;
+    let mut path: Vec<(VertexId, LinedefId)> = Vec::new();
+    let mut visited_lines: HashSet<LinedefId> = HashSet::new();
+    let mut cur = start;
+    loop {
+        let next = adj
+            .get(&cur)?
+            .iter()
+            .find(|(_, lid)| !visited_lines.contains(lid))
+            .copied();
+        let Some((nxt_v, nxt_l)) = next else { break };
+        visited_lines.insert(nxt_l);
+        path.push((cur, nxt_l));
+        cur = nxt_v;
+        if visited_lines.len() == line_ids.len() {
+            path.push((cur, LinedefId::default())); // sentinel for the terminal vertex
+            break;
+        }
+    }
+    if visited_lines.len() != line_ids.len() {
+        return None;
+    }
+    Some(path)
+}
+
+/// Build a `Command::FlipLinedefs` that re-orients selected lines so each
+/// line's right (front) sidedef points outward from the loop's centroid.
+/// Lines without two endpoints are skipped. Works on any selection — even
+/// when they don't form a single closed chain — by treating each line
+/// independently against the *selection's* centroid.
+pub fn compute_align_linedefs(map: &Map, line_ids: &[LinedefId]) -> Vec<LinedefId> {
+    if line_ids.is_empty() {
+        return Vec::new();
+    }
+    // Centroid of all vertex endpoints in the selection.
+    let mut cx = 0.0_f32;
+    let mut cy = 0.0_f32;
+    let mut count = 0.0_f32;
+    for lid in line_ids {
+        if let Some(l) = map.linedefs.get(*lid) {
+            if let (Some(a), Some(b)) = (map.vertices.get(l.v1), map.vertices.get(l.v2)) {
+                cx += a.x as f32 + b.x as f32;
+                cy += a.y as f32 + b.y as f32;
+                count += 2.0;
+            }
+        }
+    }
+    if count < 1.0 {
+        return Vec::new();
+    }
+    cx /= count;
+    cy /= count;
+    // For each line, the right-of-walk normal in math-Y-up is (dy, -dx).
+    // If this normal points AWAY from the centroid (positive dot with the
+    // mid→centroid vector flipped), the line is already aligned. Else flip.
+    let mut to_flip: Vec<LinedefId> = Vec::new();
+    for lid in line_ids {
+        let Some(l) = map.linedefs.get(*lid) else { continue };
+        let (Some(a), Some(b)) = (map.vertices.get(l.v1), map.vertices.get(l.v2)) else {
+            continue;
+        };
+        let dx = (b.x - a.x) as f32;
+        let dy = (b.y - a.y) as f32;
+        // Right-side normal in math-Y-up coords.
+        let nx = dy;
+        let ny = -dx;
+        let mx = (a.x as f32 + b.x as f32) * 0.5;
+        let my = (a.y as f32 + b.y as f32) * 0.5;
+        let to_outside_x = mx - cx;
+        let to_outside_y = my - cy;
+        // Dot < 0 means the right-side normal points *towards* the centroid
+        // (i.e., front side faces inward) — flip to align with convention.
+        let dot = nx * to_outside_x + ny * to_outside_y;
+        if dot < 0.0 {
+            to_flip.push(*lid);
+        }
+    }
+    to_flip
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AutoAlignAxis {
+    X,
+    Y,
+    Both,
+}
+
+/// Walk an ordered chain of linedefs (e.g. from `order_linedef_chain`) and
+/// compute per-sidedef X-offset values so the wall texture flows seamlessly
+/// across all selected lines. Picks the right-side sidedef of each line; if
+/// only a left side exists, falls back to that. The first sidedef keeps its
+/// current X offset; each subsequent one is set to `prev_x + prev_length`
+/// modulo a reasonable texture width (256 is a safe pick when we don't have
+/// access to the actual texture's pixel width).
+///
+/// For axis Y or Both, each sidedef's Y offset becomes the floor-height
+/// delta relative to the chain's starting sector floor — matches how
+/// vanilla Doom aligns vertical seams when a wall steps up or down.
+pub fn compute_auto_align_textures(
+    map: &Map,
+    line_ids: &[LinedefId],
+    axis: AutoAlignAxis,
+) -> Vec<SidedefOffsetChange> {
+    if line_ids.is_empty() {
+        return Vec::new();
+    }
+    let Some(path) = order_linedef_chain(map, line_ids) else {
+        return Vec::new();
+    };
+    let mut changes: Vec<SidedefOffsetChange> = Vec::new();
+    let mut accumulated: f32 = 0.0;
+    let mut base_floor: Option<i16> = None;
+    for window_idx in 0..path.len().saturating_sub(1) {
+        let (from_v, lid) = path[window_idx];
+        let (to_v, _) = path[window_idx + 1];
+        let Some(line) = map.linedefs.get(lid) else { continue };
+        let sid = match (line.right, line.left) {
+            (Some(r), _) => r,
+            (None, Some(l)) => l,
+            _ => continue,
+        };
+        let Some(side) = map.sidedefs.get(sid) else { continue };
+        // First line in chain → seed the X with its current offset.
+        if changes.is_empty() {
+            accumulated = side.x_offset as f32;
+        }
+        let length = match (map.vertices.get(from_v), map.vertices.get(to_v)) {
+            (Some(a), Some(b)) => {
+                let dx = (b.x - a.x) as f32;
+                let dy = (b.y - a.y) as f32;
+                (dx * dx + dy * dy).sqrt()
+            }
+            _ => 0.0,
+        };
+        let new_x = match axis {
+            AutoAlignAxis::X | AutoAlignAxis::Both => {
+                Some(((accumulated.round() as i32) & 0xFFFF) as i16)
+            }
+            _ => None,
+        };
+        let new_y = match axis {
+            AutoAlignAxis::Y | AutoAlignAxis::Both => {
+                let floor_h = map.sectors.get(side.sector).map(|s| s.floor_height);
+                match (base_floor, floor_h) {
+                    (None, Some(h)) => {
+                        base_floor = Some(h);
+                        Some(side.y_offset)
+                    }
+                    (Some(base), Some(h)) => Some((h - base).clamp(i16::MIN, i16::MAX)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        changes.push(SidedefOffsetChange {
+            id: sid,
+            old_x: side.x_offset,
+            old_y: side.y_offset,
+            new_x,
+            new_y,
+        });
+        accumulated += length;
+    }
+    changes
+}
+
 impl Command {
     pub fn apply(&mut self, map: &mut Map) {
         match self {
@@ -1010,6 +1218,25 @@ impl Command {
                     if let Some(line) = map.linedefs.get_mut(*id) {
                         std::mem::swap(&mut line.v1, &mut line.v2);
                         std::mem::swap(&mut line.right, &mut line.left);
+                    }
+                }
+            }
+            Command::FlipSidedefs(ids) => {
+                for id in ids.iter() {
+                    if let Some(line) = map.linedefs.get_mut(*id) {
+                        std::mem::swap(&mut line.right, &mut line.left);
+                    }
+                }
+            }
+            Command::SetSidedefOffsets(changes) => {
+                for c in changes.iter() {
+                    if let Some(side) = map.sidedefs.get_mut(c.id) {
+                        if let Some(x) = c.new_x {
+                            side.x_offset = x;
+                        }
+                        if let Some(y) = c.new_y {
+                            side.y_offset = y;
+                        }
                     }
                 }
             }
@@ -1283,6 +1510,27 @@ impl Command {
                     if let Some(line) = map.linedefs.get_mut(*id) {
                         std::mem::swap(&mut line.v1, &mut line.v2);
                         std::mem::swap(&mut line.right, &mut line.left);
+                    }
+                }
+            }
+            Command::FlipSidedefs(ids) => {
+                for id in ids.iter() {
+                    if let Some(line) = map.linedefs.get_mut(*id) {
+                        std::mem::swap(&mut line.right, &mut line.left);
+                    }
+                }
+            }
+            Command::SetSidedefOffsets(changes) => {
+                // Revert: restore the previously-recorded old values for any
+                // axis that was actually changed by the apply step.
+                for c in changes.iter() {
+                    if let Some(side) = map.sidedefs.get_mut(c.id) {
+                        if c.new_x.is_some() {
+                            side.x_offset = c.old_x;
+                        }
+                        if c.new_y.is_some() {
+                            side.y_offset = c.old_y;
+                        }
                     }
                 }
             }

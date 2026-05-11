@@ -19,18 +19,38 @@ pub struct SectorFill {
     pub rgba: Vec<u8>,
 }
 
+/// Which sector flat to rasterise into the 2D fill image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillSlot {
+    Floor,
+    Ceiling,
+}
+
 pub fn rasterise_sector_fill(
     map: &Map,
     sector: SectorId,
     mesh: &FloorMesh,
     textures: &TextureSet,
 ) -> Option<SectorFill> {
+    rasterise_sector_fill_slot(map, sector, mesh, textures, FillSlot::Floor)
+}
+
+pub fn rasterise_sector_fill_slot(
+    map: &Map,
+    sector: SectorId,
+    mesh: &FloorMesh,
+    textures: &TextureSet,
+    slot: FillSlot,
+) -> Option<SectorFill> {
     if mesh.indices.is_empty() {
         return None;
     }
     let sec = map.sectors.get(sector)?;
-    let upper = sec.floor_texture.as_str().to_ascii_uppercase();
-    let flat = textures.flats.get(&upper)?;
+    let name = match slot {
+        FillSlot::Floor => sec.floor_texture.as_str().to_ascii_uppercase(),
+        FillSlot::Ceiling => sec.ceiling_texture.as_str().to_ascii_uppercase(),
+    };
+    let flat = textures.flats.get(&name)?;
 
     let (min_x, min_y, max_x, max_y) = aabb(&mesh.positions);
     let x0 = min_x.floor() as i32;
@@ -56,6 +76,85 @@ pub fn rasterise_sector_fill(
         origin_world: (x0 as f32, y1 as f32),
         rgba,
     })
+}
+
+/// Rasterise a sector's polygon filled with a solid RGBA color. Used for
+/// the "brightness levels" view where the fill encodes sector light.
+pub fn rasterise_sector_solid(
+    sector: SectorId,
+    mesh: &FloorMesh,
+    color: [u8; 4],
+) -> Option<SectorFill> {
+    let _ = sector;
+    if mesh.indices.is_empty() {
+        return None;
+    }
+    let (min_x, min_y, max_x, max_y) = aabb(&mesh.positions);
+    let x0 = min_x.floor() as i32;
+    let y0 = min_y.floor() as i32;
+    let x1 = max_x.ceil() as i32;
+    let y1 = max_y.ceil() as i32;
+    let _ = y0;
+    let width = (x1 - x0).max(1) as u32;
+    let height = (y1 - y0).max(1) as u32;
+    let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
+    let mut i = 0;
+    while i + 2 < mesh.indices.len() {
+        let a = mesh.positions[mesh.indices[i] as usize];
+        let b = mesh.positions[mesh.indices[i + 1] as usize];
+        let c = mesh.positions[mesh.indices[i + 2] as usize];
+        rasterise_triangle_solid(&mut rgba, width, height, x0, y1, a, b, c, color);
+        i += 3;
+    }
+    Some(SectorFill {
+        width,
+        height,
+        origin_world: (x0 as f32, y1 as f32),
+        rgba,
+    })
+}
+
+fn rasterise_triangle_solid(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    origin_x: i32,
+    origin_y_top: i32,
+    a: [f32; 2],
+    b: [f32; 2],
+    c: [f32; 2],
+    color: [u8; 4],
+) {
+    let min_x = a[0].min(b[0]).min(c[0]).floor() as i32;
+    let max_x = a[0].max(b[0]).max(c[0]).ceil() as i32;
+    let min_y = a[1].min(b[1]).min(c[1]).floor() as i32;
+    let max_y = a[1].max(b[1]).max(c[1]).ceil() as i32;
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let p = [x as f32 + 0.5, y as f32 + 0.5];
+            // Half-plane test using sign-of-cross-product against each edge.
+            let s_ab = edge_solid(a, b, p);
+            let s_bc = edge_solid(b, c, p);
+            let s_ca = edge_solid(c, a, p);
+            let inside = (s_ab >= 0.0 && s_bc >= 0.0 && s_ca >= 0.0)
+                || (s_ab <= 0.0 && s_bc <= 0.0 && s_ca <= 0.0);
+            if !inside {
+                continue;
+            }
+            // World y goes up; image y goes down → flip to image row.
+            let img_x = x - origin_x;
+            let img_y = origin_y_top - 1 - y;
+            if img_x < 0 || img_y < 0 || img_x as u32 >= width || img_y as u32 >= height {
+                continue;
+            }
+            let idx = ((img_y as u32 * width + img_x as u32) * 4) as usize;
+            rgba[idx..idx + 4].copy_from_slice(&color);
+        }
+    }
+}
+
+fn edge_solid(a: [f32; 2], b: [f32; 2], p: [f32; 2]) -> f32 {
+    (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
 }
 
 fn aabb(positions: &[[f32; 2]]) -> (f32, f32, f32, f32) {

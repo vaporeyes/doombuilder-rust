@@ -81,6 +81,19 @@ pub struct View2D {
     pub settings: Settings,
     /// When true, left-mouse drag pans instead of selecting (Space-hold pan).
     pub pan_override: bool,
+    /// Shape-tool preview info, if a non-free draw tool is active.
+    pub shape_preview: Option<ShapePreview>,
+    /// When true, draw the fill tiles at full alpha regardless of edit mode.
+    /// Used by the Brightness view so the brightness colors actually pop.
+    pub opaque_fills: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum ShapePreview {
+    Rectangle { origin: Vec2, cursor: Vec2, bevel: u32 },
+    Ellipse { origin: Vec2, cursor: Vec2, subdivisions: u32 },
+    Curve { points: Vec<Vec2>, cursor: Vec2, subdivisions: u32 },
+    Grid { origin: Vec2, cursor: Vec2, cols: u32, rows: u32 },
 }
 
 impl View2D {
@@ -281,7 +294,11 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                 let override_step = settings.grid_size.map(|n| n as f32);
                 draw_grid(frame, &self.inner.camera, viewport, override_step);
             }
-            let fill_alpha = if mode == EditMode::Sectors { 1.0 } else { 0.55 };
+            let fill_alpha = if self.inner.opaque_fills || mode == EditMode::Sectors {
+                1.0
+            } else {
+                0.55
+            };
             if self.inner.fills.is_empty() {
                 draw_sector_fills_solid(
                     frame,
@@ -368,6 +385,9 @@ impl<Message> Program<Message> for View2DProgram<Message> {
             }
             if let Some((start, end)) = self.inner.drag_rect {
                 draw_drag_rect(frame, &self.inner.camera, viewport, start, end);
+            }
+            if let Some(preview) = &self.inner.shape_preview {
+                draw_shape_preview(frame, &self.inner.camera, viewport, preview);
             }
             // Hover preview tooltip for Things in Things mode: a small panel
             // anchored beside the hovered thing showing its sprite and name.
@@ -624,6 +644,11 @@ fn draw_linedefs(
         .with_color(Color::from_rgb(1.0, 0.3, 0.3))
         .with_width(2.5);
 
+    // Tick length on the front side at the linedef midpoint (screen-space).
+    const TICK_PX: f32 = 6.0;
+    // Skip the direction tick when the on-screen linedef is shorter than this.
+    const TICK_MIN_LINE_PX: f32 = 12.0;
+
     for (id, line) in &map.linedefs {
         let (Some(v1), Some(v2)) = (map.vertices.get(line.v1), map.vertices.get(line.v2)) else {
             continue;
@@ -635,15 +660,35 @@ fn draw_linedefs(
         let is_selected = selection.contains(&HighlightKind::Linedef(id));
         let is_hovered = matches!(hover, Some(HighlightKind::Linedef(h)) if h == id);
         let stroke = if is_selected {
-            selected
+            selected.clone()
         } else if is_hovered {
-            hovered
+            hovered.clone()
         } else if line.left.is_some() && line.right.is_some() {
-            two_sided
+            two_sided.clone()
         } else {
-            one_sided
+            one_sided.clone()
         };
-        frame.stroke(&path, stroke);
+        frame.stroke(&path, stroke.clone());
+
+        // Front-side direction tick: a short stub from the linedef midpoint
+        // pointing in the direction of the right (front) sidedef. In our
+        // screen frame (Y-down), "right of walking direction (p1->p2)" is
+        // the perpendicular (-sdy, sdx) once normalised.
+        let sdx = p2.x - p1.x;
+        let sdy = p2.y - p1.y;
+        let len_sq = sdx * sdx + sdy * sdy;
+        if len_sq >= TICK_MIN_LINE_PX * TICK_MIN_LINE_PX {
+            let len = len_sq.sqrt();
+            let nx = -sdy / len;
+            let ny = sdx / len;
+            let mx = (p1.x + p2.x) * 0.5;
+            let my = (p1.y + p2.y) * 0.5;
+            let tip = Point::new(mx + nx * TICK_PX, my + ny * TICK_PX);
+            let tick_path = Path::line(Point::new(mx, my), tip);
+            // Use the same color as the linedef stroke so the tick reads as
+            // an extension of the line itself.
+            frame.stroke(&tick_path, stroke);
+        }
     }
 }
 
@@ -839,6 +884,166 @@ fn resolve_sprite<'a>(
 
 fn with_alpha(c: Color, a: f32) -> Color {
     Color::from_rgba(c.r, c.g, c.b, c.a * a)
+}
+
+fn draw_shape_preview(
+    frame: &mut Frame,
+    camera: &Camera2D,
+    viewport: Vec2,
+    preview: &ShapePreview,
+) {
+    let line_color = Color::from_rgba(0.95, 0.85, 0.30, 0.90);
+    let guide_color = Color::from_rgba(0.95, 0.85, 0.30, 0.45);
+    let stroke = canvas::Stroke {
+        style: canvas::Style::Solid(line_color),
+        width: 1.5,
+        ..Default::default()
+    };
+    let dotted = canvas::Stroke {
+        style: canvas::Style::Solid(guide_color),
+        width: 1.0,
+        line_dash: canvas::LineDash {
+            segments: &[4.0, 4.0],
+            offset: 0,
+        },
+        ..Default::default()
+    };
+    let draw_polyline_world =
+        |frame: &mut Frame, pts: &[Vec2], closed: bool, st: &canvas::Stroke| {
+            if pts.len() < 2 {
+                return;
+            }
+            let mut builder = canvas::path::Builder::new();
+            let first = camera.world_to_screen(pts[0], viewport);
+            builder.move_to(Point::new(first.x, first.y));
+            for p in &pts[1..] {
+                let s = camera.world_to_screen(*p, viewport);
+                builder.line_to(Point::new(s.x, s.y));
+            }
+            if closed {
+                builder.close();
+            }
+            frame.stroke(&builder.build(), st.clone());
+        };
+    match preview {
+        ShapePreview::Rectangle { origin, cursor, bevel } => {
+            let pts = preview_rectangle(*origin, *cursor, *bevel);
+            draw_polyline_world(frame, &pts, true, &stroke);
+        }
+        ShapePreview::Ellipse { origin, cursor, subdivisions } => {
+            let pts = preview_ellipse(*origin, *cursor, *subdivisions);
+            draw_polyline_world(frame, &pts, true, &stroke);
+        }
+        ShapePreview::Curve { points, cursor, subdivisions } => {
+            let mut chord = points.clone();
+            chord.push(*cursor);
+            // While only 1 or 2 anchors are placed, show a straight-line guide
+            // through them and a chord to the cursor.
+            if points.len() < 2 {
+                draw_polyline_world(frame, &chord, false, &dotted);
+            } else {
+                // points = [start, end]; cursor = pending control point.
+                let pts = preview_quadratic_bezier(points[0], points[1], *cursor, *subdivisions);
+                draw_polyline_world(frame, &pts, false, &stroke);
+                draw_polyline_world(
+                    frame,
+                    &[points[0], *cursor, points[1]],
+                    false,
+                    &dotted,
+                );
+            }
+        }
+        ShapePreview::Grid { origin, cursor, cols, rows } => {
+            let lines = preview_grid(*origin, *cursor, *cols, *rows);
+            for seg in lines {
+                draw_polyline_world(frame, &seg, false, &stroke);
+            }
+        }
+    }
+}
+
+fn preview_rect_corners(a: Vec2, b: Vec2) -> (Vec2, Vec2) {
+    let min = Vec2::new(a.x.min(b.x), a.y.min(b.y));
+    let max = Vec2::new(a.x.max(b.x), a.y.max(b.y));
+    (min, max)
+}
+
+fn preview_rectangle(a: Vec2, b: Vec2, bevel: u32) -> Vec<Vec2> {
+    let (min, max) = preview_rect_corners(a, b);
+    let w = max.x - min.x;
+    let h = max.y - min.y;
+    if w < 1.0 || h < 1.0 {
+        return Vec::new();
+    }
+    let bv = (bevel as f32).min((w * 0.5).min(h * 0.5));
+    if bv < 0.5 {
+        return vec![
+            Vec2::new(min.x, min.y),
+            Vec2::new(max.x, min.y),
+            Vec2::new(max.x, max.y),
+            Vec2::new(min.x, max.y),
+        ];
+    }
+    vec![
+        Vec2::new(min.x + bv, min.y),
+        Vec2::new(max.x - bv, min.y),
+        Vec2::new(max.x, min.y + bv),
+        Vec2::new(max.x, max.y - bv),
+        Vec2::new(max.x - bv, max.y),
+        Vec2::new(min.x + bv, max.y),
+        Vec2::new(min.x, max.y - bv),
+        Vec2::new(min.x, min.y + bv),
+    ]
+}
+
+fn preview_ellipse(a: Vec2, b: Vec2, subdivisions: u32) -> Vec<Vec2> {
+    let (min, max) = preview_rect_corners(a, b);
+    let cx = (min.x + max.x) * 0.5;
+    let cy = (min.y + max.y) * 0.5;
+    let rx = (max.x - min.x) * 0.5;
+    let ry = (max.y - min.y) * 0.5;
+    if rx < 0.5 || ry < 0.5 {
+        return Vec::new();
+    }
+    let n = subdivisions.max(4) as usize;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = (i as f32 / n as f32) * std::f32::consts::TAU;
+        out.push(Vec2::new(cx + rx * t.cos(), cy + ry * t.sin()));
+    }
+    out
+}
+
+fn preview_quadratic_bezier(p0: Vec2, p2: Vec2, p1: Vec2, subdivisions: u32) -> Vec<Vec2> {
+    let n = subdivisions.max(2);
+    let mut out = Vec::with_capacity((n + 1) as usize);
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let mt = 1.0 - t;
+        out.push(Vec2::new(
+            mt * mt * p0.x + 2.0 * mt * t * p1.x + t * t * p2.x,
+            mt * mt * p0.y + 2.0 * mt * t * p1.y + t * t * p2.y,
+        ));
+    }
+    out
+}
+
+fn preview_grid(a: Vec2, b: Vec2, cols: u32, rows: u32) -> Vec<Vec<Vec2>> {
+    let (min, max) = preview_rect_corners(a, b);
+    let cols = cols.max(1) as usize;
+    let rows = rows.max(1) as usize;
+    let dx = (max.x - min.x) / cols as f32;
+    let dy = (max.y - min.y) / rows as f32;
+    let mut segs = Vec::new();
+    for r in 0..=rows {
+        let y = min.y + r as f32 * dy;
+        segs.push(vec![Vec2::new(min.x, y), Vec2::new(max.x, y)]);
+    }
+    for c in 0..=cols {
+        let x = min.x + c as f32 * dx;
+        segs.push(vec![Vec2::new(x, min.y), Vec2::new(x, max.y)]);
+    }
+    segs
 }
 
 /// Floating hover-card for the currently-hovered thing. Renders a panel

@@ -82,8 +82,9 @@ fn serialize_sectors(map: &Map) -> Vec<u8> {
     for (_, s) in &map.sectors {
         out.extend_from_slice(&s.floor_height.to_le_bytes());
         out.extend_from_slice(&s.ceiling_height.to_le_bytes());
-        out.extend_from_slice(&s.floor_texture.0);
-        out.extend_from_slice(&s.ceiling_texture.0);
+        // Flats use the same "-" convention as wall textures for unset names.
+        out.extend_from_slice(&normalize_tex_name(&s.floor_texture.0));
+        out.extend_from_slice(&normalize_tex_name(&s.ceiling_texture.0));
         out.extend_from_slice(&s.light.to_le_bytes());
         out.extend_from_slice(&s.special.to_le_bytes());
         out.extend_from_slice(&s.tag.to_le_bytes());
@@ -96,13 +97,80 @@ fn serialize_sidedefs(map: &Map, sector_idx: &HashMap<SectorId, u16>) -> Vec<u8>
     for (_, s) in &map.sidedefs {
         out.extend_from_slice(&s.x_offset.to_le_bytes());
         out.extend_from_slice(&s.y_offset.to_le_bytes());
-        out.extend_from_slice(&s.upper_texture.0);
-        out.extend_from_slice(&s.lower_texture.0);
-        out.extend_from_slice(&s.middle_texture.0);
+        // Doom convention: empty/all-NUL texture name is forbidden in the
+        // lump; "-" (dash) means "no texture". gzdoom's LoadSideDefs2
+        // null-derefs in the texture-resolution path when given all-NULs.
+        out.extend_from_slice(&normalize_tex_name(&s.upper_texture.0));
+        out.extend_from_slice(&normalize_tex_name(&s.lower_texture.0));
+        out.extend_from_slice(&normalize_tex_name(&s.middle_texture.0));
         let sec = sector_idx.get(&s.sector).copied().unwrap_or(0);
         out.extend_from_slice(&sec.to_le_bytes());
     }
     out
+}
+
+/// Coerce a texture name into the on-disk form. Empty / all-NUL names become
+/// `"-\0\0\0\0\0\0\0"` (the standard Doom "no texture" placeholder).
+fn normalize_tex_name(bytes: &[u8; 8]) -> [u8; 8] {
+    if bytes[0] == 0 {
+        let mut out = [0u8; 8];
+        out[0] = b'-';
+        out
+    } else {
+        *bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edit::{compute_make_sector, Command};
+    use crate::format::MapFormat;
+    use crate::map::{Map, MapLinedef, MapVertex};
+
+    /// Repro for the gzdoom LoadSideDefs2 crash: drawing a rectangle and
+    /// running Make Sector left upper/lower texture names all-NUL, which
+    /// gzdoom's texture-resolution path null-derefs. The lump must use "-".
+    #[test]
+    fn make_sector_save_writes_dash_for_empty_textures() {
+        let mut map = Map::new("MAP01", MapFormat::Doom);
+        let v0 = map.vertices.insert(MapVertex { x: 0, y: 0 });
+        let v1 = map.vertices.insert(MapVertex { x: 128, y: 0 });
+        let v2 = map.vertices.insert(MapVertex { x: 128, y: 128 });
+        let v3 = map.vertices.insert(MapVertex { x: 0, y: 128 });
+        let mk = |a, b| MapLinedef {
+            v1: a,
+            v2: b,
+            flags: 0,
+            special: 0,
+            args: [0; 5],
+            tag: 0,
+            right: None,
+            left: None,
+        };
+        let l0 = map.linedefs.insert(mk(v0, v1));
+        let l1 = map.linedefs.insert(mk(v1, v2));
+        let l2 = map.linedefs.insert(mk(v2, v3));
+        let l3 = map.linedefs.insert(mk(v3, v0));
+
+        let state = compute_make_sector(&map, &[l0, l1, l2, l3]).expect("make sector");
+        let mut cmd = Command::MakeSector(Box::new(state));
+        cmd.apply(&mut map);
+
+        let lumps = serialize_map(&map);
+        let sidedefs = &lumps.iter().find(|l| l.name == "SIDEDEFS").unwrap().data;
+        assert_eq!(sidedefs.len(), 4 * 30, "4 sidedefs of 30 bytes each");
+        // Each record's upper texture lives at offset 4..12. With the fix
+        // applied, that should start with '-' (0x2D), not NUL.
+        for i in 0..4 {
+            let upper = &sidedefs[i * 30 + 4..i * 30 + 12];
+            assert_eq!(
+                upper[0], b'-',
+                "sidedef {i}: upper texture must be '-' placeholder, got {:?}",
+                upper
+            );
+        }
+    }
 }
 
 fn serialize_linedefs(
