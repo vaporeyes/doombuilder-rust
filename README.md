@@ -3,11 +3,23 @@
 A Rust port of [Doom Builder](https://github.com/jewalky/UltimateDoomBuilder) /
 [DoomBuilderX](https://github.com/Volte6/doombuilderx) targeting Doom and Hexen
 map formats. The GUI is built on [iced](https://github.com/iced-rs/iced); map
-data lives in generational arenas; rendering uses iced's `Canvas` for 2D and
-will use a `wgpu` shader widget for 3D.
+data lives in generational arenas; rendering uses iced's `Canvas` for 2D and a
+`wgpu` shader widget for 3D.
 
 This is an early work-in-progress. The viewer is usable today; editing is not
 implemented yet.
+
+## Screenshots
+
+![2D editor in Linedefs mode](screenshots/main1.png)
+
+*2D editor on a doom2.wad map with the inspector, palette-themed chrome,
+front-side direction ticks, and the textured sector fills visible.*
+
+![3D mode preview](screenshots/main2.png)
+
+*Live 3D preview built from the same map data — orbital camera, sector-light
+shading, magenta/black checker placeholder for any missing texture references.*
 
 ## Status
 
