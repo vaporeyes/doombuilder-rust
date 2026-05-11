@@ -29,6 +29,9 @@ static EMPTY_DIMS: std::sync::OnceLock<HashMap<String, (u32, u32)>> = std::sync:
 pub enum View2DMessage {
     PanBy(Vec2),
     ZoomAt { pivot: Vec2, factor: f32, viewport: Vec2 },
+    /// Raw wheel signal; the App decides whether to zoom or adjust sectors
+    /// based on the current edit mode + active modifiers.
+    Wheel { units: f32, pivot: Vec2, viewport: Vec2 },
     HoverAt(Vec2),
     HoverCleared,
     ClickAt(Vec2),
@@ -245,12 +248,11 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                         mouse::ScrollDelta::Lines { y, .. } => *y,
                         mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
                     };
-                    let factor = (1.15_f32).powf(units);
                     let pivot = Vec2::new(p.x, p.y);
                     return Some(
-                        canvas::Action::publish((self.on_event)(View2DMessage::ZoomAt {
+                        canvas::Action::publish((self.on_event)(View2DMessage::Wheel {
+                            units,
                             pivot,
-                            factor,
                             viewport,
                         }))
                         .and_capture(),
@@ -366,6 +368,22 @@ impl<Message> Program<Message> for View2DProgram<Message> {
             }
             if let Some((start, end)) = self.inner.drag_rect {
                 draw_drag_rect(frame, &self.inner.camera, viewport, start, end);
+            }
+            // Hover preview tooltip for Things in Things mode: a small panel
+            // anchored beside the hovered thing showing its sprite and name.
+            if mode == EditMode::Things {
+                if let Some(HighlightKind::Thing(id)) = self.inner.hover {
+                    draw_thing_hover_preview(
+                        frame,
+                        &self.inner.map,
+                        &self.inner.camera,
+                        viewport,
+                        &self.inner.config,
+                        &self.inner.sprite_handles,
+                        &self.inner.sprite_dims,
+                        id,
+                    );
+                }
             }
         });
         vec![geometry]
@@ -821,6 +839,113 @@ fn resolve_sprite<'a>(
 
 fn with_alpha(c: Color, a: f32) -> Color {
     Color::from_rgba(c.r, c.g, c.b, c.a * a)
+}
+
+/// Floating hover-card for the currently-hovered thing. Renders a panel
+/// containing the thing's sprite (when available) plus its type id and name,
+/// anchored to the right of the thing. Clamps to the viewport so it stays
+/// fully visible at map edges.
+#[allow(clippy::too_many_arguments)]
+fn draw_thing_hover_preview(
+    frame: &mut Frame,
+    map: &Map,
+    camera: &Camera2D,
+    viewport: Vec2,
+    config: &GameConfig,
+    sprite_handles: &HashMap<String, ImageHandle>,
+    sprite_dims: &HashMap<String, (u32, u32)>,
+    id: doombuilder_core::map::ThingId,
+) {
+    let Some(t) = map.things.get(id) else { return };
+    let info = config.thing_type(t.kind);
+    let title = info.map(|i| i.title.clone()).unwrap_or_else(|| format!("Thing {}", t.kind));
+
+    // Anchor at the thing's screen position, offset to the right.
+    let s = camera.world_to_screen(Vec2::new(t.x as f32, t.y as f32), viewport);
+    let sprite = resolve_sprite(config, sprite_handles, sprite_dims, t.kind);
+
+    let card_w: f32 = 180.0;
+    let sprite_box: f32 = 64.0;
+    let pad: f32 = 8.0;
+    let line_h: f32 = 16.0;
+    // Two lines of text below the sprite: type id, title.
+    let card_h: f32 = sprite_box + pad * 3.0 + line_h * 2.0;
+
+    // Position to the right of the thing; clamp inside viewport.
+    let mut x = s.x + 22.0;
+    let mut y = s.y - card_h * 0.5;
+    if x + card_w > viewport.x - 8.0 {
+        x = s.x - 22.0 - card_w;
+    }
+    x = x.clamp(8.0, (viewport.x - card_w - 8.0).max(8.0));
+    y = y.clamp(8.0, (viewport.y - card_h - 8.0).max(8.0));
+
+    // Background card.
+    let bg = Color::from_rgba(0.08, 0.10, 0.14, 0.92);
+    let border = Color::from_rgba(1.0, 1.0, 1.0, 0.18);
+    frame.fill_rectangle(Point::new(x, y), Size::new(card_w, card_h), bg);
+    // 1-px border (4 rectangles).
+    frame.fill_rectangle(Point::new(x, y), Size::new(card_w, 1.0), border);
+    frame.fill_rectangle(Point::new(x, y + card_h - 1.0), Size::new(card_w, 1.0), border);
+    frame.fill_rectangle(Point::new(x, y), Size::new(1.0, card_h), border);
+    frame.fill_rectangle(
+        Point::new(x + card_w - 1.0, y),
+        Size::new(1.0, card_h),
+        border,
+    );
+
+    // Sprite slot centered horizontally at the top.
+    let sprite_x = x + (card_w - sprite_box) * 0.5;
+    let sprite_y = y + pad;
+    // Slot background.
+    frame.fill_rectangle(
+        Point::new(sprite_x, sprite_y),
+        Size::new(sprite_box, sprite_box),
+        Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+    );
+    if let Some((handle, w, h)) = sprite {
+        // Fit-preserving aspect ratio inside sprite_box.
+        let aspect = w as f32 / h.max(1) as f32;
+        let (dw, dh) = if aspect >= 1.0 {
+            (sprite_box, sprite_box / aspect)
+        } else {
+            (sprite_box * aspect, sprite_box)
+        };
+        let dx = sprite_x + (sprite_box - dw) * 0.5;
+        let dy = sprite_y + (sprite_box - dh) * 0.5;
+        frame.draw_image(
+            Rectangle::new(Point::new(dx, dy), Size::new(dw, dh)),
+            handle,
+        );
+    } else {
+        // No sprite: fill a tinted disc as a fallback indicator.
+        let cx = sprite_x + sprite_box * 0.5;
+        let cy = sprite_y + sprite_box * 0.5;
+        let col = thing_color(config, t.kind);
+        frame.fill(
+            &Path::circle(Point::new(cx, cy), sprite_box * 0.35),
+            with_alpha(col, 0.9),
+        );
+    }
+
+    // Two-line caption: bold-ish id line, then the title.
+    let label_x = x + pad;
+    let label_y = y + sprite_box + pad * 2.0;
+    use iced::widget::canvas::Text;
+    frame.fill_text(Text {
+        content: format!("#{}  ({}x{})", t.kind, t.x, t.y),
+        position: Point::new(label_x, label_y),
+        color: Color::from_rgba(0.85, 0.88, 0.95, 1.0),
+        size: 12.0.into(),
+        ..Text::default()
+    });
+    frame.fill_text(Text {
+        content: title,
+        position: Point::new(label_x, label_y + line_h),
+        color: Color::WHITE,
+        size: 13.0.into(),
+        ..Text::default()
+    });
 }
 
 fn thing_color(config: &GameConfig, kind: u16) -> Color {

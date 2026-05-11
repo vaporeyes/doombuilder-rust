@@ -456,6 +456,18 @@ pub enum Message {
     PlaceVisualCamera,
     DrawingRemoveLast,
     SpaceHeld(bool),
+    AdjustSectorBrightness(i32),
+    AdjustSectorFloor(i32),
+    AdjustSectorCeiling(i32),
+    MakeBrightnessGradient,
+    MakeFloorGradient,
+    MakeCeilingGradient,
+    JoinSectors,
+    MergeSectors,
+    MakeDoor,
+    /// Multipurpose G hotkey. The handler routes to gradient/grid-cycle based
+    /// on edit mode and selection.
+    GHotkey { shift: bool, ctrl: bool },
     SetTheme(ThemeKind),
     TestMap,
     PickEngineRequested,
@@ -1334,6 +1346,63 @@ impl App {
                 self.space_held = down;
                 Task::none()
             }
+            Message::AdjustSectorBrightness(delta) => {
+                let sel = self.selected_sectors();
+                self.adjust_sectors_int_field(&sel, SectorIntField::Light, delta);
+                Task::none()
+            }
+            Message::AdjustSectorFloor(delta) => {
+                let sel = self.selected_sectors();
+                self.adjust_sectors_int_field(&sel, SectorIntField::FloorHeight, delta);
+                Task::none()
+            }
+            Message::AdjustSectorCeiling(delta) => {
+                let sel = self.selected_sectors();
+                self.adjust_sectors_int_field(&sel, SectorIntField::CeilingHeight, delta);
+                Task::none()
+            }
+            Message::MakeBrightnessGradient => {
+                self.make_sector_gradient(SectorIntField::Light);
+                Task::none()
+            }
+            Message::MakeFloorGradient => {
+                self.make_sector_gradient(SectorIntField::FloorHeight);
+                Task::none()
+            }
+            Message::MakeCeilingGradient => {
+                self.make_sector_gradient(SectorIntField::CeilingHeight);
+                Task::none()
+            }
+            Message::JoinSectors => {
+                self.do_join_sectors(false);
+                Task::none()
+            }
+            Message::MergeSectors => {
+                self.do_join_sectors(true);
+                Task::none()
+            }
+            Message::MakeDoor => {
+                self.do_make_door();
+                Task::none()
+            }
+            Message::GHotkey { shift, ctrl } => {
+                let has_sector_sel = self.edit_mode == EditMode::Sectors
+                    && self.selection.iter().any(|h| matches!(h, HighlightKind::Sector(_)));
+                if has_sector_sel {
+                    if ctrl {
+                        self.make_sector_gradient(SectorIntField::FloorHeight);
+                    } else if shift {
+                        self.make_sector_gradient(SectorIntField::CeilingHeight);
+                    } else {
+                        self.make_sector_gradient(SectorIntField::Light);
+                    }
+                } else {
+                    // Fall back to grid step cycling so the key isn't dead in
+                    // other modes.
+                    self.cycle_grid_step(if shift { -1 } else { 1 });
+                }
+                Task::none()
+            }
             Message::PanCamera { dx_units, dy_units, fast } => {
                 let step = self.effective_grid_step().max(8.0);
                 let mul = if fast { 4.0 } else { 1.0 };
@@ -1502,6 +1571,9 @@ impl App {
                 keyboard::Key::Character("g") if modifiers.command() && modifiers.shift() => {
                     Message::OpenGoToCoords
                 }
+                keyboard::Key::Character("g") if modifiers.command() => {
+                    Message::GHotkey { shift: false, ctrl: true }
+                }
                 keyboard::Key::Character("[") => Message::CycleGridStep(1),
                 keyboard::Key::Character("]") => Message::CycleGridStep(-1),
                 keyboard::Key::Character("h") if !modifiers.command() => Message::ToggleHighlights,
@@ -1509,10 +1581,19 @@ impl App {
                 keyboard::Key::Named(keyboard::key::Named::Space) => Message::SpaceHeld(true),
                 keyboard::Key::Named(keyboard::key::Named::Insert) => Message::InsertThing,
                 keyboard::Key::Character("i") if !modifiers.command() => Message::InsertThing,
+                keyboard::Key::Character("d") if modifiers.shift() => Message::MakeDoor,
                 keyboard::Key::Character("d") if !modifiers.command() => Message::ToggleDrawing,
                 keyboard::Key::Character("m") if modifiers.command() => Message::MakeSector,
-                keyboard::Key::Character("g") if modifiers.shift() => Message::CycleGridStep(-1),
-                keyboard::Key::Character("g") if !modifiers.command() => Message::CycleGridStep(1),
+                keyboard::Key::Character("j") if modifiers.shift() => Message::MergeSectors,
+                keyboard::Key::Character("j") if !modifiers.command() => Message::JoinSectors,
+                // `g` is context-sensitive: gradients in Sectors mode, grid
+                // cycling otherwise. Decision lives in the handler.
+                keyboard::Key::Character("g") if !modifiers.command() => {
+                    Message::GHotkey {
+                        shift: modifiers.shift(),
+                        ctrl: false,
+                    }
+                }
                 keyboard::Key::Named(keyboard::key::Named::F5) => Message::TestMap,
                 keyboard::Key::Character("1") if !modifiers.command() => {
                     Message::SetEditMode(EditMode::Vertices)
@@ -1585,6 +1666,9 @@ impl App {
                 factor,
                 viewport,
             } => self.camera2d.zoom_about(pivot, viewport, factor),
+            View2DMessage::Wheel { units, pivot, viewport } => {
+                self.handle_wheel(units, pivot, viewport);
+            }
             View2DMessage::HoverAt(world) => {
                 self.cursor_world = Some(world);
                 let new_hover = if self.show_highlights {
@@ -1667,6 +1751,273 @@ impl App {
             Some(n) => format!("Grid: {n} map units"),
             None => "Grid: auto (follows zoom)".into(),
         };
+    }
+
+    fn selected_sectors(&self) -> Vec<SectorId> {
+        self.selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Sector(s) => Some(*s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Wheel decision tree:
+    ///   * Sectors mode + non-empty sector selection + Ctrl => brightness
+    ///   * Sectors mode + sector selection + Alt           => ceiling height
+    ///   * Sectors mode + sector selection + (no mod)      => floor height
+    ///   * Shift halves the step magnitude (8 → 1).
+    /// Anything else falls back to the existing zoom-about-cursor behavior.
+    fn handle_wheel(&mut self, units: f32, pivot: Vec2, viewport: Vec2) {
+        let sector_sel: Vec<SectorId> = self
+            .selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Sector(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        let want_sector_op = self.edit_mode == EditMode::Sectors && !sector_sel.is_empty();
+        let m = self.modifiers;
+        if want_sector_op && (m.control() || m.alt() || m.command() || !m.shift() || m.shift()) {
+            // We're going to override zoom only when at least one of
+            // Ctrl/Alt/Cmd is held, OR when no modifier is held at all.
+            // Plain wheel adjusts floor; with Alt ceiling; with Ctrl brightness.
+            // Shift halves the step. A bare wheel without selection / mode
+            // still falls through to zoom below.
+            let big = if m.shift() { 1 } else { 8 };
+            let sign: i32 = if units > 0.0 { 1 } else { -1 };
+            let delta = big * sign;
+            if m.control() || m.command() {
+                self.adjust_sectors_int_field(&sector_sel, SectorIntField::Light, delta);
+                return;
+            } else if m.alt() {
+                self.adjust_sectors_int_field(&sector_sel, SectorIntField::CeilingHeight, delta);
+                return;
+            } else {
+                self.adjust_sectors_int_field(&sector_sel, SectorIntField::FloorHeight, delta);
+                return;
+            }
+        }
+        // Default: zoom.
+        let factor = (1.15_f32).powf(units);
+        self.camera2d.zoom_about(pivot, viewport, factor);
+    }
+
+    /// Push a single atomic `Command::Batch` that updates one int field on
+    /// each sector in `sectors` by `delta`. Field is clamped per-write.
+    fn adjust_sectors_int_field(
+        &mut self,
+        sectors: &[SectorId],
+        field: SectorIntField,
+        delta: i32,
+    ) {
+        let Some(map) = self.map.as_ref() else { return };
+        let mut cmds: Vec<Command> = Vec::with_capacity(sectors.len());
+        for sid in sectors {
+            let Some(sec) = map.sectors.get(*sid) else { continue };
+            let old: i32 = match field {
+                SectorIntField::FloorHeight => sec.floor_height as i32,
+                SectorIntField::CeilingHeight => sec.ceiling_height as i32,
+                SectorIntField::Light => sec.light as i32,
+                SectorIntField::Tag => sec.tag as i32,
+                SectorIntField::Special => sec.special as i32,
+            };
+            let new = (old + delta).clamp(i16::MIN as i32, i16::MAX as i32);
+            if new != old {
+                cmds.push(Command::SetSectorIntField {
+                    id: *sid,
+                    field,
+                    old,
+                    new,
+                });
+            }
+        }
+        self.apply_and_push_batch(cmds);
+    }
+
+    fn apply_and_push_batch(&mut self, cmds: Vec<Command>) {
+        if cmds.is_empty() {
+            return;
+        }
+        let mut cmd = if cmds.len() == 1 {
+            cmds.into_iter().next().unwrap()
+        } else {
+            Command::Batch(cmds)
+        };
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            cmd.apply(map_mut);
+            self.undo.push(cmd);
+            self.rebuild_geometry_indices();
+            self.cache2d.clear();
+        }
+    }
+
+    /// Apply a linear gradient of an int field across the selected sectors,
+    /// from `start` (first selected, by ascending y-then-x of centroid) to
+    /// `end` (last). The interpolation is by index, not by spatial distance,
+    /// matching GZDB's behavior.
+    fn make_sector_gradient(&mut self, field: SectorIntField) {
+        let sectors: Vec<SectorId> = self
+            .selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Sector(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        if sectors.len() < 2 {
+            self.status = "Gradient: select at least 2 sectors.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else { return };
+        let read = |sec: &doombuilder_core::map::MapSector| -> i32 {
+            match field {
+                SectorIntField::FloorHeight => sec.floor_height as i32,
+                SectorIntField::CeilingHeight => sec.ceiling_height as i32,
+                SectorIntField::Light => sec.light as i32,
+                _ => 0,
+            }
+        };
+        let first = match map.sectors.get(sectors[0]) {
+            Some(s) => read(s),
+            None => return,
+        };
+        let last = match map.sectors.get(*sectors.last().unwrap()) {
+            Some(s) => read(s),
+            None => return,
+        };
+        let n = sectors.len();
+        let mut cmds: Vec<Command> = Vec::with_capacity(n);
+        for (i, sid) in sectors.iter().enumerate() {
+            let Some(sec) = map.sectors.get(*sid) else { continue };
+            let t = i as f32 / (n - 1) as f32;
+            let target = (first as f32 + (last as f32 - first as f32) * t).round() as i32;
+            let old = read(sec);
+            if target != old {
+                cmds.push(Command::SetSectorIntField {
+                    id: *sid,
+                    field,
+                    old,
+                    new: target.clamp(i16::MIN as i32, i16::MAX as i32),
+                });
+            }
+        }
+        let label = match field {
+            SectorIntField::Light => "brightness",
+            SectorIntField::FloorHeight => "floor",
+            SectorIntField::CeilingHeight => "ceiling",
+            _ => "field",
+        };
+        let count = cmds.len();
+        self.apply_and_push_batch(cmds);
+        self.status = format!("Gradient: {label} across {n} sectors ({count} changed).");
+    }
+
+    fn do_join_sectors(&mut self, remove_shared_lines: bool) {
+        let sectors: Vec<SectorId> = self
+            .selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Sector(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        if sectors.len() < 2 {
+            self.status = "Join: select at least 2 sectors.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else { return };
+        match doombuilder_core::edit::compute_join_sectors(map, &sectors, remove_shared_lines) {
+            Ok(state) => {
+                let absorbed = state.merged_snapshots.len();
+                let removed_lines = state.removed_lines.len();
+                let mut cmd = Command::JoinSectors(Box::new(state));
+                if let Some(map) = self.map.as_mut() {
+                    let map_mut = Arc::make_mut(map);
+                    cmd.apply(map_mut);
+                    self.undo.push(cmd);
+                    self.selection = Arc::new(HashSet::new());
+                    self.rebuild_geometry_indices();
+                    self.cache2d.clear();
+                    self.status = if remove_shared_lines {
+                        format!(
+                            "Merged {absorbed} sector(s), removed {removed_lines} shared linedef(s)."
+                        )
+                    } else {
+                        format!("Joined {absorbed} sector(s).")
+                    };
+                }
+            }
+            Err(_) => {
+                self.status = "Join: failed (sector missing?).".into();
+            }
+        }
+    }
+
+    /// Make a door from each selected sector: close it (ceiling = floor) and
+    /// set perimeter linedef specials to 1 (DR Door). Stored as a batch so a
+    /// single undo reverses the whole thing.
+    fn do_make_door(&mut self) {
+        let sectors: Vec<SectorId> = self
+            .selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Sector(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        if sectors.is_empty() {
+            self.status = "Make Door: select one or more sectors.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else { return };
+        let mut cmds: Vec<Command> = Vec::new();
+        for sid in &sectors {
+            let Some(sec) = map.sectors.get(*sid) else { continue };
+            let floor = sec.floor_height as i32;
+            let ceil = sec.ceiling_height as i32;
+            if ceil != floor {
+                cmds.push(Command::SetSectorIntField {
+                    id: *sid,
+                    field: SectorIntField::CeilingHeight,
+                    old: ceil,
+                    new: floor,
+                });
+            }
+        }
+        // Set special=1 on linedefs bordering any selected sector (single
+        // door action; not the two-sided "DR Door" trigger, but a simple
+        // floor-touches-ceiling closure that engines accept).
+        let sec_set: HashSet<SectorId> = sectors.iter().copied().collect();
+        for (lid, line) in &map.linedefs {
+            let touches = line
+                .right
+                .and_then(|s| map.sidedefs.get(s).map(|x| x.sector))
+                .map(|s| sec_set.contains(&s))
+                .unwrap_or(false)
+                || line
+                    .left
+                    .and_then(|s| map.sidedefs.get(s).map(|x| x.sector))
+                    .map(|s| sec_set.contains(&s))
+                    .unwrap_or(false);
+            if touches && line.special == 0 {
+                cmds.push(Command::SetLinedefSpecial {
+                    id: lid,
+                    old: line.special,
+                    new: 1,
+                });
+            }
+        }
+        if cmds.is_empty() {
+            self.status = "Make Door: nothing to change.".into();
+            return;
+        }
+        let count = sectors.len();
+        self.apply_and_push_batch(cmds);
+        self.status = format!("Made door from {count} sector(s).");
     }
 
     /// Delete every selected map element (vertices/linedefs/sectors/things)
@@ -3990,6 +4341,14 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Merge Vertices"),
     MenuItem("Flip Linedefs"),
     SEP,
+    MenuItem("Brightness Gradient"),
+    MenuItem("Floor Gradient"),
+    MenuItem("Ceiling Gradient"),
+    SEP,
+    MenuItem("Join Sectors"),
+    MenuItem("Merge Sectors"),
+    MenuItem("Make Door"),
+    SEP,
     MenuItem("Snap Selection to Grid"),
     SEP,
     MenuItem("Toggle Draw Mode"),
@@ -4034,6 +4393,12 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Merge Vertices" => Message::MergeVertices,
         "Flip Linedefs" => Message::FlipLines,
         "Snap Selection to Grid" => Message::SnapSelectionToGrid,
+        "Brightness Gradient" => Message::MakeBrightnessGradient,
+        "Floor Gradient" => Message::MakeFloorGradient,
+        "Ceiling Gradient" => Message::MakeCeilingGradient,
+        "Join Sectors" => Message::JoinSectors,
+        "Merge Sectors" => Message::MergeSectors,
+        "Make Door" => Message::MakeDoor,
         "Toggle Draw Mode" => Message::ToggleDrawing,
         _ => Message::Noop,
     }

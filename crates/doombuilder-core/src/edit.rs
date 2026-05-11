@@ -124,6 +124,30 @@ pub enum Command {
         old: i32,
         new: i32,
     },
+    /// Composite atomic op. Apply walks the vector forwards; revert walks it
+    /// backwards. Used for gradients, "make door", and multi-sector edits.
+    Batch(Vec<Command>),
+    /// Merge sectors into a survivor. Sidedefs are re-pointed; merged sectors
+    /// (and optionally their shared linedefs) are removed.
+    JoinSectors(Box<JoinSectorsState>),
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinSectorsState {
+    pub survivor: SectorId,
+    /// Original sectors being absorbed (snapshots for revert insertion).
+    pub merged_snapshots: Vec<(SectorId, crate::map::MapSector)>,
+    /// On reapply after undo, slotmap re-inserts produce fresh ids; track them.
+    pub current_merged: Vec<SectorId>,
+    /// Sidedefs whose `.sector` was retargeted, with their original target.
+    pub sidedef_changes: Vec<(SidedefId, SectorId /* old */)>,
+    /// Linedefs to delete (only populated for "Merge Sectors" — they were
+    /// shared between two merged sectors). Empty for plain "Join Sectors".
+    pub removed_lines: Vec<(LinedefId, crate::map::MapLinedef)>,
+    pub current_removed_lines: Vec<LinedefId>,
+    /// Sidedefs cascaded along with `removed_lines`.
+    pub removed_sides: Vec<(SidedefId, crate::map::MapSidedef)>,
+    pub current_removed_sides: Vec<SidedefId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -644,6 +668,94 @@ pub enum ThingIntField {
     Flags,
 }
 
+#[derive(Debug)]
+pub enum JoinError {
+    NoSectors,
+    SectorMissing,
+}
+
+/// Build a `JoinSectorsState` for absorbing `sectors` into the first id of
+/// the list. With `remove_shared_lines = true`, linedefs whose both sides
+/// pointed at sectors in the selection are deleted (and their sidedefs
+/// cascade); otherwise only the sidedef.sector pointer is retargeted.
+pub fn compute_join_sectors(
+    map: &Map,
+    sectors: &[SectorId],
+    remove_shared_lines: bool,
+) -> Result<JoinSectorsState, JoinError> {
+    if sectors.is_empty() {
+        return Err(JoinError::NoSectors);
+    }
+    for sid in sectors {
+        if !map.sectors.contains_key(*sid) {
+            return Err(JoinError::SectorMissing);
+        }
+    }
+    let survivor = sectors[0];
+    let merged_set: HashSet<SectorId> = sectors.iter().skip(1).copied().collect();
+    if merged_set.is_empty() {
+        // One sector selected — nothing to absorb.
+        return Err(JoinError::NoSectors);
+    }
+
+    let merged_snapshots: Vec<(SectorId, crate::map::MapSector)> = merged_set
+        .iter()
+        .map(|sid| (*sid, map.sectors[*sid].clone()))
+        .collect();
+
+    // Sidedefs whose sector is one of the absorbed ones get retargeted.
+    let mut sidedef_changes: Vec<(SidedefId, SectorId)> = Vec::new();
+    for (sid, side) in &map.sidedefs {
+        if merged_set.contains(&side.sector) {
+            sidedef_changes.push((sid, side.sector));
+        }
+    }
+
+    let mut removed_lines: Vec<(LinedefId, crate::map::MapLinedef)> = Vec::new();
+    let mut removed_sides: Vec<(SidedefId, crate::map::MapSidedef)> = Vec::new();
+    if remove_shared_lines {
+        // Combined set of all sectors involved (survivor + absorbed).
+        let involved: HashSet<SectorId> =
+            std::iter::once(survivor).chain(merged_set.iter().copied()).collect();
+        let mut removed_side_ids: HashSet<SidedefId> = HashSet::new();
+        for (lid, line) in &map.linedefs {
+            let (Some(r), Some(l)) = (line.right, line.left) else {
+                continue;
+            };
+            let (Some(rs), Some(ls)) =
+                (map.sidedefs.get(r), map.sidedefs.get(l))
+            else {
+                continue;
+            };
+            if involved.contains(&rs.sector) && involved.contains(&ls.sector) {
+                removed_lines.push((lid, line.clone()));
+                removed_side_ids.insert(r);
+                removed_side_ids.insert(l);
+            }
+        }
+        for sid in removed_side_ids {
+            if let Some(s) = map.sidedefs.get(sid) {
+                removed_sides.push((sid, s.clone()));
+            }
+        }
+        // Drop sidedef_changes for sides we're already going to remove.
+        let removed_set: HashSet<SidedefId> =
+            removed_sides.iter().map(|(id, _)| *id).collect();
+        sidedef_changes.retain(|(sid, _)| !removed_set.contains(sid));
+    }
+
+    Ok(JoinSectorsState {
+        survivor,
+        merged_snapshots,
+        current_merged: Vec::new(),
+        sidedef_changes,
+        removed_lines,
+        current_removed_lines: Vec::new(),
+        removed_sides,
+        current_removed_sides: Vec::new(),
+    })
+}
+
 impl Command {
     pub fn apply(&mut self, map: &mut Map) {
         match self {
@@ -901,6 +1013,57 @@ impl Command {
                     }
                 }
             }
+            Command::Batch(cmds) => {
+                for cmd in cmds.iter_mut() {
+                    cmd.apply(map);
+                }
+            }
+            Command::JoinSectors(state) => {
+                // Build remaps from snapshot (original) sector ids → current.
+                let mut sec_remap: HashMap<SectorId, SectorId> = HashMap::new();
+                if state.current_merged.len() == state.merged_snapshots.len() {
+                    for (i, (orig, _)) in state.merged_snapshots.iter().enumerate() {
+                        sec_remap.insert(*orig, state.current_merged[i]);
+                    }
+                }
+                // 1. Retarget sidedefs to the survivor.
+                for (sid, _old) in &state.sidedef_changes {
+                    if let Some(side) = map.sidedefs.get_mut(*sid) {
+                        side.sector = state.survivor;
+                    }
+                }
+                // 2. Remove sidedefs cascaded along with shared linedefs.
+                state.current_removed_sides.clear();
+                let sides_to_remove: Vec<SidedefId> = state
+                    .removed_sides
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect();
+                for sid in sides_to_remove {
+                    map.sidedefs.remove(sid);
+                }
+                // 3. Remove shared linedefs.
+                state.current_removed_lines.clear();
+                let lines_to_remove: Vec<LinedefId> = state
+                    .removed_lines
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect();
+                for lid in lines_to_remove {
+                    map.linedefs.remove(lid);
+                }
+                // 4. Remove the absorbed sectors themselves.
+                state.current_merged.clear();
+                let secs_to_remove: Vec<SectorId> = state
+                    .merged_snapshots
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect();
+                for sid in secs_to_remove {
+                    map.sectors.remove(sid);
+                }
+                map.rebuild_sidedef_index();
+            }
         }
     }
 
@@ -1122,6 +1285,61 @@ impl Command {
                         std::mem::swap(&mut line.right, &mut line.left);
                     }
                 }
+            }
+            Command::Batch(cmds) => {
+                for cmd in cmds.iter_mut().rev() {
+                    cmd.revert(map);
+                }
+            }
+            Command::JoinSectors(state) => {
+                // 1. Re-insert merged sectors and build orig->new remap.
+                let mut sec_remap: HashMap<SectorId, SectorId> = HashMap::new();
+                state.current_merged.clear();
+                for (orig, snap) in &state.merged_snapshots {
+                    let mut snap = snap.clone();
+                    snap.sidedefs.clear(); // rebuilt below
+                    let new_id = map.sectors.insert(snap);
+                    sec_remap.insert(*orig, new_id);
+                    state.current_merged.push(new_id);
+                }
+                // 2. Re-insert removed sidedefs (remapping their .sector).
+                let mut side_remap: HashMap<SidedefId, SidedefId> = HashMap::new();
+                state.current_removed_sides.clear();
+                for (orig, snap) in &state.removed_sides {
+                    let mut s = snap.clone();
+                    if let Some(&new_sec) = sec_remap.get(&s.sector) {
+                        s.sector = new_sec;
+                    }
+                    let new_id = map.sidedefs.insert(s);
+                    side_remap.insert(*orig, new_id);
+                    state.current_removed_sides.push(new_id);
+                }
+                // 3. Re-insert removed linedefs (remapping their right/left).
+                state.current_removed_lines.clear();
+                for (_orig, snap) in &state.removed_lines {
+                    let mut l = snap.clone();
+                    if let Some(s) = l.right {
+                        if let Some(&new_s) = side_remap.get(&s) {
+                            l.right = Some(new_s);
+                        }
+                    }
+                    if let Some(s) = l.left {
+                        if let Some(&new_s) = side_remap.get(&s) {
+                            l.left = Some(new_s);
+                        }
+                    }
+                    let new_id = map.linedefs.insert(l);
+                    state.current_removed_lines.push(new_id);
+                }
+                // 4. Restore sidedef_changes: each affected sidedef's .sector
+                //    goes back to its (possibly remapped) original.
+                for (sid, old) in &state.sidedef_changes {
+                    if let Some(side) = map.sidedefs.get_mut(*sid) {
+                        let restore = sec_remap.get(old).copied().unwrap_or(*old);
+                        side.sector = restore;
+                    }
+                }
+                map.rebuild_sidedef_index();
             }
         }
     }
@@ -1556,6 +1774,66 @@ mod tests {
         cmd_b.apply(&mut map);
         stack.push(cmd_b);
         assert!(!stack.can_redo());
+    }
+
+    #[test]
+    fn join_sectors_retargets_sidedefs_and_round_trips() {
+        use crate::map::{MapSector, MapSidedef, TextureName};
+        let mut map = Map::new("T", MapFormat::Doom);
+        let sec_a = map.sectors.insert(MapSector {
+            floor_height: 0,
+            ceiling_height: 128,
+            floor_texture: TextureName([0; 8]),
+            ceiling_texture: TextureName([0; 8]),
+            light: 160,
+            special: 0,
+            tag: 0,
+            sidedefs: Vec::new(),
+        });
+        let sec_b = map.sectors.insert(MapSector {
+            floor_height: 16,
+            ceiling_height: 144,
+            floor_texture: TextureName([0; 8]),
+            ceiling_texture: TextureName([0; 8]),
+            light: 200,
+            special: 0,
+            tag: 0,
+            sidedefs: Vec::new(),
+        });
+        let side_a = map.sidedefs.insert(MapSidedef {
+            sector: sec_a,
+            x_offset: 0,
+            y_offset: 0,
+            upper_texture: TextureName([0; 8]),
+            lower_texture: TextureName([0; 8]),
+            middle_texture: TextureName(*b"A\0\0\0\0\0\0\0"),
+        });
+        let side_b = map.sidedefs.insert(MapSidedef {
+            sector: sec_b,
+            x_offset: 0,
+            y_offset: 0,
+            upper_texture: TextureName([0; 8]),
+            lower_texture: TextureName([0; 8]),
+            middle_texture: TextureName(*b"B\0\0\0\0\0\0\0"),
+        });
+        map.rebuild_sidedef_index();
+
+        let state = compute_join_sectors(&map, &[sec_a, sec_b], false).expect("state");
+        let mut cmd = Command::JoinSectors(Box::new(state));
+        cmd.apply(&mut map);
+        // sec_a survives, sec_b is gone, side_b retargets to sec_a.
+        assert!(map.sectors.get(sec_a).is_some());
+        assert!(map.sectors.get(sec_b).is_none());
+        assert_eq!(map.sidedefs[side_a].sector, sec_a);
+        assert_eq!(map.sidedefs[side_b].sector, sec_a);
+
+        cmd.revert(&mut map);
+        // sec_b is back (under a new id); side_b once again points at it.
+        assert_eq!(map.sectors.len(), 2);
+        // side_a unchanged.
+        assert_eq!(map.sidedefs[side_a].sector, sec_a);
+        // side_b's sector pointer should be a sector that is NOT sec_a.
+        assert_ne!(map.sidedefs[side_b].sector, sec_a);
     }
 
     #[test]
