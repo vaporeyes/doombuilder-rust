@@ -111,6 +111,9 @@ pub enum Command {
     /// Set sidedef texture offsets (per-sidedef X and/or Y) atomically. Used
     /// by Auto-Align Textures and other propagation tools.
     SetSidedefOffsets(Vec<SidedefOffsetChange>),
+    /// Insert a previously-captured clipboard of map elements at a chosen
+    /// offset. Undo removes them by their freshly-assigned ids.
+    PasteClipboard(Box<PasteClipboardState>),
     /// Change one of a sector's integer fields.
     SetSectorIntField {
         id: SectorId,
@@ -162,6 +165,40 @@ pub struct JoinSectorsState {
 pub enum SidedefSide {
     Right,
     Left,
+}
+
+/// Snapshot of selected map elements suitable for serialising to a
+/// clipboard. Cross-references are by index into the snap vectors so the
+/// data is portable across maps.
+#[derive(Debug, Clone, Default)]
+pub struct ClipboardData {
+    pub vertices: Vec<crate::map::MapVertex>,
+    pub sectors: Vec<crate::map::MapSector>,
+    /// `(template, clip_sector_idx)` — the template's `sector` field is
+    /// ignored at paste time; we substitute the resolved sector id.
+    pub sidedefs: Vec<(crate::map::MapSidedef, usize)>,
+    /// `(template, v1_idx, v2_idx, right_clip_idx, left_clip_idx)`.
+    pub linedefs: Vec<(
+        crate::map::MapLinedef,
+        usize,
+        usize,
+        Option<usize>,
+        Option<usize>,
+    )>,
+    pub things: Vec<crate::map::MapThing>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PasteClipboardState {
+    pub data: ClipboardData,
+    /// World-space (dx, dy) added to every vertex and thing position.
+    pub offset: (i32, i32),
+    // Post-apply ids (cleared between apply/revert).
+    pub current_v: Vec<VertexId>,
+    pub current_sec: Vec<SectorId>,
+    pub current_side: Vec<SidedefId>,
+    pub current_line: Vec<LinedefId>,
+    pub current_thing: Vec<ThingId>,
 }
 
 /// Old/new pair for a per-sidedef offset write. `None` in a slot leaves that
@@ -775,6 +812,102 @@ pub fn compute_join_sectors(
     })
 }
 
+/// Pack a selection (any combination of vertex / linedef / sector / thing
+/// ids) into a portable `ClipboardData`. Implicitly pulls in dependencies:
+/// selected linedefs bring their endpoints; selected sectors bring their
+/// boundary linedefs, endpoints, and sidedefs.
+pub fn build_clipboard(
+    map: &Map,
+    sel_vertices: &HashSet<VertexId>,
+    sel_lines: &HashSet<LinedefId>,
+    sel_sectors: &HashSet<SectorId>,
+    sel_things: &HashSet<ThingId>,
+) -> ClipboardData {
+    let mut data = ClipboardData::default();
+    let mut v_index: HashMap<VertexId, usize> = HashMap::new();
+    let mut s_index: HashMap<SectorId, usize> = HashMap::new();
+    let mut side_index: HashMap<SidedefId, usize> = HashMap::new();
+    let mut line_set: HashSet<LinedefId> = sel_lines.iter().copied().collect();
+
+    // Expand: selected sectors pull in any linedef touching them.
+    if !sel_sectors.is_empty() {
+        for (lid, l) in &map.linedefs {
+            let right_sec = l.right.and_then(|s| map.sidedefs.get(s).map(|x| x.sector));
+            let left_sec = l.left.and_then(|s| map.sidedefs.get(s).map(|x| x.sector));
+            if right_sec.map(|s| sel_sectors.contains(&s)).unwrap_or(false)
+                || left_sec.map(|s| sel_sectors.contains(&s)).unwrap_or(false)
+            {
+                line_set.insert(lid);
+            }
+        }
+    }
+
+    // Vertex pool: explicit selection + every endpoint of a selected line.
+    let mut vertex_pool: HashSet<VertexId> = sel_vertices.iter().copied().collect();
+    for lid in &line_set {
+        if let Some(l) = map.linedefs.get(*lid) {
+            vertex_pool.insert(l.v1);
+            vertex_pool.insert(l.v2);
+        }
+    }
+    let mut vertex_order: Vec<VertexId> = vertex_pool.into_iter().collect();
+    vertex_order.sort();
+    for vid in &vertex_order {
+        if let Some(v) = map.vertices.get(*vid) {
+            v_index.insert(*vid, data.vertices.len());
+            data.vertices.push(*v);
+        }
+    }
+
+    // Sectors.
+    let mut sector_order: Vec<SectorId> = sel_sectors.iter().copied().collect();
+    sector_order.sort();
+    for sid in &sector_order {
+        if let Some(s) = map.sectors.get(*sid) {
+            s_index.insert(*sid, data.sectors.len());
+            data.sectors.push(s.clone());
+        }
+    }
+
+    // Sidedefs: any used by a clipboard linedef whose sector is also in clip.
+    let mut line_order: Vec<LinedefId> = line_set.iter().copied().collect();
+    line_order.sort();
+    for lid in &line_order {
+        let Some(l) = map.linedefs.get(*lid) else { continue };
+        for slot in [l.right, l.left].iter().copied().flatten() {
+            if side_index.contains_key(&slot) {
+                continue;
+            }
+            let Some(side) = map.sidedefs.get(slot) else { continue };
+            let Some(&sec_idx) = s_index.get(&side.sector) else { continue };
+            side_index.insert(slot, data.sidedefs.len());
+            data.sidedefs.push((side.clone(), sec_idx));
+        }
+    }
+
+    // Linedefs (now we can resolve all references).
+    for lid in &line_order {
+        let Some(l) = map.linedefs.get(*lid) else { continue };
+        let (Some(&v1), Some(&v2)) = (v_index.get(&l.v1), v_index.get(&l.v2)) else {
+            continue;
+        };
+        let right = l.right.and_then(|s| side_index.get(&s).copied());
+        let left = l.left.and_then(|s| side_index.get(&s).copied());
+        data.linedefs.push((l.clone(), v1, v2, right, left));
+    }
+
+    // Things.
+    let mut thing_order: Vec<ThingId> = sel_things.iter().copied().collect();
+    thing_order.sort();
+    for tid in &thing_order {
+        if let Some(t) = map.things.get(*tid) {
+            data.things.push(t.clone());
+        }
+    }
+
+    data
+}
+
 /// Order a set of linedefs into a single walk-path (sequence of vertex ids
 /// and the linedef traversed between each adjacent pair). Returns `None` if
 /// the selection isn't a single open or closed chain (any vertex shared by
@@ -1240,6 +1373,61 @@ impl Command {
                     }
                 }
             }
+            Command::PasteClipboard(state) => {
+                state.current_v.clear();
+                state.current_sec.clear();
+                state.current_side.clear();
+                state.current_line.clear();
+                state.current_thing.clear();
+                let (dx, dy) = state.offset;
+                // 1. Vertices.
+                for v in &state.data.vertices {
+                    let id = map.vertices.insert(crate::map::MapVertex {
+                        x: v.x.saturating_add(dx),
+                        y: v.y.saturating_add(dy),
+                    });
+                    state.current_v.push(id);
+                }
+                // 2. Sectors.
+                for s in &state.data.sectors {
+                    let mut snap = s.clone();
+                    snap.sidedefs.clear(); // rebuilt by rebuild_sidedef_index
+                    let id = map.sectors.insert(snap);
+                    state.current_sec.push(id);
+                }
+                // 3. Sidedefs (resolve sector index).
+                for (template, sec_idx) in &state.data.sidedefs {
+                    let mut snap = template.clone();
+                    if let Some(&new_sec) = state.current_sec.get(*sec_idx) {
+                        snap.sector = new_sec;
+                    }
+                    let id = map.sidedefs.insert(snap);
+                    state.current_side.push(id);
+                }
+                // 4. Linedefs (resolve vertex + sidedef indices).
+                for (template, v1, v2, right, left) in &state.data.linedefs {
+                    let mut snap = template.clone();
+                    if let Some(&new_v1) = state.current_v.get(*v1) {
+                        snap.v1 = new_v1;
+                    }
+                    if let Some(&new_v2) = state.current_v.get(*v2) {
+                        snap.v2 = new_v2;
+                    }
+                    snap.right = right.and_then(|i| state.current_side.get(i).copied());
+                    snap.left = left.and_then(|i| state.current_side.get(i).copied());
+                    let id = map.linedefs.insert(snap);
+                    state.current_line.push(id);
+                }
+                // 5. Things.
+                for t in &state.data.things {
+                    let mut snap = t.clone();
+                    snap.x = snap.x.saturating_add(dx);
+                    snap.y = snap.y.saturating_add(dy);
+                    let id = map.things.insert(snap);
+                    state.current_thing.push(id);
+                }
+                map.rebuild_sidedef_index();
+            }
             Command::Batch(cmds) => {
                 for cmd in cmds.iter_mut() {
                     cmd.apply(map);
@@ -1533,6 +1721,26 @@ impl Command {
                         }
                     }
                 }
+            }
+            Command::PasteClipboard(state) => {
+                // Remove in reverse order: things, linedefs, sidedefs,
+                // sectors, vertices. Slotmap handles missing ids gracefully.
+                for id in state.current_thing.drain(..) {
+                    map.things.remove(id);
+                }
+                for id in state.current_line.drain(..) {
+                    map.linedefs.remove(id);
+                }
+                for id in state.current_side.drain(..) {
+                    map.sidedefs.remove(id);
+                }
+                for id in state.current_sec.drain(..) {
+                    map.sectors.remove(id);
+                }
+                for id in state.current_v.drain(..) {
+                    map.vertices.remove(id);
+                }
+                map.rebuild_sidedef_index();
             }
             Command::Batch(cmds) => {
                 for cmd in cmds.iter_mut().rev() {

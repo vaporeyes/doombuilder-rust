@@ -57,7 +57,7 @@ pub fn run() -> iced::Result {
         .theme(App::theme)
         // Sized so the full toolbar (icons + menu picker + map picker)
         // fits without horizontal scrolling on standard DPI displays.
-        .window_size(iced::Size::new(1081.0, 812.0))
+        .window_size(iced::Size::new(1160.0, 812.0))
         .run()
 }
 
@@ -136,6 +136,8 @@ pub struct App {
     /// Buffer state for the Go-To-Coords modal (text in the X/Y inputs).
     go_to_coords_x: String,
     go_to_coords_y: String,
+    /// Buffer for the Tag Range modal's starting tag.
+    tag_range_input: String,
     /// Hide hover overlays when false (toggled with H).
     show_highlights: bool,
     /// When true, left-mouse drag in the 2D viewport pans instead of selects.
@@ -143,6 +145,11 @@ pub struct App {
     /// User-placed Visual Mode camera position; takes precedence over the
     /// map AABB centre when entering 3D mode.
     visual_camera_start: Option<Vec2>,
+    /// Most-recently copied / cut selection. Survives across maps.
+    clipboard: Option<doombuilder_core::edit::ClipboardData>,
+    /// Named selection sets (0..=9). Each entry stores a saved selection
+    /// snapshot the user can restore with a number-key hotkey.
+    selection_groups: [Option<HashSet<HighlightKind>>; 10],
 }
 
 #[derive(Debug, Default)]
@@ -214,6 +221,10 @@ pub enum ActivePicker {
     Settings,
     GoToCoords,
     MapStats,
+    MapAnalysis,
+    UsedTags,
+    TagRange,
+    ThingTypes,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -474,9 +485,12 @@ impl Default for App {
             drawing: None,
             go_to_coords_x: String::new(),
             go_to_coords_y: String::new(),
+            tag_range_input: String::new(),
             show_highlights: true,
             space_held: false,
             visual_camera_start: None,
+            clipboard: None,
+            selection_groups: Default::default(),
         }
     }
 }
@@ -548,6 +562,22 @@ pub enum Message {
     AlignLinedefs,
     AlignThingsToNearestLine,
     PointThingsToCursor,
+    OpenMapAnalysis,
+    OpenUsedTags,
+    OpenTagRange,
+    OpenThingTypes,
+    TagRangeInputChanged(String),
+    TagRangeApply,
+    TestMapAtCursor,
+    CopySelection,
+    CutSelection,
+    PasteSelection,
+    PasteProperties,
+    AssignGroup(usize),
+    SelectGroup(usize),
+    RotateSelection90,
+    FlipSelectionHorizontal,
+    FlipSelectionVertical,
     AutoAlignX,
     AutoAlignY,
     AutoAlignBoth,
@@ -607,6 +637,35 @@ pub struct MapStats {
     sidedefs: usize,
     sectors: usize,
     things: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SelectionTransform {
+    Rotate90,
+    FlipH,
+    FlipV,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IssueSeverity {
+    Error,
+    Warning,
+}
+
+impl IssueSeverity {
+    fn label(self) -> &'static str {
+        match self {
+            IssueSeverity::Error => "ERROR",
+            IssueSeverity::Warning => "WARN",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MapIssue {
+    pub severity: IssueSeverity,
+    pub category: &'static str,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1540,6 +1599,88 @@ impl App {
                 self.do_point_things_to_cursor();
                 Task::none()
             }
+            Message::OpenMapAnalysis => {
+                self.active_picker = Some(ActivePicker::MapAnalysis);
+                Task::none()
+            }
+            Message::OpenUsedTags => {
+                self.active_picker = Some(ActivePicker::UsedTags);
+                Task::none()
+            }
+            Message::OpenTagRange => {
+                self.tag_range_input = "1".into();
+                self.active_picker = Some(ActivePicker::TagRange);
+                Task::none()
+            }
+            Message::OpenThingTypes => {
+                self.active_picker = Some(ActivePicker::ThingTypes);
+                Task::none()
+            }
+            Message::TagRangeInputChanged(s) => {
+                self.tag_range_input = s;
+                Task::none()
+            }
+            Message::TagRangeApply => {
+                self.apply_tag_range();
+                Task::none()
+            }
+            Message::TestMapAtCursor => {
+                self.test_map_at_cursor();
+                Task::none()
+            }
+            Message::CopySelection => {
+                self.copy_selection();
+                Task::none()
+            }
+            Message::CutSelection => {
+                self.copy_selection();
+                self.delete_selection();
+                self.status = "Cut selection to clipboard.".into();
+                Task::none()
+            }
+            Message::PasteSelection => {
+                self.paste_selection();
+                Task::none()
+            }
+            Message::PasteProperties => {
+                self.paste_properties();
+                Task::none()
+            }
+            Message::AssignGroup(idx) => {
+                if idx < 10 {
+                    self.selection_groups[idx] = Some((*self.selection).clone());
+                    self.status = format!(
+                        "Stored selection in group {idx} ({} item(s)).",
+                        self.selection.len()
+                    );
+                }
+                Task::none()
+            }
+            Message::SelectGroup(idx) => {
+                if let Some(group) = self.selection_groups.get(idx).and_then(|g| g.clone()) {
+                    self.selection = Arc::new(group);
+                    self.cache2d.clear();
+                    self.status = format!(
+                        "Recalled group {idx} ({} item(s)).",
+                        self.selection.len()
+                    );
+                } else {
+                    self.status = format!("Group {idx} is empty.");
+                }
+                Task::none()
+            }
+            Message::RotateSelection90 => {
+                self.transform_selection(SelectionTransform::Rotate90);
+                Task::none()
+            }
+            Message::FlipSelectionHorizontal => {
+                self.transform_selection(SelectionTransform::FlipH);
+                Task::none()
+            }
+            Message::FlipSelectionVertical => {
+                self.transform_selection(SelectionTransform::FlipV);
+                Task::none()
+            }
             Message::AlignLinedefs => {
                 self.do_align_linedefs();
                 Task::none()
@@ -1766,6 +1907,22 @@ impl App {
                 }
                 keyboard::Key::Character("d") if modifiers.shift() => Message::MakeDoor,
                 keyboard::Key::Character("d") if !modifiers.command() => Message::ToggleDrawing,
+                keyboard::Key::Character("c") if modifiers.command() && modifiers.shift() => {
+                    Message::PasteProperties
+                }
+                keyboard::Key::Character("c") if modifiers.command() => Message::CopySelection,
+                keyboard::Key::Character("x") if modifiers.command() => Message::CutSelection,
+                keyboard::Key::Character("v") if modifiers.command() && modifiers.shift() => {
+                    Message::PasteProperties
+                }
+                keyboard::Key::Character("v") if modifiers.command() => Message::PasteSelection,
+                keyboard::Key::Character("e") if modifiers.shift() => Message::FlipSelectionVertical,
+                keyboard::Key::Character("e") if modifiers.command() => {
+                    Message::FlipSelectionHorizontal
+                }
+                keyboard::Key::Character("e") if !modifiers.command() && !modifiers.shift() => {
+                    Message::RotateSelection90
+                }
                 keyboard::Key::Character("c") if modifiers.shift() => Message::CurveSelectedLines,
                 keyboard::Key::Character("f") if modifiers.shift() => Message::FlipSidedefs,
                 keyboard::Key::Character("l") if modifiers.shift() => Message::PointThingsToCursor,
@@ -1800,18 +1957,35 @@ impl App {
                     }
                 }
                 keyboard::Key::Named(keyboard::key::Named::F5) => Message::TestMap,
-                keyboard::Key::Character("1") if !modifiers.command() => {
-                    Message::SetEditMode(EditMode::Vertices)
+                keyboard::Key::Named(keyboard::key::Named::F9) if modifiers.command() => {
+                    Message::TestMapAtCursor
                 }
-                keyboard::Key::Character("2") if !modifiers.command() => {
-                    Message::SetEditMode(EditMode::Linedefs)
-                }
-                keyboard::Key::Character("3") if !modifiers.command() => {
-                    Message::SetEditMode(EditMode::Sectors)
-                }
-                keyboard::Key::Character("4") if !modifiers.command() => {
-                    Message::SetEditMode(EditMode::Things)
-                }
+                keyboard::Key::Named(keyboard::key::Named::F4) => Message::OpenMapAnalysis,
+                keyboard::Key::Named(keyboard::key::Named::F11) => Message::OpenMapAnalysis,
+                // Number keys 0..9 are reassigned to selection groups:
+                //   plain N   → recall group N
+                //   Cmd+N     → store current selection into group N
+                // Edit-mode hotkeys live on V / L / S / T (see below).
+                keyboard::Key::Character("0") if modifiers.command() => Message::AssignGroup(0),
+                keyboard::Key::Character("1") if modifiers.command() => Message::AssignGroup(1),
+                keyboard::Key::Character("2") if modifiers.command() => Message::AssignGroup(2),
+                keyboard::Key::Character("3") if modifiers.command() => Message::AssignGroup(3),
+                keyboard::Key::Character("4") if modifiers.command() => Message::AssignGroup(4),
+                keyboard::Key::Character("5") if modifiers.command() => Message::AssignGroup(5),
+                keyboard::Key::Character("6") if modifiers.command() => Message::AssignGroup(6),
+                keyboard::Key::Character("7") if modifiers.command() => Message::AssignGroup(7),
+                keyboard::Key::Character("8") if modifiers.command() => Message::AssignGroup(8),
+                keyboard::Key::Character("9") if modifiers.command() => Message::AssignGroup(9),
+                keyboard::Key::Character("0") if !modifiers.command() => Message::SelectGroup(0),
+                keyboard::Key::Character("1") if !modifiers.command() => Message::SelectGroup(1),
+                keyboard::Key::Character("2") if !modifiers.command() => Message::SelectGroup(2),
+                keyboard::Key::Character("3") if !modifiers.command() => Message::SelectGroup(3),
+                keyboard::Key::Character("4") if !modifiers.command() => Message::SelectGroup(4),
+                keyboard::Key::Character("5") if !modifiers.command() => Message::SelectGroup(5),
+                keyboard::Key::Character("6") if !modifiers.command() => Message::SelectGroup(6),
+                keyboard::Key::Character("7") if !modifiers.command() => Message::SelectGroup(7),
+                keyboard::Key::Character("8") if !modifiers.command() => Message::SelectGroup(8),
+                keyboard::Key::Character("9") if !modifiers.command() => Message::SelectGroup(9),
                 keyboard::Key::Character("v") if !modifiers.command() => {
                     Message::SetEditMode(EditMode::Vertices)
                 }
@@ -2728,6 +2902,470 @@ impl App {
             Ok(_) => self.status = format!("Launched engine on {}", map.name),
             Err(e) => self.status = format!("Test: launch failed: {e}"),
         }
+    }
+
+    /// Apply sequential tags to the selected sectors starting from the
+    /// number in `tag_range_input`. No-op if input doesn't parse or nothing
+    /// is selected. Closes the modal on success.
+    /// Snapshot the current selection into the clipboard. Pulls in implicit
+    /// dependencies (linedef endpoints, sector boundary geometry).
+    fn copy_selection(&mut self) {
+        let Some(map) = self.map.as_ref() else { return };
+        let mut sel_v: HashSet<doombuilder_core::map::VertexId> = HashSet::new();
+        let mut sel_l: HashSet<LinedefId> = HashSet::new();
+        let mut sel_s: HashSet<SectorId> = HashSet::new();
+        let mut sel_t: HashSet<ThingId> = HashSet::new();
+        for h in self.selection.iter() {
+            match h {
+                HighlightKind::Vertex(v) => {
+                    sel_v.insert(*v);
+                }
+                HighlightKind::Linedef(l) => {
+                    sel_l.insert(*l);
+                }
+                HighlightKind::Sector(s) => {
+                    sel_s.insert(*s);
+                }
+                HighlightKind::Thing(t) => {
+                    sel_t.insert(*t);
+                }
+            }
+        }
+        if sel_v.is_empty() && sel_l.is_empty() && sel_s.is_empty() && sel_t.is_empty() {
+            self.status = "Copy: nothing selected.".into();
+            return;
+        }
+        let data = doombuilder_core::edit::build_clipboard(map, &sel_v, &sel_l, &sel_s, &sel_t);
+        let summary = format!(
+            "{} verts, {} lines, {} sides, {} sectors, {} things",
+            data.vertices.len(),
+            data.linedefs.len(),
+            data.sidedefs.len(),
+            data.sectors.len(),
+            data.things.len()
+        );
+        self.clipboard = Some(data);
+        self.status = format!("Copied: {summary}.");
+    }
+
+    /// Paste the clipboard into the current map. Offsets new geometry by 64
+    /// units to the right + down so it visually separates from the original.
+    fn paste_selection(&mut self) {
+        let Some(data) = self.clipboard.clone() else {
+            self.status = "Paste: clipboard is empty.".into();
+            return;
+        };
+        if self.map.is_none() {
+            return;
+        }
+        let state = doombuilder_core::edit::PasteClipboardState {
+            data,
+            offset: (64, 64),
+            ..Default::default()
+        };
+        let mut cmd = Command::PasteClipboard(Box::new(state));
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            cmd.apply(map_mut);
+            // Select the newly-pasted geometry so the user can re-paste,
+            // move, or further-modify it immediately.
+            if let Command::PasteClipboard(ref s) = cmd {
+                let mut sel: HashSet<HighlightKind> = HashSet::new();
+                for &id in &s.current_line {
+                    sel.insert(HighlightKind::Linedef(id));
+                }
+                for &id in &s.current_thing {
+                    sel.insert(HighlightKind::Thing(id));
+                }
+                self.selection = Arc::new(sel);
+            }
+            self.undo.push(cmd);
+            self.rebuild_geometry_indices();
+            self.cache2d.clear();
+            self.status = "Pasted clipboard.".into();
+        }
+    }
+
+    /// "Paste Properties": apply the clipboard's first element's properties
+    /// (non-geometric — textures, flags, heights, light) to every same-kind
+    /// element currently selected. Useful for cloning a sector's look or a
+    /// thing's flags across many targets.
+    fn paste_properties(&mut self) {
+        let Some(data) = self.clipboard.as_ref() else {
+            self.status = "Paste Properties: clipboard is empty.".into();
+            return;
+        };
+        let mut cmds: Vec<Command> = Vec::new();
+        let Some(map) = self.map.as_ref() else { return };
+        // Choose source based on what's in the clipboard.
+        if let Some(src_sec) = data.sectors.first().cloned() {
+            for sid in self.selected_sectors() {
+                let Some(s) = map.sectors.get(sid) else { continue };
+                cmds.push(Command::SetSectorIntField {
+                    id: sid,
+                    field: SectorIntField::FloorHeight,
+                    old: s.floor_height as i32,
+                    new: src_sec.floor_height as i32,
+                });
+                cmds.push(Command::SetSectorIntField {
+                    id: sid,
+                    field: SectorIntField::CeilingHeight,
+                    old: s.ceiling_height as i32,
+                    new: src_sec.ceiling_height as i32,
+                });
+                cmds.push(Command::SetSectorIntField {
+                    id: sid,
+                    field: SectorIntField::Light,
+                    old: s.light as i32,
+                    new: src_sec.light as i32,
+                });
+                cmds.push(Command::SetSectorIntField {
+                    id: sid,
+                    field: SectorIntField::Special,
+                    old: s.special as i32,
+                    new: src_sec.special as i32,
+                });
+                cmds.push(Command::SetSectorIntField {
+                    id: sid,
+                    field: SectorIntField::Tag,
+                    old: s.tag as i32,
+                    new: src_sec.tag as i32,
+                });
+            }
+        }
+        if cmds.is_empty() {
+            self.status = "Paste Properties: no compatible target selected.".into();
+            return;
+        }
+        let count = cmds.len();
+        self.apply_and_push_batch(cmds);
+        self.status = format!("Pasted properties onto {count} field(s).");
+    }
+
+    /// Apply a discrete transform (rotate 90° CCW, flip H, or flip V) to
+    /// every vertex / thing position in the current selection. Pivots around
+    /// the selection's centroid so the geometry stays in place visually.
+    fn transform_selection(&mut self, kind: SelectionTransform) {
+        let Some(map) = self.map.as_ref() else { return };
+        // Collect vertex ids: explicit + endpoints of selected lines + sector
+        // boundaries.
+        let mut vertex_ids: HashSet<doombuilder_core::map::VertexId> = HashSet::new();
+        let mut thing_ids: HashSet<ThingId> = HashSet::new();
+        for h in self.selection.iter() {
+            match h {
+                HighlightKind::Vertex(id) => {
+                    vertex_ids.insert(*id);
+                }
+                HighlightKind::Linedef(id) => {
+                    if let Some(l) = map.linedefs.get(*id) {
+                        vertex_ids.insert(l.v1);
+                        vertex_ids.insert(l.v2);
+                    }
+                }
+                HighlightKind::Thing(id) => {
+                    thing_ids.insert(*id);
+                }
+                _ => {}
+            }
+        }
+        if vertex_ids.is_empty() && thing_ids.is_empty() {
+            self.status = "Edit Selection: select vertices, linedefs, or things first.".into();
+            return;
+        }
+        // Centroid.
+        let mut cx = 0.0_f32;
+        let mut cy = 0.0_f32;
+        let mut n = 0.0_f32;
+        for vid in &vertex_ids {
+            if let Some(v) = map.vertices.get(*vid) {
+                cx += v.x as f32;
+                cy += v.y as f32;
+                n += 1.0;
+            }
+        }
+        for tid in &thing_ids {
+            if let Some(t) = map.things.get(*tid) {
+                cx += t.x as f32;
+                cy += t.y as f32;
+                n += 1.0;
+            }
+        }
+        if n < 1.0 {
+            return;
+        }
+        cx /= n;
+        cy /= n;
+        let txform = |x: f32, y: f32| -> (f32, f32) {
+            let rx = x - cx;
+            let ry = y - cy;
+            let (nx, ny) = match kind {
+                SelectionTransform::Rotate90 => (-ry, rx), // 90° CCW (math Y-up)
+                SelectionTransform::FlipH => (-rx, ry),
+                SelectionTransform::FlipV => (rx, -ry),
+            };
+            (cx + nx, cy + ny)
+        };
+        // Build a Batch of MoveVertices + MoveThings. Easier than a custom
+        // command, and it composes well with undo.
+        let mut vmoves: Vec<doombuilder_core::edit::VertexMove> = Vec::new();
+        for vid in &vertex_ids {
+            let Some(v) = map.vertices.get(*vid) else { continue };
+            let (nx, ny) = txform(v.x as f32, v.y as f32);
+            let dx = nx.round() as i32 - v.x;
+            let dy = ny.round() as i32 - v.y;
+            if dx != 0 || dy != 0 {
+                vmoves.push(doombuilder_core::edit::VertexMove { id: *vid, dx, dy });
+            }
+        }
+        let mut tmoves: Vec<doombuilder_core::edit::ThingMove> = Vec::new();
+        for tid in &thing_ids {
+            let Some(t) = map.things.get(*tid) else { continue };
+            let (nx, ny) = txform(t.x as f32, t.y as f32);
+            let dx = nx.round() as i32 - t.x;
+            let dy = ny.round() as i32 - t.y;
+            if dx != 0 || dy != 0 {
+                tmoves.push(doombuilder_core::edit::ThingMove { id: *tid, dx, dy });
+            }
+        }
+        let mut cmds: Vec<Command> = Vec::new();
+        if !vmoves.is_empty() {
+            cmds.push(Command::MoveVertices(vmoves));
+        }
+        if !tmoves.is_empty() {
+            cmds.push(Command::MoveThings(tmoves));
+        }
+        if cmds.is_empty() {
+            return;
+        }
+        self.apply_and_push_batch(cmds);
+        self.status = match kind {
+            SelectionTransform::Rotate90 => "Rotated selection 90°.".into(),
+            SelectionTransform::FlipH => "Flipped selection horizontally.".into(),
+            SelectionTransform::FlipV => "Flipped selection vertically.".into(),
+        };
+    }
+
+    fn apply_tag_range(&mut self) {
+        let start = match self.tag_range_input.trim().parse::<i32>() {
+            Ok(n) if n >= 0 => n,
+            _ => {
+                self.status = "Tag Range: enter a non-negative integer.".into();
+                return;
+            }
+        };
+        let sectors: Vec<SectorId> = self.selected_sectors();
+        if sectors.is_empty() {
+            self.status = "Tag Range: select one or more sectors first.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else { return };
+        let mut cmds: Vec<Command> = Vec::new();
+        for (i, sid) in sectors.iter().enumerate() {
+            let Some(s) = map.sectors.get(*sid) else { continue };
+            let old = s.tag as i32;
+            let new = (start + i as i32).clamp(0, u16::MAX as i32);
+            if new != old {
+                cmds.push(Command::SetSectorIntField {
+                    id: *sid,
+                    field: SectorIntField::Tag,
+                    old,
+                    new,
+                });
+            }
+        }
+        let count = cmds.len();
+        if count == 0 {
+            self.active_picker = None;
+            self.status = "Tag Range: nothing changed.".into();
+            return;
+        }
+        self.apply_and_push_batch(cmds);
+        self.active_picker = None;
+        self.status = format!("Tagged {count} sector(s) starting at {start}.");
+    }
+
+    /// Run the map-analysis scanner and return its findings. Cheap; called on
+    /// each open of the analysis modal so results stay current.
+    fn analyze_map(&self) -> Vec<MapIssue> {
+        let Some(map) = self.map.as_ref() else { return Vec::new() };
+        let mut issues: Vec<MapIssue> = Vec::new();
+
+        // Lines with no sidedefs on either side — invisible to engines.
+        for (lid, l) in &map.linedefs {
+            if l.right.is_none() && l.left.is_none() {
+                issues.push(MapIssue {
+                    severity: IssueSeverity::Warning,
+                    category: "Floating line",
+                    message: format!("Linedef {lid:?} has no sidedefs (orphan)"),
+                });
+            }
+        }
+        // Zero-length linedefs.
+        for (lid, l) in &map.linedefs {
+            if let (Some(a), Some(b)) =
+                (map.vertices.get(l.v1), map.vertices.get(l.v2))
+            {
+                if a.x == b.x && a.y == b.y {
+                    issues.push(MapIssue {
+                        severity: IssueSeverity::Error,
+                        category: "Zero-length line",
+                        message: format!("Linedef {lid:?} has v1 == v2 ({}, {})", a.x, a.y),
+                    });
+                }
+            }
+        }
+        // Overlapping lines: same (v1, v2) regardless of orientation.
+        let mut seen: HashMap<(doombuilder_core::map::VertexId, doombuilder_core::map::VertexId), LinedefId> =
+            HashMap::new();
+        for (lid, l) in &map.linedefs {
+            let key = if l.v1 <= l.v2 { (l.v1, l.v2) } else { (l.v2, l.v1) };
+            if let Some(other) = seen.get(&key) {
+                issues.push(MapIssue {
+                    severity: IssueSeverity::Error,
+                    category: "Overlapping lines",
+                    message: format!("Linedef {lid:?} overlaps {other:?}"),
+                });
+            } else {
+                seen.insert(key, lid);
+            }
+        }
+        // Dangling vertices — exist but referenced by no linedef.
+        let mut used: HashSet<doombuilder_core::map::VertexId> = HashSet::new();
+        for (_, l) in &map.linedefs {
+            used.insert(l.v1);
+            used.insert(l.v2);
+        }
+        for (vid, v) in &map.vertices {
+            if !used.contains(&vid) {
+                issues.push(MapIssue {
+                    severity: IssueSeverity::Warning,
+                    category: "Dangling vertex",
+                    message: format!("Vertex {vid:?} at ({}, {}) is unused", v.x, v.y),
+                });
+            }
+        }
+        // Sectors with no sidedefs — won't render.
+        for (sid, s) in &map.sectors {
+            if s.sidedefs.is_empty() {
+                issues.push(MapIssue {
+                    severity: IssueSeverity::Warning,
+                    category: "Empty sector",
+                    message: format!("Sector {sid:?} has no sidedefs"),
+                });
+            }
+        }
+        // Missing textures (only when a texture set is loaded — otherwise we
+        // can't tell what's missing vs unloaded).
+        if let Some(textures) = &self.textures {
+            let resolve = |name: &doombuilder_core::map::TextureName| -> bool {
+                if name.is_empty() {
+                    return true; // "-" is fine for missing/no texture
+                }
+                let s = name.as_str().to_ascii_uppercase();
+                textures.textures.contains_key(&s) || textures.flats.contains_key(&s)
+            };
+            for (sid, s) in &map.sidedefs {
+                if !resolve(&s.upper_texture) {
+                    issues.push(MapIssue {
+                        severity: IssueSeverity::Warning,
+                        category: "Missing texture",
+                        message: format!(
+                            "Sidedef {sid:?} upper = '{}' not in resource WADs",
+                            s.upper_texture.as_str()
+                        ),
+                    });
+                }
+                if !resolve(&s.lower_texture) {
+                    issues.push(MapIssue {
+                        severity: IssueSeverity::Warning,
+                        category: "Missing texture",
+                        message: format!(
+                            "Sidedef {sid:?} lower = '{}' not in resource WADs",
+                            s.lower_texture.as_str()
+                        ),
+                    });
+                }
+                if !resolve(&s.middle_texture) {
+                    issues.push(MapIssue {
+                        severity: IssueSeverity::Warning,
+                        category: "Missing texture",
+                        message: format!(
+                            "Sidedef {sid:?} middle = '{}' not in resource WADs",
+                            s.middle_texture.as_str()
+                        ),
+                    });
+                }
+            }
+            for (sec_id, s) in &map.sectors {
+                if !resolve(&s.floor_texture) {
+                    issues.push(MapIssue {
+                        severity: IssueSeverity::Warning,
+                        category: "Missing flat",
+                        message: format!(
+                            "Sector {sec_id:?} floor = '{}' not in resource WADs",
+                            s.floor_texture.as_str()
+                        ),
+                    });
+                }
+                if !resolve(&s.ceiling_texture) {
+                    issues.push(MapIssue {
+                        severity: IssueSeverity::Warning,
+                        category: "Missing flat",
+                        message: format!(
+                            "Sector {sec_id:?} ceiling = '{}' not in resource WADs",
+                            s.ceiling_texture.as_str()
+                        ),
+                    });
+                }
+            }
+        }
+        issues.sort_by(|a, b| {
+            (a.severity, a.category).cmp(&(b.severity, b.category))
+        });
+        issues
+    }
+
+    /// Variant of `test_map` that moves the existing Player 1 Start (or
+    /// inserts one) to the current cursor position before launching. Useful
+    /// to drop into a specific room while iterating. Does not push to undo;
+    /// the change is intended to be transient.
+    fn test_map_at_cursor(&mut self) {
+        let Some(cursor) = self.cursor_world else {
+            self.status = "Test at cursor: move cursor over canvas first.".into();
+            return;
+        };
+        if let Some(map) = self.map.as_mut() {
+            let map_mut = Arc::make_mut(map);
+            // Find an existing Player 1 Start (kind 1) and move it; insert
+            // one if none exists.
+            let p1: Option<ThingId> = map_mut
+                .things
+                .iter()
+                .find(|(_, t)| t.kind == 1)
+                .map(|(id, _)| id);
+            match p1 {
+                Some(tid) => {
+                    if let Some(t) = map_mut.things.get_mut(tid) {
+                        t.x = cursor.x.round() as i32;
+                        t.y = cursor.y.round() as i32;
+                    }
+                }
+                None => {
+                    map_mut.things.insert(doombuilder_core::map::MapThing {
+                        x: cursor.x.round() as i32,
+                        y: cursor.y.round() as i32,
+                        angle: 0,
+                        kind: 1,
+                        flags: 7,
+                        tid: 0,
+                        z: 0,
+                        special: 0,
+                        args: [0; 5],
+                    });
+                }
+            }
+        }
+        self.test_map();
     }
 
     /// For each selected thing, rotate it to face the *normal* of the nearest
@@ -3997,6 +4635,10 @@ impl App {
             Some(ActivePicker::Settings) => self.settings_panel(),
             Some(ActivePicker::GoToCoords) => self.go_to_coords_panel(),
             Some(ActivePicker::MapStats) => self.map_stats_panel(),
+            Some(ActivePicker::MapAnalysis) => self.map_analysis_panel(),
+            Some(ActivePicker::UsedTags) => self.used_tags_panel(),
+            Some(ActivePicker::TagRange) => self.tag_range_panel(),
+            Some(ActivePicker::ThingTypes) => self.thing_types_panel(),
             None => Space::new().into(),
         };
 
@@ -4469,6 +5111,231 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+    }
+
+    fn map_analysis_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Map Analysis").size(18),
+            Space::new().width(Length::Fill),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        let issues = self.analyze_map();
+        let summary = if issues.is_empty() {
+            "No issues found.".to_string()
+        } else {
+            let errors = issues
+                .iter()
+                .filter(|i| i.severity == IssueSeverity::Error)
+                .count();
+            let warns = issues.len() - errors;
+            format!("{errors} error(s), {warns} warning(s)")
+        };
+        let mut rows: Vec<Element<'_, Message>> = Vec::with_capacity(issues.len());
+        for issue in issues {
+            let sev_color = match issue.severity {
+                IssueSeverity::Error => iced::Color::from_rgb(1.0, 0.45, 0.45),
+                IssueSeverity::Warning => iced::Color::from_rgb(0.95, 0.85, 0.35),
+            };
+            rows.push(
+                row![
+                    text(issue.severity.label())
+                        .size(11)
+                        .width(Length::Fixed(60.0))
+                        .color(sev_color),
+                    text(issue.category)
+                        .size(11)
+                        .width(Length::Fixed(160.0)),
+                    text(issue.message).size(11).width(Length::Fill),
+                ]
+                .spacing(8)
+                .into(),
+            );
+        }
+        column![
+            title_row,
+            text(summary).size(13),
+            scrollable(column(rows).spacing(2)).height(Length::Fill),
+        ]
+        .spacing(12)
+        .padding(16)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
+    fn used_tags_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Used Tags").size(18),
+            Space::new().width(Length::Fill),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        let Some(map) = self.map.as_ref() else {
+            return column![title_row, text("No map loaded.").size(13)]
+                .spacing(12)
+                .padding(16)
+                .into();
+        };
+        // tag -> (sectors, lines, things)
+        let mut counts: HashMap<u16, [usize; 3]> = HashMap::new();
+        for (_, s) in &map.sectors {
+            if s.tag != 0 {
+                counts.entry(s.tag).or_insert([0; 3])[0] += 1;
+            }
+        }
+        for (_, l) in &map.linedefs {
+            if l.tag != 0 {
+                counts.entry(l.tag).or_insert([0; 3])[1] += 1;
+            }
+        }
+        for (_, t) in &map.things {
+            if t.tid != 0 {
+                counts.entry(t.tid).or_insert([0; 3])[2] += 1;
+            }
+        }
+        let mut entries: Vec<(u16, [usize; 3])> = counts.into_iter().collect();
+        entries.sort_by_key(|(t, _)| *t);
+        let header = row![
+            text("Tag").size(12).width(Length::Fixed(60.0)),
+            text("Sectors").size(12).width(Length::Fixed(80.0)),
+            text("Lines").size(12).width(Length::Fixed(80.0)),
+            text("Thing TIDs").size(12).width(Length::Fixed(100.0)),
+        ];
+        let rows: Vec<Element<'_, Message>> = entries
+            .into_iter()
+            .map(|(tag, c)| {
+                row![
+                    text(tag.to_string()).size(11).width(Length::Fixed(60.0)),
+                    text(c[0].to_string()).size(11).width(Length::Fixed(80.0)),
+                    text(c[1].to_string()).size(11).width(Length::Fixed(80.0)),
+                    text(c[2].to_string()).size(11).width(Length::Fixed(100.0)),
+                ]
+                .into()
+            })
+            .collect();
+        let body: Element<'_, Message> = if rows.is_empty() {
+            text("No tags in use.").size(12).into()
+        } else {
+            column![header, scrollable(column(rows).spacing(2)).height(Length::Fill)]
+                .spacing(8)
+                .into()
+        };
+        column![title_row, body]
+            .spacing(12)
+            .padding(16)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn tag_range_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Tag Range").size(18),
+            Space::new().width(Length::Fill),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        let sel_count = self.selected_sectors().len();
+        column![
+            title_row,
+            text(format!(
+                "Assigns sequential tags starting from N to the {} selected sector(s) in selection order.",
+                sel_count
+            ))
+            .size(12),
+            row![
+                text("Start at: ").size(13),
+                text_input("1", &self.tag_range_input)
+                    .on_input(Message::TagRangeInputChanged)
+                    .on_submit(Message::TagRangeApply)
+                    .padding(6)
+                    .style(style::win32_text_input)
+                    .width(Length::Fixed(120.0)),
+                Space::new().width(Length::Fill),
+                button("Apply")
+                    .style(style::win32_standard_button)
+                    .on_press(Message::TagRangeApply),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(12)
+        .padding(16)
+        .width(Length::Fill)
+        .into()
+    }
+
+    fn thing_types_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Thing Types").size(18),
+            Space::new().width(Length::Fill),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        let Some(map) = self.map.as_ref() else {
+            return column![title_row, text("No map loaded.").size(13)]
+                .spacing(12)
+                .padding(16)
+                .into();
+        };
+        // kind -> count
+        let mut counts: HashMap<u16, usize> = HashMap::new();
+        for (_, t) in &map.things {
+            *counts.entry(t.kind).or_insert(0) += 1;
+        }
+        let mut entries: Vec<(u16, usize)> = counts.into_iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let header = row![
+            text("Kind").size(12).width(Length::Fixed(60.0)),
+            text("Count").size(12).width(Length::Fixed(60.0)),
+            text("Title").size(12).width(Length::Fixed(220.0)),
+            text("Category").size(12).width(Length::Fill),
+        ];
+        let rows: Vec<Element<'_, Message>> = entries
+            .into_iter()
+            .map(|(kind, n)| {
+                let info = self.config.thing_type(kind);
+                let title = info
+                    .map(|t| t.title.clone())
+                    .unwrap_or_else(|| "(unknown)".into());
+                let cat = info
+                    .map(|t| t.category.clone())
+                    .unwrap_or_else(|| String::new());
+                row![
+                    text(kind.to_string()).size(11).width(Length::Fixed(60.0)),
+                    text(n.to_string()).size(11).width(Length::Fixed(60.0)),
+                    text(title).size(11).width(Length::Fixed(220.0)),
+                    text(cat).size(11).width(Length::Fill),
+                ]
+                .into()
+            })
+            .collect();
+        let body: Element<'_, Message> = if rows.is_empty() {
+            text("No things on the map.").size(12).into()
+        } else {
+            column![header, scrollable(column(rows).spacing(2)).height(Length::Fill)]
+                .spacing(8)
+                .into()
+        };
+        column![title_row, body]
+            .spacing(12)
+            .padding(16)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn settings_panel(&self) -> Element<'_, Message> {
@@ -5386,6 +6253,15 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Delete Selection"),
     MenuItem("Insert Thing"),
     SEP,
+    MenuItem("Copy"),
+    MenuItem("Cut"),
+    MenuItem("Paste"),
+    MenuItem("Paste Properties"),
+    SEP,
+    MenuItem("Rotate Selection 90\u{B0}"),
+    MenuItem("Flip Selection Horizontal"),
+    MenuItem("Flip Selection Vertical"),
+    SEP,
     MenuItem("Make Sector"),
     MenuItem("Split Linedefs"),
     MenuItem("Merge Vertices"),
@@ -5435,7 +6311,17 @@ const VIEW_MENU_ITEMS: &[MenuItem] = &[
     SEP,
     MenuItem("Settings\u{2026}"),
 ];
-const TOOLS_MENU_ITEMS: &[MenuItem] = &[MenuItem("Map Statistics\u{2026}")];
+const TOOLS_MENU_ITEMS: &[MenuItem] = &[
+    MenuItem("Map Statistics\u{2026}"),
+    MenuItem("Map Analysis\u{2026}"),
+    MenuItem("Show Errors / Warnings\u{2026}"),
+    SEP,
+    MenuItem("View Used Tags\u{2026}"),
+    MenuItem("Tag Range\u{2026}"),
+    MenuItem("View Thing Types\u{2026}"),
+    SEP,
+    MenuItem("Test Map at Cursor"),
+];
 const HELP_MENU_ITEMS: &[MenuItem] = &[MenuItem("About (n/a)")];
 
 fn dispatch_file(item: MenuItem) -> Message {
@@ -5458,6 +6344,13 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Clear Selection" => Message::KeyboardEsc,
         "Delete Selection" => Message::DeleteSelection,
         "Insert Thing" => Message::InsertThing,
+        "Copy" => Message::CopySelection,
+        "Cut" => Message::CutSelection,
+        "Paste" => Message::PasteSelection,
+        "Paste Properties" => Message::PasteProperties,
+        "Rotate Selection 90\u{B0}" => Message::RotateSelection90,
+        "Flip Selection Horizontal" => Message::FlipSelectionHorizontal,
+        "Flip Selection Vertical" => Message::FlipSelectionVertical,
         "Make Sector" => Message::MakeSector,
         "Split Linedefs" => Message::SplitLines,
         "Merge Vertices" => Message::MergeVertices,
@@ -5507,6 +6400,12 @@ fn dispatch_view(item: MenuItem) -> Message {
 fn dispatch_tools(item: MenuItem) -> Message {
     match item.0 {
         "Map Statistics\u{2026}" => Message::OpenMapStats,
+        "Map Analysis\u{2026}" => Message::OpenMapAnalysis,
+        "Show Errors / Warnings\u{2026}" => Message::OpenMapAnalysis,
+        "View Used Tags\u{2026}" => Message::OpenUsedTags,
+        "Tag Range\u{2026}" => Message::OpenTagRange,
+        "View Thing Types\u{2026}" => Message::OpenThingTypes,
+        "Test Map at Cursor" => Message::TestMapAtCursor,
         _ => Message::Noop,
     }
 }
