@@ -546,6 +546,8 @@ pub enum Message {
     ToggleFullBrightness,
     FlipSidedefs,
     AlignLinedefs,
+    AlignThingsToNearestLine,
+    PointThingsToCursor,
     AutoAlignX,
     AutoAlignY,
     AutoAlignBoth,
@@ -1530,6 +1532,14 @@ impl App {
                 self.do_flip_sidedefs();
                 Task::none()
             }
+            Message::AlignThingsToNearestLine => {
+                self.do_align_things_to_lines();
+                Task::none()
+            }
+            Message::PointThingsToCursor => {
+                self.do_point_things_to_cursor();
+                Task::none()
+            }
             Message::AlignLinedefs => {
                 self.do_align_linedefs();
                 Task::none()
@@ -1758,6 +1768,7 @@ impl App {
                 keyboard::Key::Character("d") if !modifiers.command() => Message::ToggleDrawing,
                 keyboard::Key::Character("c") if modifiers.shift() => Message::CurveSelectedLines,
                 keyboard::Key::Character("f") if modifiers.shift() => Message::FlipSidedefs,
+                keyboard::Key::Character("l") if modifiers.shift() => Message::PointThingsToCursor,
                 // Auto-align: A = X, Shift+A = Y, Cmd+Shift+A = X+Y.
                 // (Plain Cmd+A is already "Select All" above.)
                 keyboard::Key::Character("a") if modifiers.command() && modifiers.shift() => {
@@ -2717,6 +2728,126 @@ impl App {
             Ok(_) => self.status = format!("Launched engine on {}", map.name),
             Err(e) => self.status = format!("Test: launch failed: {e}"),
         }
+    }
+
+    /// For each selected thing, rotate it to face the *normal* of the nearest
+    /// linedef, oriented toward the thing's side of the wall (so a monster
+    /// placed in front of a wall faces away from it). No-op if no things are
+    /// selected or the map has no walls.
+    fn do_align_things_to_lines(&mut self) {
+        let thing_ids: Vec<ThingId> = self.selected_things();
+        if thing_ids.is_empty() {
+            self.status = "Align Things: select one or more things first.".into();
+            return;
+        }
+        let Some(map) = self.map.as_ref() else { return };
+        let Some(spatial) = self.spatial.as_deref() else {
+            self.status = "Align Things: no spatial index available.".into();
+            return;
+        };
+        let mut cmds: Vec<Command> = Vec::new();
+        for tid in &thing_ids {
+            let Some(t) = map.things.get(*tid) else { continue };
+            let tx = t.x as f32;
+            let ty = t.y as f32;
+            // Map-spanning radius so we always get *some* nearest line.
+            let Some(lid) = spatial.nearest_linedef(tx, ty, 65_536.0) else {
+                continue;
+            };
+            let Some(line) = map.linedefs.get(lid) else { continue };
+            let (Some(a), Some(b)) =
+                (map.vertices.get(line.v1), map.vertices.get(line.v2))
+            else {
+                continue;
+            };
+            let dx = (b.x - a.x) as f32;
+            let dy = (b.y - a.y) as f32;
+            // Right-side normal (math Y-up). Doom angles use the same Y-up
+            // convention (0° = East, 90° = North).
+            let right_nx = dy;
+            let right_ny = -dx;
+            // Which side of the line is the thing on?
+            let to_thing_x = tx - a.x as f32;
+            let to_thing_y = ty - a.y as f32;
+            let dot = right_nx * to_thing_x + right_ny * to_thing_y;
+            // Flip the normal to point away from the wall toward the thing.
+            let (nx, ny) = if dot >= 0.0 {
+                (right_nx, right_ny)
+            } else {
+                (-right_nx, -right_ny)
+            };
+            let new_angle = doom_angle_of(nx, ny);
+            let old = t.angle as i32;
+            if new_angle != old {
+                cmds.push(Command::SetThingIntField {
+                    id: *tid,
+                    field: doombuilder_core::edit::ThingIntField::Angle,
+                    old,
+                    new: new_angle,
+                });
+            }
+        }
+        let count = cmds.len();
+        if count == 0 {
+            self.status = "Align Things: nothing to change.".into();
+            return;
+        }
+        self.apply_and_push_batch(cmds);
+        self.status = format!("Aligned {count} thing(s) to nearest linedef.");
+    }
+
+    /// Rotate every selected thing so its facing direction points at the
+    /// current cursor position. No-op if the cursor isn't inside the
+    /// viewport (so we never accidentally face them at the origin).
+    fn do_point_things_to_cursor(&mut self) {
+        let thing_ids: Vec<ThingId> = self.selected_things();
+        if thing_ids.is_empty() {
+            self.status = "Point Things: select one or more things first.".into();
+            return;
+        }
+        let Some(cursor) = self.cursor_world else {
+            self.status = "Point Things: move cursor over the canvas first.".into();
+            return;
+        };
+        let Some(map) = self.map.as_ref() else { return };
+        let mut cmds: Vec<Command> = Vec::new();
+        for tid in &thing_ids {
+            let Some(t) = map.things.get(*tid) else { continue };
+            let dx = cursor.x - t.x as f32;
+            let dy = cursor.y - t.y as f32;
+            if dx * dx + dy * dy < 1.0 {
+                // Cursor on top of the thing — don't introduce a meaningless
+                // angle change.
+                continue;
+            }
+            let new_angle = doom_angle_of(dx, dy);
+            let old = t.angle as i32;
+            if new_angle != old {
+                cmds.push(Command::SetThingIntField {
+                    id: *tid,
+                    field: doombuilder_core::edit::ThingIntField::Angle,
+                    old,
+                    new: new_angle,
+                });
+            }
+        }
+        let count = cmds.len();
+        if count == 0 {
+            self.status = "Point Things: already pointed at cursor.".into();
+            return;
+        }
+        self.apply_and_push_batch(cmds);
+        self.status = format!("Pointed {count} thing(s) at cursor.");
+    }
+
+    fn selected_things(&self) -> Vec<ThingId> {
+        self.selection
+            .iter()
+            .filter_map(|h| match h {
+                HighlightKind::Thing(id) => Some(*id),
+                _ => None,
+            })
+            .collect()
     }
 
     fn do_flip_sidedefs(&mut self) {
@@ -5266,6 +5397,9 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Auto-align Textures (Y)"),
     MenuItem("Auto-align Textures (X+Y)"),
     SEP,
+    MenuItem("Align Things to Nearest Line"),
+    MenuItem("Point Things to Cursor"),
+    SEP,
     MenuItem("Brightness Gradient"),
     MenuItem("Floor Gradient"),
     MenuItem("Ceiling Gradient"),
@@ -5333,6 +5467,8 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Auto-align Textures (X)" => Message::AutoAlignX,
         "Auto-align Textures (Y)" => Message::AutoAlignY,
         "Auto-align Textures (X+Y)" => Message::AutoAlignBoth,
+        "Align Things to Nearest Line" => Message::AlignThingsToNearestLine,
+        "Point Things to Cursor" => Message::PointThingsToCursor,
         "Snap Selection to Grid" => Message::SnapSelectionToGrid,
         "Brightness Gradient" => Message::MakeBrightnessGradient,
         "Floor Gradient" => Message::MakeFloorGradient,
@@ -5540,6 +5676,13 @@ async fn save_map_to_path(map: Arc<Map>, path: PathBuf) -> Result<PathBuf, Strin
     let bytes = save_map_as_pwad(&map);
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// Convert a 2D math-Y-up direction vector to a Doom angle in degrees
+/// (0 = East, 90 = North, 180 = West, 270 = South), normalized to 0..360.
+fn doom_angle_of(dx: f32, dy: f32) -> i32 {
+    let deg = (dy.atan2(dx).to_degrees()).round() as i32;
+    deg.rem_euclid(360)
 }
 
 /// Map a sector's light value (0..255) to a 32-bit RGBA color for the
