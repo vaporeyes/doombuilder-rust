@@ -4,9 +4,12 @@
 
 mod camera;
 mod icons;
+mod palette;
 mod style;
 mod view2d;
 mod view3d;
+
+use palette::ThemeKind;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -194,6 +197,9 @@ pub struct Settings {
     /// IWAD passed to the engine alongside the saved test PWAD.
     #[serde(default)]
     pub iwad_path: Option<PathBuf>,
+    /// Active visual theme. Picked from a built-in palette set.
+    #[serde(default)]
+    pub theme: ThemeKind,
 }
 
 /// Fixed grid sizes a user can cycle through (None = auto / zoom-derived).
@@ -227,6 +233,7 @@ impl Default for Settings {
             recent_files: Vec::new(),
             engine_path: None,
             iwad_path: None,
+            theme: ThemeKind::default(),
         }
     }
 }
@@ -343,6 +350,8 @@ enum DragMode {
 
 impl Default for App {
     fn default() -> Self {
+        let settings = Settings::load_or_default();
+        palette::set_active(settings.theme.palette());
         Self {
             status: String::new(),
             wad: None,
@@ -356,7 +365,7 @@ impl Default for App {
             walls: Arc::new(Vec::new()),
             spatial: None,
             sector_fills: Arc::new(Vec::new()),
-            settings: Settings::load_or_default(),
+            settings,
             camera2d: Camera2D::default(),
             camera3d: Camera3D::default(),
             geometry3d: Arc::new(View3DGeometry::default()),
@@ -420,6 +429,8 @@ pub enum Message {
     ToggleDrawing,
     CancelDrawing,
     CycleGridStep(i32),
+    PanCamera { dx_units: i32, dy_units: i32, fast: bool },
+    SetTheme(ThemeKind),
     TestMap,
     PickEngineRequested,
     EnginePathPicked(Option<PathBuf>),
@@ -485,7 +496,18 @@ pub struct MapPayload {
 
 impl App {
     fn theme(&self) -> Theme {
-        Theme::Light
+        let p = self.settings.theme.palette();
+        Theme::custom(
+            self.settings.theme.label().to_string(),
+            iced::theme::Palette {
+                background: p.primary,
+                text: p.text,
+                primary: p.secondary,
+                success: p.secondary,
+                warning: p.danger,
+                danger: p.danger,
+            },
+        )
     }
 
     fn persist_settings(&mut self) {
@@ -1238,6 +1260,37 @@ impl App {
                 self.cycle_grid_step(delta);
                 Task::none()
             }
+            Message::PanCamera { dx_units, dy_units, fast } => {
+                let step = self.effective_grid_step().max(8.0);
+                let mul = if fast { 4.0 } else { 1.0 };
+                let dx = dx_units as f32 * step * mul;
+                let dy = dy_units as f32 * step * mul;
+                match self.mode {
+                    Mode::View2D => {
+                        self.camera2d.center += Vec2::new(dx, dy);
+                        self.cache2d.clear();
+                    }
+                    Mode::View3D => {
+                        // Slide the orbit target along the camera's flat yaw
+                        // frame so arrows feel like forward/strafe movement.
+                        let yaw = self.camera3d.yaw;
+                        let fwd = Vec2::new(yaw.cos(), yaw.sin());
+                        let right = Vec2::new(fwd.y, -fwd.x);
+                        let delta = fwd * dy + right * dx;
+                        self.camera3d.target.x += delta.x;
+                        self.camera3d.target.y += delta.y;
+                    }
+                }
+                Task::none()
+            }
+            Message::SetTheme(t) => {
+                self.settings.theme = t;
+                palette::set_active(t.palette());
+                self.persist_settings();
+                self.cache2d.clear();
+                self.status = format!("Theme: {}", t.label());
+                Task::none()
+            }
             Message::TestMap => {
                 self.test_map();
                 Task::none()
@@ -1346,6 +1399,18 @@ impl App {
             keyboard::Event::ModifiersChanged(m) => Message::ModifiersChanged(m),
             keyboard::Event::KeyPressed { key, modifiers, .. } => match key.as_ref() {
                 keyboard::Key::Named(keyboard::key::Named::Escape) => Message::KeyboardEsc,
+                keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
+                    Message::PanCamera { dx_units: -1, dy_units: 0, fast: modifiers.shift() }
+                }
+                keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
+                    Message::PanCamera { dx_units: 1, dy_units: 0, fast: modifiers.shift() }
+                }
+                keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
+                    Message::PanCamera { dx_units: 0, dy_units: 1, fast: modifiers.shift() }
+                }
+                keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
+                    Message::PanCamera { dx_units: 0, dy_units: -1, fast: modifiers.shift() }
+                }
                 keyboard::Key::Character("a") if modifiers.command() => Message::SelectAll,
                 keyboard::Key::Character("z") if modifiers.command() && modifiers.shift() => {
                     Message::Redo
@@ -1374,6 +1439,18 @@ impl App {
                     Message::SetEditMode(EditMode::Sectors)
                 }
                 keyboard::Key::Character("4") if !modifiers.command() => {
+                    Message::SetEditMode(EditMode::Things)
+                }
+                keyboard::Key::Character("v") if !modifiers.command() => {
+                    Message::SetEditMode(EditMode::Vertices)
+                }
+                keyboard::Key::Character("l") if !modifiers.command() => {
+                    Message::SetEditMode(EditMode::Linedefs)
+                }
+                keyboard::Key::Character("s") if !modifiers.command() => {
+                    Message::SetEditMode(EditMode::Sectors)
+                }
+                keyboard::Key::Character("t") if !modifiers.command() => {
                     Message::SetEditMode(EditMode::Things)
                 }
                 _ => Message::ModifiersChanged(modifiers),
@@ -2774,8 +2851,20 @@ impl App {
         ]
         .spacing(6);
 
+        let theme_section = column![
+            text("Theme").size(14),
+            pick_list(
+                ThemeKind::all().to_vec(),
+                Some(self.settings.theme),
+                Message::SetTheme,
+            )
+            .placeholder("Theme"),
+        ]
+        .spacing(6);
+
         column![
             title_row,
+            theme_section,
             text("2D viewport display").size(14),
             column(rows).spacing(6),
             test_section,
@@ -3564,11 +3653,13 @@ fn texture_slot<'a>(
 }
 
 fn vertical_separator() -> Element<'static, Message> {
-    container(Space::new().width(Length::Fixed(1.0)))
-        .height(Length::Fixed(22.0))
-        .padding([2, 4])
-        .style(separator_style)
-        .into()
+    // The colored rule is exactly 1 px wide; the surrounding transparent
+    // container provides the breathing room so the separator reads as a
+    // hairline instead of a chunky bar.
+    let rule = container(Space::new().width(Length::Fixed(1.0)))
+        .height(Length::Fixed(18.0))
+        .style(separator_style);
+    container(rule).padding([0, 6]).into()
 }
 
 // ---- Menu items -----------------------------------------------------------
@@ -3582,29 +3673,45 @@ impl std::fmt::Display for MenuItem {
     }
 }
 
+/// Used as a visual divider inside drop-downs. Dispatches to `Noop`.
+/// `pick_list` has no native separator, so we render a row of light-shade
+/// box-drawing chars whose width tracks the widest menu entry.
+const SEP: MenuItem = MenuItem("──────────────────");
+
 const FILE_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("New Map (Doom)"),
     MenuItem("New Map (Hexen)"),
+    SEP,
     MenuItem("Open WAD…"),
     MenuItem("Load Resource WAD…"),
+    SEP,
     MenuItem("Save Map As…"),
+    SEP,
     MenuItem("Quit"),
 ];
 const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Undo"),
     MenuItem("Redo"),
+    SEP,
     MenuItem("Select All"),
     MenuItem("Clear Selection"),
+    SEP,
     MenuItem("Delete Selection"),
     MenuItem("Insert Thing"),
+    SEP,
     MenuItem("Make Sector"),
     MenuItem("Split Linedefs"),
     MenuItem("Merge Vertices"),
     MenuItem("Flip Linedefs"),
+    SEP,
     MenuItem("Toggle Draw Mode"),
 ];
-const VIEW_MENU_ITEMS: &[MenuItem] =
-    &[MenuItem("2D Mode"), MenuItem("3D Mode"), MenuItem("Settings\u{2026}")];
+const VIEW_MENU_ITEMS: &[MenuItem] = &[
+    MenuItem("2D Mode"),
+    MenuItem("3D Mode"),
+    SEP,
+    MenuItem("Settings\u{2026}"),
+];
 const TOOLS_MENU_ITEMS: &[MenuItem] = &[MenuItem("Map Statistics (n/a)")];
 const HELP_MENU_ITEMS: &[MenuItem] = &[MenuItem("About (n/a)")];
 

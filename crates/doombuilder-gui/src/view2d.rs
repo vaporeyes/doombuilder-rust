@@ -311,6 +311,7 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                     self.inner.hover,
                     &self.inner.selection,
                     1.0,
+                    mode == EditMode::Vertices,
                 );
             } else {
                 draw_vertices_only_highlights(
@@ -644,13 +645,23 @@ fn draw_vertices(
     hover: Option<HighlightKind>,
     selection: &HashSet<HighlightKind>,
     _alpha: f32,
+    emphasised: bool,
 ) {
     let visible = camera.zoom >= 0.15;
     let base = Color::from_rgb(1.0, 0.85, 0.3);
     let hovered = Color::from_rgb(1.0, 0.55, 0.1);
     let selected = Color::from_rgb(1.0, 0.2, 0.2);
-    let radius = (camera.zoom * 0.6).clamp(1.5, 3.5);
-    let highlight_radius = radius + 2.0;
+    // In Vertex edit mode the dots are the primary interaction target, so we
+    // grow them and ring each one in a dark outline so they pop against any
+    // floor color. In other modes they're a passive overlay (kept small).
+    let (radius, highlight_radius, outline_width) = if emphasised {
+        let r = (camera.zoom * 1.2).clamp(4.0, 6.5);
+        (r, r + 2.0, 1.5_f32)
+    } else {
+        let r = (camera.zoom * 0.6).clamp(1.5, 3.5);
+        (r, r + 2.0, 0.0_f32)
+    };
+    let outline_color = Color::from_rgba(0.0, 0.0, 0.0, 0.85);
 
     for (id, v) in &map.vertices {
         let s = camera.world_to_screen(Vec2::new(v.x as f32, v.y as f32), viewport);
@@ -666,6 +677,13 @@ fn draw_vertices(
         } else {
             (base, radius)
         };
+        // Outline first (a slightly larger filled disc), then the colored core.
+        if outline_width > 0.0 {
+            frame.fill(
+                &Path::circle(Point::new(s.x, s.y), r + outline_width),
+                outline_color,
+            );
+        }
         frame.fill(&Path::circle(Point::new(s.x, s.y), r), color);
     }
 }
