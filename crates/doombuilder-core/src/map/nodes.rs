@@ -211,48 +211,111 @@ fn build_initial_segs(
     out
 }
 
-/// Returns the child reference for this subtree:
+/// Returns the child reference for the root subtree:
 ///   - high bit set + ssector index, or
 ///   - node index (no high bit) when an internal node was emitted.
-fn build_bsp(ctx: &mut BuildCtx, segs: Vec<Seg>) -> u16 {
-    if segs.is_empty() {
-        // Defensive: emit an empty ssector so callers always have a child to point at.
-        let first = ctx.segs_out.len() as u16;
-        ctx.ssectors_out.push((0, first));
-        let idx = (ctx.ssectors_out.len() - 1) as u16;
-        return idx | 0x8000;
+///
+/// Iterative implementation. The recursive version blew the stack on real
+/// maps because the partition picker can produce 1-vs-(N-1) splits, making
+/// recursion depth O(N) instead of O(log N). With ~1k segs and large debug
+/// stack frames a 32 MB worker stack still wasn't enough. The iterative
+/// version uses a heap-backed work stack so depth is bounded only by RAM.
+fn build_bsp(ctx: &mut BuildCtx, initial: Vec<Seg>) -> u16 {
+    // Frames are processed LIFO. `Build` may emit a leaf result directly or
+    // schedule a `Combine` after its two `Build` children finish. Children
+    // are pushed in order [back, front] so `front` (=right_child) pops first
+    // and is built before `back` (=left_child); `Combine` then pops the two
+    // results from `results` in left, right order.
+    enum Frame {
+        Build(Vec<Seg>),
+        Combine {
+            px: i16,
+            py: i16,
+            pdx: i16,
+            pdy: i16,
+            right_bb: BBox,
+            left_bb: BBox,
+        },
     }
 
-    match pick_partition(&segs) {
-        Some(part_idx) => {
-            let partition = segs[part_idx].clone();
-            let (front, back) = split_segs(segs, &partition, ctx);
+    let mut stack: Vec<Frame> = Vec::with_capacity(64);
+    let mut results: Vec<u16> = Vec::with_capacity(64);
+    stack.push(Frame::Build(initial));
 
-            // No real split happened (degenerate scoring): make a leaf.
-            if front.is_empty() || back.is_empty() {
-                return make_ssector(ctx, if front.is_empty() { back } else { front });
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Build(segs) => {
+                if segs.is_empty() {
+                    // Defensive: caller always wants something to point at.
+                    let first = ctx.segs_out.len() as u16;
+                    ctx.ssectors_out.push((0, first));
+                    let idx = (ctx.ssectors_out.len() - 1) as u16;
+                    results.push(idx | 0x8000);
+                    continue;
+                }
+                match pick_partition(&segs) {
+                    Some(part_idx) => {
+                        let partition = segs[part_idx].clone();
+                        let (front, back) = split_segs(segs, &partition, ctx);
+                        if front.is_empty() || back.is_empty() {
+                            // Degenerate split: emit as a leaf.
+                            results.push(make_ssector(
+                                ctx,
+                                if front.is_empty() { back } else { front },
+                            ));
+                            continue;
+                        }
+                        let right_bb = bbox_of(&front);
+                        let left_bb = bbox_of(&back);
+                        // Combine waits below the two child Builds. front
+                        // (right_child) goes on top so it's popped — and
+                        // hence built — before back.
+                        stack.push(Frame::Combine {
+                            px: clamp_i16(partition.sx),
+                            py: clamp_i16(partition.sy),
+                            pdx: clamp_i16(partition.ex - partition.sx),
+                            pdy: clamp_i16(partition.ey - partition.sy),
+                            right_bb,
+                            left_bb,
+                        });
+                        stack.push(Frame::Build(back));
+                        stack.push(Frame::Build(front));
+                    }
+                    None => {
+                        // Already convex.
+                        results.push(make_ssector(ctx, segs));
+                    }
+                }
             }
-
-            let right_bb = bbox_of(&front);
-            let left_bb = bbox_of(&back);
-            let right_child = build_bsp(ctx, front);
-            let left_child = build_bsp(ctx, back);
-
-            let node = OutNode {
-                px: clamp_i16(partition.sx),
-                py: clamp_i16(partition.sy),
-                pdx: clamp_i16(partition.ex - partition.sx),
-                pdy: clamp_i16(partition.ey - partition.sy),
+            Frame::Combine {
+                px,
+                py,
+                pdx,
+                pdy,
                 right_bb,
                 left_bb,
-                right_child,
-                left_child,
-            };
-            ctx.nodes_out.push(node);
-            (ctx.nodes_out.len() - 1) as u16
+            } => {
+                // Right was built first → pushed first → sits below left
+                // on the results stack. Pop in reverse: left, then right.
+                let left_child = results.pop().expect("left child built");
+                let right_child = results.pop().expect("right child built");
+                ctx.nodes_out.push(OutNode {
+                    px,
+                    py,
+                    pdx,
+                    pdy,
+                    right_bb,
+                    left_bb,
+                    right_child,
+                    left_child,
+                });
+                results.push((ctx.nodes_out.len() - 1) as u16);
+            }
         }
-        None => make_ssector(ctx, segs),
     }
+
+    debug_assert_eq!(results.len(), 1, "exactly one root expected");
+    results.pop().expect("root produced")
 }
 
 fn make_ssector(ctx: &mut BuildCtx, segs: Vec<Seg>) -> u16 {

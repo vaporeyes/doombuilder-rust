@@ -70,9 +70,12 @@ fn load(wad: &Wad, name: MapName, format: MapFormat) -> Result<Map> {
     let linedef_lump = require_lump(&lumps, "LINEDEFS", &name.0)?;
     let thing_lump = require_lump(&lumps, "THINGS", &name.0)?;
 
-    let raw_vertices: &[RawVertex] = wad.lump_as_slice(vertex_lump)?;
-    let raw_sectors: &[RawSector] = wad.lump_as_slice(sector_lump)?;
-    let raw_sidedefs: &[RawSidedef] = wad.lump_as_slice(sidedef_lump)?;
+    // PWADs in the wild routinely place these lumps at unaligned file
+    // offsets, so copy through `lump_to_vec` instead of taking a zero-copy
+    // borrow. Tiny perf cost; loads maps that would otherwise refuse.
+    let raw_vertices: Vec<RawVertex> = wad.lump_to_vec(vertex_lump)?;
+    let raw_sectors: Vec<RawSector> = wad.lump_to_vec(sector_lump)?;
+    let raw_sidedefs: Vec<RawSidedef> = wad.lump_to_vec(sidedef_lump)?;
 
     let mut map = Map::new(&name.0, format);
 
@@ -103,10 +106,23 @@ fn load(wad: &Wad, name: MapName, format: MapFormat) -> Result<Map> {
         })
         .collect();
 
+    // Real-world PWADs sometimes use the 0xFFFF "no sector" sentinel — and
+    // even other out-of-range indices — on sidedefs that are referenced but
+    // never rendered. Vanilla Doom silently treats those as sector 0; for an
+    // editor we do the same so the map at least loads. If there are no
+    // sectors at all, that's a hard error (caught by the unwrap below).
+    let fallback_sector = *sector_ids.first().ok_or_else(|| Error::BadReference {
+        what: "sector table empty; cannot resolve sidedef.sector".to_string(),
+        index: 0,
+        len: 0,
+    })?;
     let sidedef_ids: Vec<SidedefId> = raw_sidedefs
         .iter()
         .map(|s| -> Result<SidedefId> {
-            let sector = resolve_index(&sector_ids, s.sector, "sidedef.sector")?;
+            let sector = sector_ids
+                .get(s.sector as usize)
+                .copied()
+                .unwrap_or(fallback_sector);
             Ok(map.sidedefs.insert(MapSidedef {
                 sector,
                 x_offset: s.x_offset,
@@ -139,8 +155,8 @@ fn load_linedefs_doom(
     vertex_ids: &[VertexId],
     sidedef_ids: &[SidedefId],
 ) -> Result<()> {
-    let raw: &[LinedefDoom] = wad.lump_as_slice(lump)?;
-    for line in raw {
+    let raw: Vec<LinedefDoom> = wad.lump_to_vec(lump)?;
+    for line in &raw {
         let v1 = resolve_index(vertex_ids, line.start_vertex, "linedef.start_vertex")?;
         let v2 = resolve_index(vertex_ids, line.end_vertex, "linedef.end_vertex")?;
         let right = resolve_optional_sidedef(sidedef_ids, line.right_sidedef)?;
@@ -167,8 +183,8 @@ fn load_linedefs_hexen(
     vertex_ids: &[VertexId],
     sidedef_ids: &[SidedefId],
 ) -> Result<()> {
-    let raw: &[LinedefHexen] = wad.lump_as_slice(lump)?;
-    for line in raw {
+    let raw: Vec<LinedefHexen> = wad.lump_to_vec(lump)?;
+    for line in &raw {
         let v1 = resolve_index(vertex_ids, line.start_vertex, "linedef.start_vertex")?;
         let v2 = resolve_index(vertex_ids, line.end_vertex, "linedef.end_vertex")?;
         let right = resolve_optional_sidedef(sidedef_ids, line.right_sidedef)?;
@@ -189,8 +205,8 @@ fn load_linedefs_hexen(
 }
 
 fn load_things_doom(wad: &Wad, lump: &DirEntry, map: &mut Map) -> Result<()> {
-    let raw: &[ThingDoom] = wad.lump_as_slice(lump)?;
-    for t in raw {
+    let raw: Vec<ThingDoom> = wad.lump_to_vec(lump)?;
+    for t in &raw {
         map.things.insert(MapThing {
             x: t.x as i32,
             y: t.y as i32,
@@ -207,8 +223,8 @@ fn load_things_doom(wad: &Wad, lump: &DirEntry, map: &mut Map) -> Result<()> {
 }
 
 fn load_things_hexen(wad: &Wad, lump: &DirEntry, map: &mut Map) -> Result<()> {
-    let raw: &[ThingHexen] = wad.lump_as_slice(lump)?;
-    for t in raw {
+    let raw: Vec<ThingHexen> = wad.lump_to_vec(lump)?;
+    for t in &raw {
         map.things.insert(MapThing {
             x: t.x as i32,
             y: t.y as i32,

@@ -11,7 +11,9 @@
       "Read(//Users/jsh/dev/repos/sniffnet/src/**)",
       "Read(//Users/jsh/dev/repos/sniffnet/**)",
       "Read(//Users/jsh/dev/docs/**)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "Read(//private/tmp/srepro/**)",
+      "Bash(cargo run *)"
     ]
   }
 }

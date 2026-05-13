@@ -75,7 +75,9 @@ pub fn icon_btn<'a, Msg: 'a + Clone + 'static>(
     wrap_tooltip(btn.into(), tip)
 }
 
-/// Command-style icon button (always raised) for one-shot actions.
+/// Command-style icon button for one-shot actions. Flat by default so it
+/// reads as "doable thing" instead of competing visually with the secondary
+/// fill we reserve for "currently active" toggles. Lights up on hover.
 pub fn icon_cmd_btn<'a, Msg: 'a + Clone + 'static>(
     svg_str: &'static str,
     tip: &'a str,
@@ -83,7 +85,7 @@ pub fn icon_cmd_btn<'a, Msg: 'a + Clone + 'static>(
 ) -> Element<'a, Msg> {
     let btn = button(icon_glyph(svg_str))
         .padding(2)
-        .style(style::win32_standard_button)
+        .style(style::win32_toolbar_button)
         .on_press(msg);
     wrap_tooltip(btn.into(), tip)
 }

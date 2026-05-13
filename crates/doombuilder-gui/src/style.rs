@@ -76,8 +76,10 @@ pub fn win32_standard_button(_theme: &Theme, status: button::Status) -> button::
     }
 }
 
-/// Toggle button: secondary fill when `on`, neutral elevated when off.
+/// Toggle button: secondary fill when `on`, flat-transparent when off.
 /// Used for edit-mode switchers (Vertex/Linedef/Sector/Thing) and draw.
+/// Off-state matches `win32_toolbar_button` so only the active option
+/// carries the blue accent — commands and inactive toggles read identically.
 pub fn win32_toggle_button(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
         let p = palette::active();
@@ -85,18 +87,18 @@ pub fn win32_toggle_button(on: bool) -> impl Fn(&Theme, button::Status) -> butto
             (Background::Color(p.secondary), contrast_text(p.secondary, &p))
         } else {
             let face = match status {
-                button::Status::Hovered => p.elevated,
-                button::Status::Pressed => blend(p.elevated, p.secondary, 0.4),
-                _ => with_alpha(p.elevated, 0.6),
+                button::Status::Hovered => Background::Color(p.elevated),
+                button::Status::Pressed => Background::Color(with_alpha(p.secondary, 0.35)),
+                _ => Background::Color(Color::TRANSPARENT),
             };
-            (Background::Color(face), p.text)
+            (face, p.text)
         };
         button::Style {
             text_color,
             background: Some(bg),
             border: Border {
-                color: if on { Color::TRANSPARENT } else { p.border },
-                width: if on { 0.0 } else { BORDER_HAIRLINE },
+                color: Color::TRANSPARENT,
+                width: 0.0,
                 radius: RADIUS_TOOLBAR_BTN.into(),
             },
             shadow: Shadow::default(),

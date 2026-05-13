@@ -132,6 +132,45 @@ impl Wad {
         })
     }
 
+    /// Owned copy of a lump as `Vec<T>`. Use when the lump may sit at an
+    /// unaligned file offset (common in PWADs from Doom-era editors that
+    /// don't pad lumps), or when the caller plans to own the data anyway.
+    /// Falls back to a per-element memcpy if zero-copy isn't possible.
+    pub fn lump_to_vec<T: Pod>(&self, entry: &DirEntry) -> Result<Vec<T>> {
+        let bytes = self.lump_bytes(entry)?;
+        let stride = std::mem::size_of::<T>();
+        if stride == 0 || bytes.len() % stride != 0 {
+            return Err(Error::BadLumpSize {
+                name: entry.name_str().to_string(),
+                size: bytes.len(),
+                stride,
+            });
+        }
+        let count = bytes.len() / stride;
+        let mut out: Vec<T> = Vec::with_capacity(count);
+        // Fast path: properly aligned, just copy the slice.
+        if let Ok(slice) = bytemuck::try_cast_slice::<u8, T>(bytes) {
+            out.extend_from_slice(slice);
+            return Ok(out);
+        }
+        // Unaligned path: copy each record into a freshly aligned slot.
+        // SAFETY: `T: Pod` ⇒ any byte pattern of the right size is a valid
+        // value; we copy exactly `stride` bytes into each MaybeUninit<T>.
+        for i in 0..count {
+            let src = &bytes[i * stride..(i + 1) * stride];
+            let mut v = std::mem::MaybeUninit::<T>::uninit();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr(),
+                    v.as_mut_ptr() as *mut u8,
+                    stride,
+                );
+                out.push(v.assume_init());
+            }
+        }
+        Ok(out)
+    }
+
     pub fn find(&self, name: &str) -> Option<&DirEntry> {
         self.directory.iter().find(|e| e.name_str() == name)
     }
