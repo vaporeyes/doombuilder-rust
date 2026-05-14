@@ -117,6 +117,14 @@ pub struct App {
     drag_rect: Option<(Vec2, Vec2)>,
     active_drag: Option<DragMode>,
     cursor_world: Option<Vec2>,
+    /// Last single-click `(time, world position)`, used purely to detect
+    /// double-clicks in the canvas. We do this in App rather than in the
+    /// canvas state because dispatch happens in one place and the canvas
+    /// has no view into edit mode.
+    last_click: Option<(std::time::Instant, Vec2)>,
+    /// Edit buffer for the Map Options modal's name field. Live string the
+    /// user types; only committed to `map.name` on submit.
+    map_name_buffer: String,
     undo: UndoStack,
     modifiers: Modifiers,
     mode: Mode,
@@ -226,6 +234,10 @@ pub enum ActivePicker {
     UsedTags,
     TagRange,
     ThingTypes,
+    /// List the maps inside the currently-loaded WAD; clicking one loads it.
+    MapInWad,
+    /// Editable map metadata: name, format. (F2)
+    MapOptions,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -524,6 +536,8 @@ impl Default for App {
             drag_rect: None,
             active_drag: None,
             cursor_world: None,
+            last_click: None,
+            map_name_buffer: String::new(),
             undo: UndoStack::new(),
             modifiers: Modifiers::default(),
             mode: Mode::default(),
@@ -632,6 +646,10 @@ pub enum Message {
     OpenUsedTags,
     OpenTagRange,
     OpenThingTypes,
+    OpenMapInWad,
+    OpenMapOptions,
+    MapNameInputChanged(String),
+    MapNameSubmit,
     TagRangeInputChanged(String),
     TagRangeApply,
     TestMapAtCursor,
@@ -963,7 +981,20 @@ impl App {
                 Task::perform(load_asset(path), Message::AssetLoaded)
             }
             Message::AssetLoaded(Ok(asset)) => {
-                self.status = format!("Loaded {}", asset.path.display());
+                // Auto-pick the matching game config so action/thing/sector
+                // pickers show the right catalog without the user having to
+                // touch the dropdown. User-overridable: switching the
+                // dropdown after load always wins.
+                if let Some(wad) = asset.wad.as_ref() {
+                    let detected = GameConfig::detect_for_wad(wad);
+                    if detected != self.current_config_name {
+                        if let Some(cfg) = GameConfig::builtin(detected) {
+                            self.config = Arc::new(cfg);
+                            self.current_config_name = detected.to_string();
+                        }
+                    }
+                }
+                self.status = format!("Loaded {} ({})", asset.path.display(), self.current_config_name);
                 self.settings.push_recent(asset.path.clone());
                 self.persist_settings();
                 self.wad_path = Some(asset.path);
@@ -992,6 +1023,11 @@ impl App {
                 };
                 self.status = format!("Loading {name}...");
                 self.selected_map = Some(name.clone());
+                // Close the modal map picker if it was the source of this
+                // selection; harmless when MapSelected came from the toolbar.
+                if matches!(self.active_picker, Some(ActivePicker::MapInWad)) {
+                    self.active_picker = None;
+                }
                 Task::perform(load_map_payload(wad, name), Message::MapLoaded)
             }
             Message::MapLoaded(Ok(payload)) => {
@@ -1704,6 +1740,52 @@ impl App {
                 self.active_picker = Some(ActivePicker::ThingTypes);
                 Task::none()
             }
+            Message::OpenMapInWad => {
+                if self.maps.is_empty() {
+                    self.status = "No WAD loaded — open a WAD first.".into();
+                } else {
+                    self.active_picker = Some(ActivePicker::MapInWad);
+                    self.picker_filter.clear();
+                }
+                Task::none()
+            }
+            Message::OpenMapOptions => {
+                let Some(map) = self.map.as_ref() else {
+                    self.status = "No map loaded.".into();
+                    return Task::none();
+                };
+                self.map_name_buffer = map.name.clone();
+                self.active_picker = Some(ActivePicker::MapOptions);
+                Task::none()
+            }
+            Message::MapNameInputChanged(s) => {
+                // Doom map markers are 8-byte uppercase ASCII. Coerce as
+                // the user types so they can't end up with a name the WAD
+                // writer would silently truncate or reject.
+                let mut clean: String = s
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .map(|c| c.to_ascii_uppercase())
+                    .collect();
+                clean.truncate(8);
+                self.map_name_buffer = clean;
+                Task::none()
+            }
+            Message::MapNameSubmit => {
+                let name = self.map_name_buffer.trim().to_string();
+                if name.is_empty() {
+                    self.status = "Map name can't be empty.".into();
+                    return Task::none();
+                }
+                if let Some(map) = self.map.as_mut() {
+                    let map_mut = Arc::make_mut(map);
+                    map_mut.name = name.clone();
+                    self.selected_map = Some(name.clone());
+                    self.status = format!("Map renamed to {name}.");
+                }
+                self.active_picker = None;
+                Task::none()
+            }
             Message::TagRangeInputChanged(s) => {
                 self.tag_range_input = s;
                 Task::none()
@@ -2021,6 +2103,7 @@ impl App {
                     Message::DrawingRemoveLast
                 }
                 keyboard::Key::Named(keyboard::key::Named::Home) => Message::FitToScreen,
+                keyboard::Key::Named(keyboard::key::Named::F2) => Message::OpenMapOptions,
                 keyboard::Key::Character("g") if modifiers.command() && modifiers.shift() => {
                     Message::OpenGoToCoords
                 }
@@ -2237,10 +2320,39 @@ impl App {
                 self.cursor_world = None;
             }
             View2DMessage::ClickAt(world) => {
+                // Detect double-click: two consecutive ClickAt events within
+                // 400ms and ~6 px (in world units, scaled by zoom). Threshold
+                // matches macOS's default and feels right at every zoom level.
+                let now = std::time::Instant::now();
+                let px_world = (6.0_f32 / self.camera2d.zoom.max(1e-6)).max(2.0);
+                let is_double = self
+                    .last_click
+                    .as_ref()
+                    .map(|(t, p)| {
+                        now.duration_since(*t).as_millis() <= 400
+                            && (p.x - world.x).abs() <= px_world
+                            && (p.y - world.y).abs() <= px_world
+                    })
+                    .unwrap_or(false);
+                self.last_click = if is_double { None } else { Some((now, world)) };
+
                 if self.drawing.is_some() {
                     self.drawing_click(world);
                 } else {
                     let hit = self.hit_test(world);
+                    // Things mode + double-click on empty space → place a
+                    // default thing and immediately open the kind picker so
+                    // the user can pick what they actually wanted. Cancelling
+                    // the picker leaves the placeholder; they can delete or
+                    // re-pick. Cheaper UX than a separate "type then place"
+                    // gesture and matches how vertex/sector specials work.
+                    if is_double
+                        && hit.is_none()
+                        && self.edit_mode == EditMode::Things
+                    {
+                        self.insert_thing_and_open_picker(world);
+                        return;
+                    }
                     // Vertex mode + click on empty space near a linedef =>
                     // insert a vertex on that linedef. Falls through to normal
                     // selection behavior on any miss.
@@ -3887,6 +3999,52 @@ impl App {
         }
     }
 
+    /// Place a default thing at `world` and open the ThingKind picker on
+    /// it. Used by the double-click-to-place flow in Things mode.
+    fn insert_thing_and_open_picker(&mut self, world: Vec2) {
+        // Snapshot grid settings before borrowing `map` mutably.
+        let snap_grid_on = self.settings.snap_to_grid;
+        let grid_step = self.effective_grid_step().max(1.0);
+        let Some(map) = self.map.as_mut() else {
+            return;
+        };
+        let map_mut = Arc::make_mut(map);
+        let placed = if snap_grid_on {
+            Vec2::new(
+                (world.x / grid_step).round() * grid_step,
+                (world.y / grid_step).round() * grid_step,
+            )
+        } else {
+            world
+        };
+        let snapshot = MapThing {
+            x: placed.x.round() as i32,
+            y: placed.y.round() as i32,
+            angle: 0,
+            kind: 1, // Player 1 Start: harmless placeholder until the user picks.
+            flags: 7,
+            tid: 0,
+            z: 0,
+            special: 0,
+            args: [0; 5],
+        };
+        let id = map_mut.things.insert(snapshot.clone());
+        self.undo.push(Command::CreateThing {
+            id: Some(id),
+            snapshot,
+        });
+        let mut sel = HashSet::new();
+        sel.insert(HighlightKind::Thing(id));
+        self.selection = Arc::new(sel);
+        self.rebuild_geometry_indices();
+        self.cache2d.clear();
+        // Open the type picker on the freshly-placed thing. Reuses the
+        // same panel that fires from "edit thing kind" elsewhere.
+        self.active_picker = Some(ActivePicker::ThingKind(id));
+        self.picker_filter.clear();
+        self.status = "Pick a thing type (Esc to keep placeholder).".into();
+    }
+
     fn drawing_click(&mut self, world: Vec2) {
         // Snap the world position to grid if applicable, before tool dispatch.
         let snapped_world = if self.settings.snap_to_grid {
@@ -3998,11 +4156,26 @@ impl App {
             }
         }
         drawing.last = Some((target_vid, target_endpoint));
+        // Auto-commit when this click closes the loop (target == chain's
+        // first vertex AND we have at least 3 segments). Two segments would
+        // make a degenerate "fold" rather than a polygon, so we wait.
+        let closes_loop = drawing.chain.linedefs.len() >= 3
+            && drawing
+                .chain
+                .linedefs
+                .first()
+                .map(|(_, _, l)| l.v1 == target_vid)
+                .unwrap_or(false);
         self.status = format!(
             "Drawing: {} verts, {} lines (Esc cancels, D commits)",
             drawing.chain.current_v.len(),
             drawing.chain.current_l.len()
         );
+        if closes_loop {
+            // commit_drawing takes self.drawing, applies the chain command,
+            // and runs the auto-make-sector path. Drop the &mut borrow first.
+            self.commit_drawing();
+        }
         // Spatial index is now stale; rebuild on commit/cancel rather than per-click.
         self.cache2d.clear();
     }
@@ -4038,8 +4211,14 @@ impl App {
         self.undo
             .push(Command::CreateLinedefChain(Box::new(drawing.chain)));
         self.rebuild_geometry_indices();
-        // Auto-select the freshly-drawn linedefs and switch to Linedefs mode
-        // so the user can flow straight into Make Sector.
+        // If the chain forms a closed, side-less loop, promote it straight
+        // into a sector. Soft failure: any error from compute_make_sector
+        // (open chain, mixed with existing sided lines, etc.) just leaves
+        // the lines selected so the user can run Make Sector manually.
+        // Pushed as a separate undo entry so undo peels the sector first
+        // and the bare chain second.
+        let auto_made_sector = self.try_auto_make_sector(&new_lines);
+
         let mut sel = HashSet::new();
         for id in &new_lines {
             sel.insert(HighlightKind::Linedef(*id));
@@ -4047,10 +4226,43 @@ impl App {
         self.selection = Arc::new(sel);
         self.edit_mode = EditMode::Linedefs;
         self.cache2d.clear();
-        self.status = format!(
-            "Drew {} vertices and {} linedefs (selected for Make Sector).",
-            count_v, count_l
-        );
+        self.status = if auto_made_sector {
+            format!(
+                "Drew {} vertices and {} linedefs; closed loop became a sector.",
+                count_v, count_l
+            )
+        } else {
+            format!(
+                "Drew {} vertices and {} linedefs (selected for Make Sector).",
+                count_v, count_l
+            )
+        };
+    }
+
+    /// Try to convert `new_lines` into a sector. Returns true if a sector
+    /// was created (and pushed as its own undo entry); false on any failure
+    /// from `compute_make_sector` — those failures are silent because they
+    /// just mean the user drew an open chain or one that overlaps existing
+    /// geometry and we should leave them in control.
+    fn try_auto_make_sector(&mut self, new_lines: &[doombuilder_core::map::LinedefId]) -> bool {
+        if new_lines.is_empty() {
+            return false;
+        }
+        let Some(map) = self.map.as_ref() else {
+            return false;
+        };
+        let Ok(state) = compute_make_sector(map, new_lines) else {
+            return false;
+        };
+        let mut cmd = Command::MakeSector(Box::new(state));
+        let Some(map) = self.map.as_mut() else {
+            return false;
+        };
+        let map_mut = Arc::make_mut(map);
+        cmd.apply(map_mut);
+        self.undo.push(cmd);
+        self.rebuild_geometry_indices();
+        true
     }
 
     /// Build the shape preview snapshot fed to View2D each frame.
@@ -4091,7 +4303,35 @@ impl App {
                     rows: *rows,
                 })
             }
-            DrawTool::Free => None,
+            DrawTool::Free => {
+                // Rubber-band from the last placed vertex to the cursor.
+                // Highlights green when the cursor is within snap range of
+                // the chain's first vertex AND we already have ≥ 3 segments
+                // (so clicking would close a real polygon, not fold a vee).
+                let (last_vid, _) = drawing.last.clone()?;
+                let map = self.map.as_ref()?;
+                let from_v = map.vertices.get(last_vid)?;
+                let from = Vec2::new(from_v.x as f32, from_v.y as f32);
+                let snap_world = (8.0_f32 / self.camera2d.zoom.max(1e-6)).max(2.0);
+                let snap_sq = snap_world * snap_world;
+                let closes_loop = drawing.chain.linedefs.len() >= 3
+                    && drawing
+                        .chain
+                        .linedefs
+                        .first()
+                        .and_then(|(_, _, l)| map.vertices.get(l.v1))
+                        .map(|sv| {
+                            let dx = sv.x as f32 - cursor.x;
+                            let dy = sv.y as f32 - cursor.y;
+                            dx * dx + dy * dy <= snap_sq
+                        })
+                        .unwrap_or(false);
+                Some(view2d::ShapePreview::FreeChain {
+                    from,
+                    cursor,
+                    closes_loop,
+                })
+            }
         }
     }
 
@@ -4929,6 +5169,8 @@ impl App {
             Some(ActivePicker::UsedTags) => self.used_tags_panel(),
             Some(ActivePicker::TagRange) => self.tag_range_panel(),
             Some(ActivePicker::ThingTypes) => self.thing_types_panel(),
+            Some(ActivePicker::MapInWad) => self.map_in_wad_panel(),
+            Some(ActivePicker::MapOptions) => self.map_options_panel(),
             None => Space::new().into(),
         };
 
@@ -5816,6 +6058,119 @@ impl App {
             .into()
     }
 
+    /// Modal list of every map in the currently-loaded WAD. Click a row to
+    /// load it (same pathway as the toolbar's map picker). Filter narrows
+    /// the list by lump-name substring; the currently-loaded map is tagged.
+    fn map_in_wad_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Open map in current WAD").size(18),
+            Space::new().width(Length::Fill),
+            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let search = text_input("Filter\u{2026}", &self.picker_filter)
+            .on_input(Message::PickerFilterChanged)
+            .padding(6)
+            .style(style::win32_text_input)
+            .width(Length::Fill);
+
+        let q = self.picker_filter.to_ascii_lowercase();
+        let filtered: Vec<&String> = self
+            .maps
+            .iter()
+            .filter(|n| q.is_empty() || n.to_ascii_lowercase().contains(&q))
+            .collect();
+        let count_text = text(format!("{} of {} maps", filtered.len(), self.maps.len())).size(12);
+
+        let mut rows_col: Vec<Element<'_, Message>> = Vec::with_capacity(filtered.len());
+        for name in &filtered {
+            let is_current = self.selected_map.as_deref() == Some(name.as_str());
+            let label = if is_current {
+                format!("{}   (loaded)", name)
+            } else {
+                (*name).clone()
+            };
+            let row_btn = button(text(label).size(13))
+                .padding(8)
+                .style(style::win32_toolbar_button)
+                .width(Length::Fill)
+                .on_press(Message::MapSelected((*name).clone()));
+            rows_col.push(row_btn.into());
+        }
+        let list: Element<'_, Message> = if rows_col.is_empty() {
+            container(text("No maps match filter.").size(12))
+                .padding(12)
+                .into()
+        } else {
+            scrollable(column(rows_col).spacing(2))
+                .height(Length::Fill)
+                .into()
+        };
+
+        column![title_row, search, count_text, list]
+            .spacing(8)
+            .padding(16)
+            .into()
+    }
+
+    /// F2 modal showing the map's metadata. Read-mostly: name is editable
+    /// (Doom's 8-char uppercase rules enforced on input), format is shown
+    /// as a label since changing it isn't a safe in-place op.
+    fn map_options_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("Map Options").size(18),
+            Space::new().width(Length::Fill),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let format_label = match self.map.as_ref().map(|m| m.format) {
+            Some(MapFormat::Doom) => "Doom".to_string(),
+            Some(MapFormat::Hexen) => "Hexen".to_string(),
+            None => "(no map)".to_string(),
+        };
+
+        let name_input = text_input("MAP01", &self.map_name_buffer)
+            .on_input(Message::MapNameInputChanged)
+            .on_submit(Message::MapNameSubmit)
+            .padding(6)
+            .style(style::win32_text_input)
+            .width(Length::Fixed(220.0));
+
+        let body = column![
+            row![
+                text("Lump name:").size(13).width(Length::Fixed(110.0)),
+                name_input,
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            row![
+                text("Format:").size(13).width(Length::Fixed(110.0)),
+                text(format_label).size(13),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            text("Names are coerced to uppercase ASCII (max 8 chars). Press Enter or Apply to commit.")
+                .size(11)
+                .color(Color::from_rgb(0.7, 0.7, 0.75)),
+            row![
+                Space::new().width(Length::Fill),
+                button("Apply")
+                    .style(style::win32_standard_button)
+                    .on_press(Message::MapNameSubmit),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12);
+
+        column![title_row, body].spacing(12).padding(16).into()
+    }
+
     fn thing_kind_picker_panel(&self) -> Element<'_, Message> {
         let title_row = row![
             text("Pick a thing type").size(18),
@@ -6570,7 +6925,15 @@ fn texture_slot<'a>(
         body
     };
 
-    column![slot, text(label).size(11)]
+    // Show the actual texture lump name under the slot label. GZDoom
+    // Builder does this and it's the fastest way to know which "BROWN1"
+    // variant you're looking at without opening the picker. Render dim
+    // and fixed-width to keep the column aligned across all three slots.
+    let name_text = if is_missing { "-".to_string() } else { displayed };
+    let name_label = text(name_text)
+        .size(10)
+        .color(Color::from_rgb(0.7, 0.7, 0.75));
+    column![slot, text(label).size(11), name_label]
         .spacing(2)
         .align_x(iced::Alignment::Center)
         .into()
@@ -6607,6 +6970,7 @@ const FILE_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("New Map (Hexen)"),
     SEP,
     MenuItem("Open WAD…"),
+    MenuItem("Open Map in Current WAD…"),
     MenuItem("Load Resource WAD…"),
     SEP,
     MenuItem("Save Map As…"),
@@ -6656,6 +7020,10 @@ const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Make Door"),
     SEP,
     MenuItem("Snap Selection to Grid"),
+    MenuItem("Increase Grid Size  ["),
+    MenuItem("Decrease Grid Size  ]"),
+    SEP,
+    MenuItem("Map Options\u{2026}  (F2)"),
     SEP,
     MenuItem("Toggle Draw Mode"),
     MenuItem("Rectangle Draw"),
@@ -6701,6 +7069,7 @@ fn dispatch_file(item: MenuItem) -> Message {
         "New Map (Doom)" => Message::NewMap(MapFormat::Doom),
         "New Map (Hexen)" => Message::NewMap(MapFormat::Hexen),
         "Open WAD…" => Message::OpenWadRequested,
+        "Open Map in Current WAD…" => Message::OpenMapInWad,
         "Load Resource WAD…" => Message::LoadResourcesRequested,
         "Save Map As…" => Message::SaveMapRequested,
         "Quit" => Message::Quit,
@@ -6736,6 +7105,9 @@ fn dispatch_edit(item: MenuItem) -> Message {
         "Align Things to Nearest Line" => Message::AlignThingsToNearestLine,
         "Point Things to Cursor" => Message::PointThingsToCursor,
         "Snap Selection to Grid" => Message::SnapSelectionToGrid,
+        "Increase Grid Size  [" => Message::CycleGridStep(1),
+        "Decrease Grid Size  ]" => Message::CycleGridStep(-1),
+        "Map Options…  (F2)" => Message::OpenMapOptions,
         "Brightness Gradient" => Message::MakeBrightnessGradient,
         "Floor Gradient" => Message::MakeFloorGradient,
         "Ceiling Gradient" => Message::MakeCeilingGradient,

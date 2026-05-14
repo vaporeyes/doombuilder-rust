@@ -94,6 +94,11 @@ pub enum ShapePreview {
     Ellipse { origin: Vec2, cursor: Vec2, subdivisions: u32 },
     Curve { points: Vec<Vec2>, cursor: Vec2, subdivisions: u32 },
     Grid { origin: Vec2, cursor: Vec2, cols: u32, rows: u32 },
+    /// Rubber-band line for free-draw mode: the segment from the last
+    /// placed vertex to the current cursor. `closes_loop` flips the color
+    /// to a "ready to close" green so the user can see when clicking will
+    /// finish the room.
+    FreeChain { from: Vec2, cursor: Vec2, closes_loop: bool },
 }
 
 impl View2D {
@@ -957,6 +962,37 @@ fn draw_shape_preview(
             let lines = preview_grid(*origin, *cursor, *cols, *rows);
             for seg in lines {
                 draw_polyline_world(frame, &seg, false, &stroke);
+            }
+        }
+        ShapePreview::FreeChain { from, cursor, closes_loop } => {
+            // Yellow for "next segment", green for "this click closes the
+            // loop" so the affordance is visible without having to read the
+            // status bar. Slightly thicker stroke when closing so it pops.
+            let close_color = Color::from_rgba(0.40, 0.95, 0.45, 0.95);
+            let st = if *closes_loop {
+                canvas::Stroke {
+                    style: canvas::Style::Solid(close_color),
+                    width: 2.0,
+                    ..Default::default()
+                }
+            } else {
+                stroke.clone()
+            };
+            draw_polyline_world(frame, &[*from, *cursor], false, &st);
+            if *closes_loop {
+                // Small ring around the closing target so the user can see
+                // exactly which vertex they're snapping to.
+                let s = camera.world_to_screen(*cursor, viewport);
+                let mut b = canvas::path::Builder::new();
+                b.circle(Point::new(s.x, s.y), 6.0);
+                frame.stroke(
+                    &b.build(),
+                    canvas::Stroke {
+                        style: canvas::Style::Solid(close_color),
+                        width: 1.5,
+                        ..Default::default()
+                    },
+                );
             }
         }
     }

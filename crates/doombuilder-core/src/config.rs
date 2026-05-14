@@ -101,6 +101,45 @@ impl GameConfig {
         &["Doom", "Doom 2", "Heretic", "Hexen"]
     }
 
+    /// Best-effort guess at which built-in matches a WAD. Returns one of
+    /// `builtin_names()`. Detection priority:
+    ///   1. Any `BEHAVIOR` lump in the directory ⇒ Hexen (binary Hexen-format
+    ///      maps carry an ACS bytecode lump per map).
+    ///   2. Any `ExMy`-style map marker ⇒ Doom (episode-style). We don't
+    ///      try to distinguish Heretic here: Heretic PWADs are rare and
+    ///      the user can switch the dropdown manually if needed.
+    ///   3. Any `MAPxx` marker ⇒ Doom 2.
+    ///   4. Fallback ⇒ Doom 2 (most modern PWADs).
+    pub fn detect_for_wad(wad: &crate::wad::Wad) -> &'static str {
+        let dir = wad.directory();
+        if dir
+            .iter()
+            .any(|e| e.name_str().eq_ignore_ascii_case("BEHAVIOR"))
+        {
+            return "Hexen";
+        }
+        let markers = wad.map_markers();
+        let has_em = markers.iter().any(|n| {
+            let b = n.as_bytes();
+            b.len() == 4
+                && (b[0] == b'E' || b[0] == b'e')
+                && (b[2] == b'M' || b[2] == b'm')
+                && b[1].is_ascii_digit()
+                && b[3].is_ascii_digit()
+        });
+        if has_em {
+            return "Doom";
+        }
+        let has_mapxx = markers.iter().any(|n| {
+            let upper = n.to_ascii_uppercase();
+            upper.starts_with("MAP")
+        });
+        if has_mapxx {
+            return "Doom 2";
+        }
+        "Doom 2"
+    }
+
     pub fn linedef_special(&self, id: u16) -> Option<&LinedefSpecial> {
         self.linedef_lookup
             .get(&id)
