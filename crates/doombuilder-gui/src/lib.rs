@@ -238,6 +238,8 @@ pub enum ActivePicker {
     MapInWad,
     /// Editable map metadata: name, format. (F2)
     MapOptions,
+    /// Help → About modal.
+    About,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -587,6 +589,11 @@ pub enum Message {
     ToggleTextures,
     OpenSettings,
     SetSetting(SettingKey, bool),
+    /// Flip the setting's current value. For menu items where the dispatcher
+    /// can't read state to compute the inverse.
+    ToggleSetting(SettingKey),
+    /// Flip 2D ↔ 3D Visual mode. Bound to Q (GZDB convention).
+    ToggleVisualMode,
     SetGameConfig(String),
     View2D(View2DMessage),
     View3D(View3DMessage),
@@ -648,6 +655,9 @@ pub enum Message {
     OpenThingTypes,
     OpenMapInWad,
     OpenMapOptions,
+    OpenAboutDialog,
+    OpenConfigFolder,
+    ReloadResources,
     MapNameInputChanged(String),
     MapNameSubmit,
     TagRangeInputChanged(String),
@@ -1093,6 +1103,24 @@ impl App {
                 self.persist_settings();
                 self.cache2d.clear();
                 Task::none()
+            }
+            Message::ToggleSetting(key) => {
+                let new = !key.get(&self.settings);
+                key.set(&mut self.settings, new);
+                self.persist_settings();
+                self.cache2d.clear();
+                self.status = format!("{}: {}", key.label(), if new { "on" } else { "off" });
+                Task::none()
+            }
+            Message::ToggleVisualMode => {
+                let next = if matches!(self.mode, Mode::View3D) {
+                    Mode::View2D
+                } else {
+                    Mode::View3D
+                };
+                // Reuse the existing Mode handler so all of its side effects
+                // (camera placement, cache invalidation, etc.) fire too.
+                return self.handle_message(Message::Mode(next));
             }
             Message::SetGameConfig(name) => {
                 if let Some(cfg) = GameConfig::builtin(&name) {
@@ -1749,6 +1777,37 @@ impl App {
                 }
                 Task::none()
             }
+            Message::OpenAboutDialog => {
+                self.active_picker = Some(ActivePicker::About);
+                Task::none()
+            }
+            Message::OpenConfigFolder => {
+                if let Some(folder) = Settings::config_path().and_then(|p| p.parent().map(|p| p.to_path_buf())) {
+                    let _ = std::fs::create_dir_all(&folder);
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else if cfg!(target_os = "windows") {
+                        "explorer"
+                    } else {
+                        "xdg-open"
+                    };
+                    match std::process::Command::new(opener).arg(&folder).spawn() {
+                        Ok(_) => self.status = format!("Opened {}", folder.display()),
+                        Err(e) => self.status = format!("Open config folder failed: {e}"),
+                    }
+                } else {
+                    self.status = "No config folder available.".into();
+                }
+                Task::none()
+            }
+            Message::ReloadResources => {
+                let Some(path) = self.wad_path.clone() else {
+                    self.status = "No WAD loaded — nothing to reload.".into();
+                    return Task::none();
+                };
+                self.status = format!("Reloading {}...", path.display());
+                Task::perform(load_asset(path), Message::AssetLoaded)
+            }
             Message::OpenMapOptions => {
                 let Some(map) = self.map.as_ref() else {
                     self.status = "No map loaded.".into();
@@ -2110,6 +2169,10 @@ impl App {
                 keyboard::Key::Character("g") if modifiers.command() => {
                     Message::GHotkey { shift: false, ctrl: true }
                 }
+                // Alt+G — toggle grid rendering (matches GZDoom Builder).
+                keyboard::Key::Character("g") if modifiers.alt() => {
+                    Message::ToggleSetting(SettingKey::ShowGrid)
+                }
                 keyboard::Key::Character("[") => Message::CycleGridStep(1),
                 keyboard::Key::Character("]") => Message::CycleGridStep(-1),
                 keyboard::Key::Character("h") if !modifiers.command() => Message::ToggleHighlights,
@@ -2230,6 +2293,10 @@ impl App {
                 keyboard::Key::Character("7") if !modifiers.command() => Message::SelectGroup(7),
                 keyboard::Key::Character("8") if !modifiers.command() => Message::SelectGroup(8),
                 keyboard::Key::Character("9") if !modifiers.command() => Message::SelectGroup(9),
+                // Q toggles between 2D and 3D Visual Mode (GZDB convention).
+                keyboard::Key::Character("q") if !modifiers.command() => {
+                    Message::ToggleVisualMode
+                }
                 keyboard::Key::Character("v") if !modifiers.command() => {
                     Message::SetEditMode(EditMode::Vertices)
                 }
@@ -4314,22 +4381,43 @@ impl App {
                 let from = Vec2::new(from_v.x as f32, from_v.y as f32);
                 let snap_world = (8.0_f32 / self.camera2d.zoom.max(1e-6)).max(2.0);
                 let snap_sq = snap_world * snap_world;
+                let start_v = drawing
+                    .chain
+                    .linedefs
+                    .first()
+                    .and_then(|(_, _, l)| map.vertices.get(l.v1));
                 let closes_loop = drawing.chain.linedefs.len() >= 3
-                    && drawing
-                        .chain
-                        .linedefs
-                        .first()
-                        .and_then(|(_, _, l)| map.vertices.get(l.v1))
+                    && start_v
                         .map(|sv| {
                             let dx = sv.x as f32 - cursor.x;
                             let dy = sv.y as f32 - cursor.y;
                             dx * dx + dy * dy <= snap_sq
                         })
                         .unwrap_or(false);
+                // Compute the length the committed line would actually have:
+                // snap to the start vertex when closing, else grid-snap the
+                // cursor when grid-snap is on, else use raw cursor coords.
+                // Result is in integer map units to match how the engine
+                // measures lines.
+                let target = if closes_loop {
+                    start_v.map(|v| Vec2::new(v.x as f32, v.y as f32)).unwrap_or(cursor)
+                } else if self.settings.snap_to_grid {
+                    let step = self.effective_grid_step().max(1.0);
+                    Vec2::new(
+                        (cursor.x / step).round() * step,
+                        (cursor.y / step).round() * step,
+                    )
+                } else {
+                    cursor
+                };
+                let dx = target.x - from.x;
+                let dy = target.y - from.y;
+                let length = (dx * dx + dy * dy).sqrt().round() as i32;
                 Some(view2d::ShapePreview::FreeChain {
                     from,
                     cursor,
                     closes_loop,
+                    length,
                 })
             }
         }
@@ -4848,6 +4936,7 @@ impl App {
         let mut bar = row![
             menu_picker("File", FILE_MENU_ITEMS, dispatch_file),
             menu_picker("Edit", EDIT_MENU_ITEMS, dispatch_edit),
+            menu_picker("Mode", MODE_MENU_ITEMS, dispatch_mode),
             menu_picker("View", VIEW_MENU_ITEMS, dispatch_view),
             menu_picker("Tools", TOOLS_MENU_ITEMS, dispatch_tools),
             menu_picker("Help", HELP_MENU_ITEMS, dispatch_help),
@@ -5171,6 +5260,7 @@ impl App {
             Some(ActivePicker::ThingTypes) => self.thing_types_panel(),
             Some(ActivePicker::MapInWad) => self.map_in_wad_panel(),
             Some(ActivePicker::MapOptions) => self.map_options_panel(),
+            Some(ActivePicker::About) => self.about_panel(),
             None => Space::new().into(),
         };
 
@@ -5871,121 +5961,140 @@ impl App {
     }
 
     fn settings_panel(&self) -> Element<'_, Message> {
-        let title_row = row![
-            text("Settings").size(18),
-            Space::new().width(Length::Fill),
-            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
-
-        let keys = [
-            SettingKey::ShowTextures,
-            SettingKey::ShowSprites,
-            SettingKey::ShowGrid,
-            SettingKey::ShowThings,
-            SettingKey::AlwaysShowVertices,
-            SettingKey::SnapToGrid,
-        ];
-
-        let rows: Vec<Element<'_, Message>> = keys
-            .iter()
-            .copied()
-            .map(|k| {
-                let on = k.get(&self.settings);
-                checkbox(on)
-                    .label(k.label())
-                    .on_toggle(move |v| Message::SetSetting(k, v))
-                    .into()
-            })
-            .collect();
-
-        let engine_label = self
-            .settings
-            .engine_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(not set)".into());
-        let iwad_label = self
-            .settings
-            .iwad_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(not set)".into());
-        let test_section = column![
-            text("Test Map (F5)").size(14),
+        // ── Header bar ────────────────────────────────────────────────
+        // Big title + dim subtitle on the left, Close on the right.
+        // Sits above the scrolling card stack so it stays put while
+        // the content scrolls past.
+        let header = container(
             row![
-                text("Engine: ").size(12),
-                text(engine_label).size(12),
+                column![
+                    text("Settings").size(22),
+                    text("Configure DoomBuilder")
+                        .size(12)
+                        .color(palette::active().text_dim),
+                ]
+                .spacing(2),
                 Space::new().width(Length::Fill),
-                button("Pick\u{2026}")
+                button("Done")
                     .style(style::win32_standard_button)
-                    .on_press(Message::PickEngineRequested),
+                    .on_press(Message::ClosePicker),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([16, 20])
+        .style(settings_header_style)
+        .width(Length::Fill);
+
+        // ── Appearance card ───────────────────────────────────────────
+        let appearance = settings_card(
+            "Appearance",
+            "Theme and how the 2D viewport is drawn.",
+            column![
+                labelled_field(
+                    "Theme",
+                    pick_list(
+                        ThemeKind::all().to_vec(),
+                        Some(self.settings.theme),
+                        Message::SetTheme,
+                    )
+                    .placeholder("Theme")
+                    .into(),
+                ),
+                Space::new().height(Length::Fixed(8.0)),
+                text("2D viewport display")
+                    .size(12)
+                    .color(palette::active().text_dim),
+                // Two columns of toggles so they don't form a long stripe.
+                row![
+                    column![
+                        toggle_row(self, SettingKey::ShowTextures),
+                        toggle_row(self, SettingKey::ShowSprites),
+                        toggle_row(self, SettingKey::ShowGrid),
+                    ]
+                    .spacing(10)
+                    .width(Length::FillPortion(1)),
+                    column![
+                        toggle_row(self, SettingKey::ShowThings),
+                        toggle_row(self, SettingKey::AlwaysShowVertices),
+                        toggle_row(self, SettingKey::SnapToGrid),
+                    ]
+                    .spacing(10)
+                    .width(Length::FillPortion(1)),
+                ]
+                .spacing(16),
             ]
             .spacing(8)
-            .align_y(iced::Alignment::Center),
-            row![
-                text("IWAD: ").size(12),
-                text(iwad_label).size(12),
-                Space::new().width(Length::Fill),
-                button("Pick\u{2026}")
-                    .style(style::win32_standard_button)
-                    .on_press(Message::PickIwadRequested),
+            .into(),
+        );
+
+        // ── Test Map card ─────────────────────────────────────────────
+        let engine_set = self.settings.engine_path.is_some();
+        let iwad_set = self.settings.iwad_path.is_some();
+        let test_card = settings_card(
+            "Test Map",
+            "Engine + IWAD used by F5. Both must be set to launch.",
+            column![
+                path_field(
+                    "Engine",
+                    self.settings.engine_path.as_ref(),
+                    engine_set,
+                    Message::PickEngineRequested,
+                ),
+                path_field(
+                    "IWAD",
+                    self.settings.iwad_path.as_ref(),
+                    iwad_set,
+                    Message::PickIwadRequested,
+                ),
             ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-        ]
-        .spacing(6);
+            .spacing(10)
+            .into(),
+        );
 
-        let theme_section = column![
-            text("Theme").size(14),
-            pick_list(
-                ThemeKind::all().to_vec(),
-                Some(self.settings.theme),
-                Message::SetTheme,
-            )
-            .placeholder("Theme"),
-        ]
-        .spacing(6);
-
-        let zdbsp_label = self
-            .settings
-            .zdbsp_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(not set)".into());
-        let nodes_section = column![
-            text("Node Builder").size(14),
-            pick_list(
-                NodeBuilderKind::ALL.to_vec(),
-                Some(self.settings.node_builder),
-                Message::SetNodeBuilder,
-            )
-            .placeholder("Node builder"),
-            row![
-                text("zdbsp path: ").size(12),
-                text(zdbsp_label).size(12),
-                Space::new().width(Length::Fill),
-                button("Pick\u{2026}")
-                    .style(style::win32_standard_button)
-                    .on_press(Message::PickZdbspRequested),
+        // ── Node Builder card ─────────────────────────────────────────
+        let needs_zdbsp = matches!(self.settings.node_builder, NodeBuilderKind::Zdbsp);
+        let zdbsp_set = self.settings.zdbsp_path.is_some();
+        let nodes_card = settings_card(
+            "Node Builder",
+            "Which BSP/blockmap/reject builder to run when saving.",
+            column![
+                labelled_field(
+                    "Builder",
+                    pick_list(
+                        NodeBuilderKind::ALL.to_vec(),
+                        Some(self.settings.node_builder),
+                        Message::SetNodeBuilder,
+                    )
+                    .placeholder("Node builder")
+                    .into(),
+                ),
+                // Only show the path row when zdbsp is selected — otherwise
+                // it's noise. The pip stays red until a path is set.
+                if needs_zdbsp {
+                    path_field(
+                        "zdbsp",
+                        self.settings.zdbsp_path.as_ref(),
+                        zdbsp_set,
+                        Message::PickZdbspRequested,
+                    )
+                } else {
+                    Space::new().height(Length::Fixed(0.0)).into()
+                },
             ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-        ]
-        .spacing(6);
+            .spacing(10)
+            .into(),
+        );
 
-        column![
-            title_row,
-            theme_section,
-            text("2D viewport display").size(14),
-            column(rows).spacing(6),
-            test_section,
-            nodes_section,
-        ]
-        .spacing(12)
-        .padding(16)
-        .into()
+        let body = scrollable(
+            column![appearance, test_card, nodes_card]
+                .spacing(14)
+                .padding([0, 20])
+                .padding([14, 20]),
+        )
+        .height(Length::Fill);
+
+        column![header, body].spacing(0).into()
     }
 
     fn sector_special_picker_panel(&self) -> Element<'_, Message> {
@@ -6113,6 +6222,38 @@ impl App {
             .spacing(8)
             .padding(16)
             .into()
+    }
+
+    /// Help → About modal. Static info about the build.
+    fn about_panel(&self) -> Element<'_, Message> {
+        let title_row = row![
+            text("About DoomBuilder").size(18),
+            Space::new().width(Length::Fill),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let version = env!("CARGO_PKG_VERSION");
+        let body = column![
+            text(format!("DoomBuilder v{version}")).size(15),
+            text("Rust Doom map editor").size(12),
+            Space::new().height(Length::Fixed(8.0)),
+            text(format!("Active config: {}", self.current_config_name)).size(12),
+            text(format!(
+                "Loaded WAD: {}",
+                self.wad_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(none)".into())
+            ))
+            .size(12),
+        ]
+        .spacing(4);
+
+        column![title_row, body].spacing(12).padding(16).into()
     }
 
     /// F2 modal showing the map's metadata. Read-mostly: name is editable
@@ -7049,6 +7190,12 @@ const VIEW_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Toggle Highlights"),
     MenuItem("Place Visual Camera Here"),
     SEP,
+    MenuItem("Toggle Render Grid  (Alt+G)"),
+    MenuItem("Toggle Render Things"),
+    MenuItem("Toggle Render Sprites"),
+    MenuItem("Toggle Render Textures"),
+    MenuItem("Toggle Always Show Vertices"),
+    SEP,
     MenuItem("Settings\u{2026}"),
 ];
 const TOOLS_MENU_ITEMS: &[MenuItem] = &[
@@ -7060,9 +7207,30 @@ const TOOLS_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Tag Range\u{2026}"),
     MenuItem("View Thing Types\u{2026}"),
     SEP,
+    MenuItem("Reload Resources"),
+    SEP,
     MenuItem("Test Map at Cursor"),
 ];
-const HELP_MENU_ITEMS: &[MenuItem] = &[MenuItem("About (n/a)")];
+const MODE_MENU_ITEMS: &[MenuItem] = &[
+    MenuItem("Vertices Mode  (V)"),
+    MenuItem("Linedefs Mode  (L)"),
+    MenuItem("Sectors Mode  (S)"),
+    MenuItem("Things Mode  (T)"),
+    SEP,
+    MenuItem("2D Mode"),
+    MenuItem("Visual Mode  (Q)"),
+    SEP,
+    MenuItem("Draw Lines Mode  (D)"),
+    MenuItem("Draw Rectangle Mode  (\u{2318}\u{21E7}D)"),
+    MenuItem("Draw Ellipse Mode  (\u{2325}\u{21E7}D)"),
+    MenuItem("Draw Curve Mode  (\u{2318}\u{2325}D)"),
+    MenuItem("Draw Grid Mode"),
+];
+const HELP_MENU_ITEMS: &[MenuItem] = &[
+    MenuItem("Open Config Folder"),
+    SEP,
+    MenuItem("About DoomBuilder"),
+];
 
 fn dispatch_file(item: MenuItem) -> Message {
     match item.0 {
@@ -7138,6 +7306,11 @@ fn dispatch_view(item: MenuItem) -> Message {
         "Toggle 3D Preview" => Message::Toggle3DOverlay,
         "Toggle Highlights" => Message::ToggleHighlights,
         "Place Visual Camera Here" => Message::PlaceVisualCamera,
+        "Toggle Render Grid  (Alt+G)" => Message::ToggleSetting(SettingKey::ShowGrid),
+        "Toggle Render Things" => Message::ToggleSetting(SettingKey::ShowThings),
+        "Toggle Render Sprites" => Message::ToggleSetting(SettingKey::ShowSprites),
+        "Toggle Render Textures" => Message::ToggleSetting(SettingKey::ShowTextures),
+        "Toggle Always Show Vertices" => Message::ToggleSetting(SettingKey::AlwaysShowVertices),
         "Settings\u{2026}" => Message::OpenSettings,
         _ => Message::Noop,
     }
@@ -7152,12 +7325,34 @@ fn dispatch_tools(item: MenuItem) -> Message {
         "Tag Range\u{2026}" => Message::OpenTagRange,
         "View Thing Types\u{2026}" => Message::OpenThingTypes,
         "Test Map at Cursor" => Message::TestMapAtCursor,
+        "Reload Resources" => Message::ReloadResources,
         _ => Message::Noop,
     }
 }
 
-fn dispatch_help(_item: MenuItem) -> Message {
-    Message::Noop
+fn dispatch_mode(item: MenuItem) -> Message {
+    match item.0 {
+        "Vertices Mode  (V)" => Message::SetEditMode(EditMode::Vertices),
+        "Linedefs Mode  (L)" => Message::SetEditMode(EditMode::Linedefs),
+        "Sectors Mode  (S)" => Message::SetEditMode(EditMode::Sectors),
+        "Things Mode  (T)" => Message::SetEditMode(EditMode::Things),
+        "2D Mode" => Message::Mode(Mode::View2D),
+        "Visual Mode  (Q)" => Message::Mode(Mode::View3D),
+        "Draw Lines Mode  (D)" => Message::ToggleDrawing,
+        "Draw Rectangle Mode  (⌘⇧D)" => Message::StartRectangleDraw,
+        "Draw Ellipse Mode  (⌥⇧D)" => Message::StartEllipseDraw,
+        "Draw Curve Mode  (⌘⌥D)" => Message::StartCurveDraw,
+        "Draw Grid Mode" => Message::StartGridDraw,
+        _ => Message::Noop,
+    }
+}
+
+fn dispatch_help(item: MenuItem) -> Message {
+    match item.0 {
+        "Open Config Folder" => Message::OpenConfigFolder,
+        "About DoomBuilder" => Message::OpenAboutDialog,
+        _ => Message::Noop,
+    }
 }
 
 fn menu_picker(
@@ -7306,6 +7501,146 @@ fn texture_slot_style(theme: &Theme) -> container::Style {
 
 fn separator_style(theme: &Theme) -> container::Style {
     style::win32_separator(theme)
+}
+
+// ── Settings panel helpers ──────────────────────────────────────────────
+//
+// Card-based layout: the modal is a vertical stack of grouped cards, each
+// with a title, dim sublabel, and content. Path rows show a colored pip
+// (green when set, red when missing) so the user can scan the page and see
+// what still needs attention.
+
+fn settings_header_style(_theme: &Theme) -> container::Style {
+    let p = palette::active();
+    container::Style {
+        text_color: Some(p.text),
+        background: Some(iced::Background::Color(p.elevated)),
+        border: iced::Border {
+            color: p.border,
+            width: 0.0,
+            radius: iced::border::Radius::new(0.0)
+                .top_left(16.0)
+                .top_right(16.0),
+        },
+        shadow: iced::Shadow::default(),
+        snap: true,
+    }
+}
+
+fn settings_card_style(_theme: &Theme) -> container::Style {
+    let p = palette::active();
+    container::Style {
+        text_color: Some(p.text),
+        background: Some(iced::Background::Color(p.elevated)),
+        border: iced::Border {
+            color: p.border,
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        snap: true,
+    }
+}
+
+fn pip_ok_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(iced::Color::from_rgb(
+            0.30, 0.78, 0.45,
+        ))),
+        border: iced::Border {
+            color: iced::Color::TRANSPARENT,
+            width: 0.0,
+            radius: 100.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn pip_warn_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(iced::Color::from_rgb(
+            0.92, 0.46, 0.40,
+        ))),
+        border: iced::Border {
+            color: iced::Color::TRANSPARENT,
+            width: 0.0,
+            radius: 100.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn settings_card<'a>(
+    title: &'a str,
+    subtitle: &'a str,
+    body: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let header = column![
+        text(title).size(15),
+        text(subtitle).size(11).color(palette::active().text_dim),
+    ]
+    .spacing(2);
+    container(column![header, body].spacing(12))
+        .padding(16)
+        .width(Length::Fill)
+        .style(settings_card_style)
+        .into()
+}
+
+fn labelled_field<'a>(label: &'a str, control: Element<'a, Message>) -> Element<'a, Message> {
+    column![
+        text(label).size(12).color(palette::active().text_dim),
+        control,
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn toggle_row<'a>(app: &App, key: SettingKey) -> Element<'a, Message> {
+    let on = key.get(&app.settings);
+    checkbox(on)
+        .label(key.label())
+        .on_toggle(move |v| Message::SetSetting(key, v))
+        .into()
+}
+
+fn status_pip<'a>(ok: bool) -> Element<'a, Message> {
+    container(Space::new())
+        .width(Length::Fixed(8.0))
+        .height(Length::Fixed(8.0))
+        .style(if ok { pip_ok_style } else { pip_warn_style })
+        .into()
+}
+
+fn path_field<'a>(
+    label: &'a str,
+    path: Option<&'a PathBuf>,
+    is_set: bool,
+    on_pick: Message,
+) -> Element<'a, Message> {
+    let value: String = path
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "Not set".into());
+    let value_color = if is_set {
+        palette::active().text
+    } else {
+        palette::active().text_dim
+    };
+    column![
+        text(label).size(12).color(palette::active().text_dim),
+        row![
+            status_pip(is_set),
+            text(value).size(13).color(value_color),
+            Space::new().width(Length::Fill),
+            button("Choose\u{2026}")
+                .style(style::win32_standard_button)
+                .on_press(on_pick),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(4)
+    .into()
 }
 
 async fn pick_save_path(suggested_stem: String) -> Option<PathBuf> {

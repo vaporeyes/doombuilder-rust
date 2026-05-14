@@ -97,8 +97,9 @@ pub enum ShapePreview {
     /// Rubber-band line for free-draw mode: the segment from the last
     /// placed vertex to the current cursor. `closes_loop` flips the color
     /// to a "ready to close" green so the user can see when clicking will
-    /// finish the room.
-    FreeChain { from: Vec2, cursor: Vec2, closes_loop: bool },
+    /// finish the room. `length` is precomputed in map units so the label
+    /// reflects the actual line that would be drawn (snap-aware).
+    FreeChain { from: Vec2, cursor: Vec2, closes_loop: bool, length: i32 },
 }
 
 impl View2D {
@@ -964,7 +965,7 @@ fn draw_shape_preview(
                 draw_polyline_world(frame, &seg, false, &stroke);
             }
         }
-        ShapePreview::FreeChain { from, cursor, closes_loop } => {
+        ShapePreview::FreeChain { from, cursor, closes_loop, length } => {
             // Yellow for "next segment", green for "this click closes the
             // loop" so the affordance is visible without having to read the
             // status bar. Slightly thicker stroke when closing so it pops.
@@ -993,6 +994,23 @@ fn draw_shape_preview(
                         ..Default::default()
                     },
                 );
+            }
+            // Length label near the cursor end. Don't render at length 0
+            // (degenerate; would clutter the cursor with "0").
+            if *length > 0 {
+                use iced::widget::canvas::Text;
+                let s = camera.world_to_screen(*cursor, viewport);
+                // Offset the label so it doesn't sit under the crosshair.
+                // Up-and-right places it where Doom Builder users expect.
+                let label_pos = Point::new(s.x + 10.0, s.y - 10.0);
+                let txt_color = if *closes_loop { close_color } else { line_color };
+                frame.fill_text(Text {
+                    content: format!("{} u", length),
+                    position: label_pos,
+                    color: txt_color,
+                    size: 12.0.into(),
+                    ..Text::default()
+                });
             }
         }
     }
