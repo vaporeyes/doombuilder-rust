@@ -4933,8 +4933,8 @@ impl App {
     }
 
     fn menu_bar(&self) -> Element<'_, Message> {
-        let mut bar = row![
-            menu_picker("File", FILE_MENU_ITEMS, dispatch_file),
+        let bar = row![
+            self.file_menu_picker(),
             menu_picker("Edit", EDIT_MENU_ITEMS, dispatch_edit),
             menu_picker("Mode", MODE_MENU_ITEMS, dispatch_mode),
             menu_picker("View", VIEW_MENU_ITEMS, dispatch_view),
@@ -4944,44 +4944,49 @@ impl App {
         .spacing(2)
         .padding(2)
         .align_y(iced::Alignment::Center);
-        if !self.settings.recent_files.is_empty() {
-            bar = bar.push(self.recent_files_picker());
-        }
         container(bar)
             .style(menu_bar_style)
             .width(Length::Fill)
             .into()
     }
 
-    fn recent_files_picker(&self) -> Element<'_, Message> {
-        // Use a struct that carries the index so dispatch is O(1) and unique
-        // even when two paths have the same filename.
-        #[derive(Debug, Clone, PartialEq)]
-        struct RecentEntry {
-            idx: usize,
-            label: String,
-        }
-        impl std::fmt::Display for RecentEntry {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(&self.label)
-            }
-        }
-        let entries: Vec<RecentEntry> = self
-            .settings
-            .recent_files
-            .iter()
-            .enumerate()
-            .map(|(idx, p)| {
+    /// File picker is dynamic so it can fold the recent-files list in
+    /// (indented under an "Open Recent" header). The static items still
+    /// route through `dispatch_file`; recent entries carry their index
+    /// directly so we don't have to re-parse the label.
+    fn file_menu_picker(&self) -> Element<'_, Message> {
+        let mut entries: Vec<FileEntry> = vec![
+            FileEntry::Static("New Map (Doom)"),
+            FileEntry::Static("New Map (Hexen)"),
+            FileEntry::Sep,
+            FileEntry::Static("Open WAD\u{2026}"),
+            FileEntry::Static("Open Map in Current WAD\u{2026}"),
+            FileEntry::Static("Load Resource WAD\u{2026}"),
+            FileEntry::Sep,
+            FileEntry::Static("Save Map As\u{2026}"),
+        ];
+        if !self.settings.recent_files.is_empty() {
+            entries.push(FileEntry::Sep);
+            // Header is a Sep-styled disabled-looking row; selecting it is a no-op.
+            entries.push(FileEntry::Header("Open Recent".into()));
+            for (idx, p) in self.settings.recent_files.iter().enumerate() {
                 let name = p
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| p.display().to_string());
-                RecentEntry { idx, label: name }
-            })
-            .collect();
-        pick_list(entries, None::<RecentEntry>, |e| Message::OpenRecent(e.idx))
-            .placeholder("Recent")
-            .into()
+                entries.push(FileEntry::Recent { idx, label: name });
+            }
+        }
+        entries.push(FileEntry::Sep);
+        entries.push(FileEntry::Static("Quit"));
+
+        pick_list(entries, None::<FileEntry>, |e| match e {
+            FileEntry::Recent { idx, .. } => Message::OpenRecent(idx),
+            FileEntry::Static(s) => dispatch_file(MenuItem(s)),
+            FileEntry::Sep | FileEntry::Header(_) => Message::Noop,
+        })
+        .placeholder("File")
+        .into()
     }
 
     fn toolbar(&self) -> Element<'_, Message> {
@@ -6685,18 +6690,83 @@ impl App {
         )
         .style(style::win32_modal_panel)
         .padding(0);
-        // Pin to the top of the right column with a blank space filling the
-        // remaining vertical area below.
+        // 2D minimap directly below the 3D preview. Reuses the same View2D
+        // widget with a fitted camera and an event sink that throws clicks
+        // away — strictly a navigation reference, not interactive.
+        let minimap_card = self.view2d_minimap_card();
         container(
-            column![preview_card, Space::new().height(Length::Fill)]
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .spacing(0),
+            column![
+                preview_card,
+                Space::new().height(Length::Fixed(8.0)),
+                minimap_card,
+                Space::new().height(Length::Fill),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .spacing(0),
         )
         .width(Length::Fixed(PANEL_W))
         .height(Length::Fill)
         .padding(8)
         .style(style::win32_side_panel)
+        .into()
+    }
+
+    fn view2d_minimap_card(&self) -> Element<'_, Message> {
+        const MINIMAP_H: f32 = 200.0;
+        let Some(map) = self.map.as_ref() else {
+            return Space::new().into();
+        };
+        let Some((min, max)) = map_aabb(map) else {
+            return Space::new().into();
+        };
+        // Synthesize a camera that frames the whole map. Use the panel
+        // width as the viewport hint so the fit math matches what the
+        // rendered widget will actually display.
+        let mut cam = self.camera2d;
+        cam.frame_aabb(
+            min,
+            max,
+            Vec2::new(284.0, MINIMAP_H - 18.0),
+        );
+        let view = view2d::View2D {
+            map: map.clone(),
+            meshes: self.sector_meshes.clone(),
+            camera: cam,
+            // Fresh cache so the minimap doesn't fight the main viewport's
+            // cache (different camera = different rendered geometry).
+            cache: Arc::new(iced::widget::canvas::Cache::new()),
+            hover: None,
+            selection: Arc::new(HashSet::new()),
+            drag_rect: None,
+            fills: self.sector_fills.clone(),
+            config: self.config.clone(),
+            edit_mode: self.edit_mode,
+            // Skip sprite rendering to keep the minimap fast and uncluttered.
+            sprite_handles: Arc::new(HashMap::new()),
+            sprite_dims: Arc::new(HashMap::new()),
+            settings: self.settings.clone(),
+            pan_override: false,
+            shape_preview: None,
+            opaque_fills: self.settings.view_mode == View2DMode::Brightness,
+        };
+        // Swallow events so clicks/drag on the minimap don't move the main
+        // 2D camera. (Future polish: add a click-to-pan-main-view gesture.)
+        let inner = view.into_widget(|_| Message::Noop);
+        let header = container(text("2D Map").size(11))
+            .padding([2, 6])
+            .style(style::win32_status_bar)
+            .width(Length::Fill);
+        let viewport_2d = container(inner)
+            .width(Length::Fill)
+            .height(Length::Fixed(MINIMAP_H - 18.0));
+        container(
+            column![header, viewport_2d]
+                .width(Length::Fill)
+                .height(Length::Fixed(MINIMAP_H)),
+        )
+        .style(style::win32_modal_panel)
+        .padding(0)
         .into()
     }
 
@@ -7095,6 +7165,29 @@ fn vertical_separator() -> Element<'static, Message> {
 #[derive(Debug, Clone, PartialEq)]
 struct MenuItem(&'static str);
 
+/// Dynamic File-menu entry. Carries either a static label that routes
+/// through `dispatch_file`, an indexed recent file, a non-clickable header,
+/// or a visual separator.
+#[derive(Debug, Clone, PartialEq)]
+enum FileEntry {
+    Static(&'static str),
+    Recent { idx: usize, label: String },
+    Header(String),
+    Sep,
+}
+
+impl std::fmt::Display for FileEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileEntry::Static(s) => f.write_str(s),
+            // Indented so they read as nested under "Open Recent".
+            FileEntry::Recent { label, .. } => write!(f, "    {}", label),
+            FileEntry::Header(h) => write!(f, "{}", h),
+            FileEntry::Sep => f.write_str("──────────────────"),
+        }
+    }
+}
+
 impl std::fmt::Display for MenuItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0)
@@ -7106,18 +7199,9 @@ impl std::fmt::Display for MenuItem {
 /// box-drawing chars whose width tracks the widest menu entry.
 const SEP: MenuItem = MenuItem("──────────────────");
 
-const FILE_MENU_ITEMS: &[MenuItem] = &[
-    MenuItem("New Map (Doom)"),
-    MenuItem("New Map (Hexen)"),
-    SEP,
-    MenuItem("Open WAD…"),
-    MenuItem("Open Map in Current WAD…"),
-    MenuItem("Load Resource WAD…"),
-    SEP,
-    MenuItem("Save Map As…"),
-    SEP,
-    MenuItem("Quit"),
-];
+// File menu entries are built dynamically in `App::file_menu_picker` so the
+// recent-files list can be folded in. The string labels here are the source
+// of truth that `dispatch_file` matches against.
 const EDIT_MENU_ITEMS: &[MenuItem] = &[
     MenuItem("Undo"),
     MenuItem("Redo"),
