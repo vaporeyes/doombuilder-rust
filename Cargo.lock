@@ -794,6 +794,7 @@ dependencies = [
  "doombuilder-render",
  "glam 0.32.1",
  "iced",
+ "png",
  "rfd",
  "serde",
  "serde_json",

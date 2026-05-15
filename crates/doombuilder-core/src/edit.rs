@@ -954,8 +954,20 @@ pub fn build_clipboard(
         }
     }
 
-    // Sectors.
-    let mut sector_order: Vec<SectorId> = sel_sectors.iter().copied().collect();
+    // Sectors. Start from the explicit selection, then pull in any sector
+    // referenced by a sidedef of a clipboard linedef. Without this expansion,
+    // copying a linedef alone would paste a sideless line ("blank line"
+    // bug): sidedefs only get added below if their sector is in `s_index`.
+    let mut effective_sectors: HashSet<SectorId> = sel_sectors.iter().copied().collect();
+    for lid in &line_set {
+        let Some(l) = map.linedefs.get(*lid) else { continue };
+        for slot in [l.right, l.left].iter().copied().flatten() {
+            if let Some(side) = map.sidedefs.get(slot) {
+                effective_sectors.insert(side.sector);
+            }
+        }
+    }
+    let mut sector_order: Vec<SectorId> = effective_sectors.into_iter().collect();
     sector_order.sort();
     for sid in &sector_order {
         if let Some(s) = map.sectors.get(*sid) {

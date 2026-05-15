@@ -13,7 +13,11 @@
       "Read(//Users/jsh/dev/docs/**)",
       "Bash(grep *)",
       "Read(//private/tmp/srepro/**)",
-      "Bash(cargo run *)"
+      "Bash(cargo run *)",
+      "Bash(sips -g pixelWidth -g pixelHeight -g hasAlpha \"media/Level Editing App Logo for Doombuilder Port.png\")",
+      "Read(//private/tmp/**)",
+      "Bash(cp \"/Users/jsh/dev/projects/doombuilder-rust/media/Level Editing App Logo for Doombuilder Port.png\" logo.png)",
+      "Bash(python3 -)"
     ]
   }
 }

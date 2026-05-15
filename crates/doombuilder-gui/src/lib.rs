@@ -4,6 +4,7 @@
 
 mod camera;
 mod icons;
+mod logo;
 mod palette;
 mod style;
 mod view2d;
@@ -58,7 +59,13 @@ pub fn run() -> iced::Result {
         .theme(App::theme)
         // Sized so the full toolbar (icons + menu picker + map picker)
         // fits without horizontal scrolling on standard DPI displays.
-        .window_size(iced::Size::new(1160.0, 812.0))
+        // `.window(..)` overwrites all window settings, so the size lives
+        // here alongside the icon rather than in a separate `.window_size`.
+        .window(iced::window::Settings {
+            size: iced::Size::new(1160.0, 812.0),
+            icon: logo::window_icon(),
+            ..Default::default()
+        })
         .run()
 }
 
@@ -3398,7 +3405,8 @@ impl App {
         };
         let mut cmds: Vec<Command> = Vec::new();
         let Some(map) = self.map.as_ref() else { return };
-        // Choose source based on what's in the clipboard.
+
+        // Sectors → sectors.
         if let Some(src_sec) = data.sectors.first().cloned() {
             for sid in self.selected_sectors() {
                 let Some(s) = map.sectors.get(sid) else { continue };
@@ -3434,8 +3442,93 @@ impl App {
                 });
             }
         }
+
+        // Linedefs → linedefs. Copies action (special), flags, tag, and
+        // Hexen args. Endpoints (v1/v2) and sidedef refs are deliberately
+        // not touched: those define geometry, not "properties."
+        if let Some((src_line, _, _, _, _)) = data.linedefs.first().cloned() {
+            for lid in self.selected_linedefs() {
+                let Some(l) = map.linedefs.get(lid) else { continue };
+                if l.special != src_line.special {
+                    cmds.push(Command::SetLinedefSpecial {
+                        id: lid,
+                        old: l.special,
+                        new: src_line.special,
+                    });
+                }
+                if l.flags != src_line.flags {
+                    cmds.push(Command::SetLinedefIntField {
+                        id: lid,
+                        field: doombuilder_core::edit::LinedefIntField::Flags,
+                        old: l.flags as i32,
+                        new: src_line.flags as i32,
+                    });
+                }
+                if l.tag != src_line.tag {
+                    cmds.push(Command::SetLinedefIntField {
+                        id: lid,
+                        field: doombuilder_core::edit::LinedefIntField::Tag,
+                        old: l.tag as i32,
+                        new: src_line.tag as i32,
+                    });
+                }
+                for (i, field) in [
+                    doombuilder_core::edit::LinedefIntField::Arg0,
+                    doombuilder_core::edit::LinedefIntField::Arg1,
+                    doombuilder_core::edit::LinedefIntField::Arg2,
+                    doombuilder_core::edit::LinedefIntField::Arg3,
+                    doombuilder_core::edit::LinedefIntField::Arg4,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if l.args[i] != src_line.args[i] {
+                        cmds.push(Command::SetLinedefIntField {
+                            id: lid,
+                            field,
+                            old: l.args[i] as i32,
+                            new: src_line.args[i] as i32,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Things → things. Copies kind, angle, flags. Position is left
+        // alone — same "properties not geometry" rule.
+        if let Some(src_thing) = data.things.first().cloned() {
+            for tid in self.selected_things() {
+                let Some(t) = map.things.get(tid) else { continue };
+                if t.kind != src_thing.kind {
+                    cmds.push(Command::SetThingKind {
+                        id: tid,
+                        old: t.kind,
+                        new: src_thing.kind,
+                    });
+                }
+                if t.angle != src_thing.angle {
+                    cmds.push(Command::SetThingIntField {
+                        id: tid,
+                        field: doombuilder_core::edit::ThingIntField::Angle,
+                        old: t.angle as i32,
+                        new: src_thing.angle as i32,
+                    });
+                }
+                if t.flags != src_thing.flags {
+                    cmds.push(Command::SetThingIntField {
+                        id: tid,
+                        field: doombuilder_core::edit::ThingIntField::Flags,
+                        old: t.flags as i32,
+                        new: src_thing.flags as i32,
+                    });
+                }
+            }
+        }
+
         if cmds.is_empty() {
-            self.status = "Paste Properties: no compatible target selected.".into();
+            self.status =
+                "Paste Properties: clipboard kind doesn't match selection (or values already match)."
+                    .into();
             return;
         }
         let count = cmds.len();
@@ -5059,12 +5152,25 @@ impl App {
 
     fn viewport_widget(&self) -> Element<'_, Message> {
         let body: Element<'_, Message> = match (self.mode, &self.map) {
-            (_, None) => container(text("Open a WAD and pick a map to begin.").size(16))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .into(),
+            (_, None) => {
+                let prompt = text("Open a WAD and pick a map to begin.").size(16);
+                let inner: Element<'_, Message> = match logo::splash_handle() {
+                    Some(handle) => column![
+                        iced::widget::image(handle).width(Length::Fixed(360.0)),
+                        prompt,
+                    ]
+                    .spacing(20)
+                    .align_x(iced::Alignment::Center)
+                    .into(),
+                    None => prompt.into(),
+                };
+                container(inner)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .into()
+            }
             (Mode::View2D, Some(map)) => {
                 let view = View2D {
                     map: map.clone(),
@@ -6231,34 +6337,109 @@ impl App {
 
     /// Help → About modal. Static info about the build.
     fn about_panel(&self) -> Element<'_, Message> {
-        let title_row = row![
-            text("About DoomBuilder").size(18),
+        let p = palette::active();
+        let version = env!("CARGO_PKG_VERSION");
+        let build_profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+
+        // Close stays pinned top-right; the hero is centered in the modal.
+        let close_row = row![
             Space::new().width(Length::Fill),
             button("Close")
                 .style(style::win32_standard_button)
                 .on_press(Message::ClosePicker),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
+        ];
 
-        let version = env!("CARGO_PKG_VERSION");
-        let body = column![
-            text(format!("DoomBuilder v{version}")).size(15),
-            text("Rust Doom map editor").size(12),
+        // Real app badge (white-plated hexagon mark). Falls back to the
+        // styled glyph tile if the embedded asset can't be decoded.
+        let badge: Element<'_, Message> = match logo::badge_handle() {
+            Some(handle) => iced::widget::image(handle)
+                .width(Length::Fixed(96.0))
+                .height(Length::Fixed(96.0))
+                .into(),
+            None => container(text("◫").size(44).color(contrast_on_accent(&p)))
+                .width(Length::Fixed(84.0))
+                .height(Length::Fixed(84.0))
+                .center_x(Length::Fixed(84.0))
+                .center_y(Length::Fixed(84.0))
+                .style(about_badge_style)
+                .into(),
+        };
+
+        let version_pill = container(text(format!("v{version}")).size(12).color(p.text))
+            .padding([3, 10])
+            .style(about_pill_style);
+
+        let hero = column![
+            badge,
+            Space::new().height(Length::Fixed(14.0)),
+            text("DoomBuilder").size(28),
+            Space::new().height(Length::Fixed(6.0)),
+            version_pill,
             Space::new().height(Length::Fixed(8.0)),
-            text(format!("Active config: {}", self.current_config_name)).size(12),
-            text(format!(
-                "Loaded WAD: {}",
-                self.wad_path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(none)".into())
-            ))
-            .size(12),
+            text("A Rust Doom / Hexen map editor")
+                .size(13)
+                .color(p.text_dim),
         ]
-        .spacing(4);
+        .align_x(iced::Alignment::Center)
+        .spacing(0);
 
-        column![title_row, body].spacing(12).padding(16).into()
+        // Key/value info card.
+        let info_row = |k: &'static str, v: String| -> Element<'_, Message> {
+            row![
+                text(k).size(12).color(p.text_dim).width(Length::Fixed(120.0)),
+                text(v).size(12).color(p.text),
+            ]
+            .spacing(8)
+            .into()
+        };
+        let info = container(
+            column![
+                info_row("Active config", self.current_config_name.clone()),
+                info_row(
+                    "Loaded WAD",
+                    self.wad_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "None".into()),
+                ),
+                info_row("Build", build_profile.to_string()),
+            ]
+            .spacing(8),
+        )
+        .padding(16)
+        .width(Length::Fixed(360.0))
+        .style(settings_card_style);
+
+        let footer = text("Built with Rust + iced")
+            .size(11)
+            .color(p.text_dim);
+
+        // Vertically center the whole stack inside the (tall) modal.
+        let centered = container(
+            column![
+                hero,
+                Space::new().height(Length::Fixed(24.0)),
+                info,
+                Space::new().height(Length::Fixed(16.0)),
+                footer,
+            ]
+            .align_x(iced::Alignment::Center)
+            .spacing(0),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill);
+
+        column![close_row, centered]
+            .spacing(0)
+            .padding(16)
+            .into()
     }
 
     /// F2 modal showing the map's metadata. Read-mostly: name is editable
@@ -7648,6 +7829,49 @@ fn pip_warn_style(_theme: &Theme) -> container::Style {
         border: iced::Border {
             color: iced::Color::TRANSPARENT,
             width: 0.0,
+            radius: 100.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// Black or white, whichever reads better on the accent color. Used for
+/// the About badge glyph so it stays legible across every theme.
+fn contrast_on_accent(p: &palette::Palette) -> iced::Color {
+    let c = p.secondary;
+    let luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    if luma > 0.55 {
+        iced::Color::from_rgb(0.05, 0.05, 0.08)
+    } else {
+        iced::Color::WHITE
+    }
+}
+
+fn about_badge_style(_theme: &Theme) -> container::Style {
+    let p = palette::active();
+    container::Style {
+        background: Some(iced::Background::Color(p.secondary)),
+        border: iced::Border {
+            color: iced::Color::TRANSPARENT,
+            width: 0.0,
+            radius: 20.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 14.0,
+        },
+        ..Default::default()
+    }
+}
+
+fn about_pill_style(_theme: &Theme) -> container::Style {
+    let p = palette::active();
+    container::Style {
+        background: Some(iced::Background::Color(p.elevated)),
+        border: iced::Border {
+            color: p.border,
+            width: 1.0,
             radius: 100.0.into(),
         },
         ..Default::default()
