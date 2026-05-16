@@ -28,20 +28,15 @@ pub struct Palette {
     pub header_grad_to: Color,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ThemeKind {
+    #[default]
     Dark,
     Light,
     Nord,
     Dracula,
     Gruvbox,
     Solarized,
-}
-
-impl Default for ThemeKind {
-    fn default() -> Self {
-        ThemeKind::Dark
-    }
 }
 
 impl ThemeKind {
@@ -147,14 +142,14 @@ fn palette_light() -> Palette {
 
 fn palette_nord() -> Palette {
     Palette {
-        primary: rgb(0x2e, 0x34, 0x40),       // nord0
-        secondary: rgb(0x88, 0xc0, 0xd0),     // nord8
-        surface: rgb(0x3b, 0x42, 0x52),       // nord1
-        elevated: rgb(0x43, 0x4c, 0x5e),      // nord2
-        text: rgb(0xec, 0xef, 0xf4),          // nord6
-        text_dim: rgb(0xd8, 0xde, 0xe9),      // nord4
-        border: rgb(0x4c, 0x56, 0x6a),        // nord3
-        danger: rgb(0xbf, 0x61, 0x6a),        // nord11
+        primary: rgb(0x2e, 0x34, 0x40),          // nord0
+        secondary: rgb(0x88, 0xc0, 0xd0),        // nord8
+        surface: rgb(0x3b, 0x42, 0x52),          // nord1
+        elevated: rgb(0x43, 0x4c, 0x5e),         // nord2
+        text: rgb(0xec, 0xef, 0xf4),             // nord6
+        text_dim: rgb(0xd8, 0xde, 0xe9),         // nord4
+        border: rgb(0x4c, 0x56, 0x6a),           // nord3
+        danger: rgb(0xbf, 0x61, 0x6a),           // nord11
         header_grad_from: rgb(0x5e, 0x81, 0xac), // nord10
         header_grad_to: rgb(0x88, 0xc0, 0xd0),   // nord8
     }

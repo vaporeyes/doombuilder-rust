@@ -70,17 +70,9 @@ pub enum Command {
         current_ids: Vec<ThingId>,
     },
     /// Change a linedef's action (special) value.
-    SetLinedefSpecial {
-        id: LinedefId,
-        old: u16,
-        new: u16,
-    },
+    SetLinedefSpecial { id: LinedefId, old: u16, new: u16 },
     /// Change a thing's kind (type id).
-    SetThingKind {
-        id: ThingId,
-        old: u16,
-        new: u16,
-    },
+    SetThingKind { id: ThingId, old: u16, new: u16 },
     /// Bulk delete: vertices, linedefs, sidedefs, sectors, things.
     /// Snapshots carry the OLD ids so cross-references can be remapped on
     /// revert. `current_*` tracks the new ids after the most recent revert
@@ -190,6 +182,16 @@ pub enum SidedefSide {
     Left,
 }
 
+/// A clipboard linedef: `(template, v1_idx, v2_idx, right_clip_idx,
+/// left_clip_idx)`. Indices reference the snap vectors in [`ClipboardData`].
+pub type ClipboardLinedef = (
+    crate::map::MapLinedef,
+    usize,
+    usize,
+    Option<usize>,
+    Option<usize>,
+);
+
 /// Snapshot of selected map elements suitable for serialising to a
 /// clipboard. Cross-references are by index into the snap vectors so the
 /// data is portable across maps.
@@ -201,13 +203,7 @@ pub struct ClipboardData {
     /// ignored at paste time; we substitute the resolved sector id.
     pub sidedefs: Vec<(crate::map::MapSidedef, usize)>,
     /// `(template, v1_idx, v2_idx, right_clip_idx, left_clip_idx)`.
-    pub linedefs: Vec<(
-        crate::map::MapLinedef,
-        usize,
-        usize,
-        Option<usize>,
-        Option<usize>,
-    )>,
+    pub linedefs: Vec<ClipboardLinedef>,
     pub things: Vec<crate::map::MapThing>,
 }
 
@@ -682,10 +678,8 @@ pub fn collect_and_delete(
             }
             let r_gone = line.right.map(|s| to_del_side.contains(&s)).unwrap_or(true);
             let l_gone = line.left.map(|s| to_del_side.contains(&s)).unwrap_or(true);
-            if r_gone && l_gone {
-                if to_del_l.insert(lid) {
-                    changed = true;
-                }
+            if r_gone && l_gone && to_del_l.insert(lid) {
+                changed = true;
             }
         }
         if !changed {
@@ -795,16 +789,15 @@ pub fn compute_join_sectors(
     let mut removed_sides: Vec<(SidedefId, crate::map::MapSidedef)> = Vec::new();
     if remove_shared_lines {
         // Combined set of all sectors involved (survivor + absorbed).
-        let involved: HashSet<SectorId> =
-            std::iter::once(survivor).chain(merged_set.iter().copied()).collect();
+        let involved: HashSet<SectorId> = std::iter::once(survivor)
+            .chain(merged_set.iter().copied())
+            .collect();
         let mut removed_side_ids: HashSet<SidedefId> = HashSet::new();
         for (lid, line) in &map.linedefs {
             let (Some(r), Some(l)) = (line.right, line.left) else {
                 continue;
             };
-            let (Some(rs), Some(ls)) =
-                (map.sidedefs.get(r), map.sidedefs.get(l))
-            else {
+            let (Some(rs), Some(ls)) = (map.sidedefs.get(r), map.sidedefs.get(l)) else {
                 continue;
             };
             if involved.contains(&rs.sector) && involved.contains(&ls.sector) {
@@ -819,8 +812,7 @@ pub fn compute_join_sectors(
             }
         }
         // Drop sidedef_changes for sides we're already going to remove.
-        let removed_set: HashSet<SidedefId> =
-            removed_sides.iter().map(|(id, _)| *id).collect();
+        let removed_set: HashSet<SidedefId> = removed_sides.iter().map(|(id, _)| *id).collect();
         sidedef_changes.retain(|(sid, _)| !removed_set.contains(sid));
     }
 
@@ -853,8 +845,14 @@ pub fn compute_stitch_lines(map: &Map, line_ids: &[LinedefId]) -> Vec<StitchMerg
     // Group by unordered vertex pair.
     let mut groups: HashMap<(VertexId, VertexId), Vec<LinedefId>> = HashMap::new();
     for lid in line_ids {
-        let Some(l) = map.linedefs.get(*lid) else { continue };
-        let key = if l.v1 <= l.v2 { (l.v1, l.v2) } else { (l.v2, l.v1) };
+        let Some(l) = map.linedefs.get(*lid) else {
+            continue;
+        };
+        let key = if l.v1 <= l.v2 {
+            (l.v1, l.v2)
+        } else {
+            (l.v2, l.v1)
+        };
         groups.entry(key).or_default().push(*lid);
     }
     for (_, lids) in groups.into_iter().filter(|(_, v)| v.len() >= 2) {
@@ -865,13 +863,17 @@ pub fn compute_stitch_lines(map: &Map, line_ids: &[LinedefId]) -> Vec<StitchMerg
         if consumed.contains(&keeper) {
             continue;
         }
-        let Some(keeper_line) = map.linedefs.get(keeper) else { continue };
+        let Some(keeper_line) = map.linedefs.get(keeper) else {
+            continue;
+        };
         let keeper_dir = (keeper_line.v1, keeper_line.v2);
         for &absorbed in &lids[1..] {
             if consumed.contains(&absorbed) {
                 continue;
             }
-            let Some(abs_line) = map.linedefs.get(absorbed) else { continue };
+            let Some(abs_line) = map.linedefs.get(absorbed) else {
+                continue;
+            };
             // Opposite direction = absorbed.v1 == keeper.v2 && absorbed.v2 == keeper.v1.
             let opposite = abs_line.v1 == keeper_dir.1 && abs_line.v2 == keeper_dir.0;
             if !opposite {
@@ -886,9 +888,9 @@ pub fn compute_stitch_lines(map: &Map, line_ids: &[LinedefId]) -> Vec<StitchMerg
             if keeper_line.left.is_some() {
                 continue;
             }
-            let absorbed_left_snap = abs_line.left.and_then(|sid| {
-                map.sidedefs.get(sid).map(|s| (sid, s.clone()))
-            });
+            let absorbed_left_snap = abs_line
+                .left
+                .and_then(|sid| map.sidedefs.get(sid).map(|s| (sid, s.clone())));
             merges.push(StitchMerge {
                 keeper,
                 keeper_old_left: keeper_line.left,
@@ -960,7 +962,9 @@ pub fn build_clipboard(
     // bug): sidedefs only get added below if their sector is in `s_index`.
     let mut effective_sectors: HashSet<SectorId> = sel_sectors.iter().copied().collect();
     for lid in &line_set {
-        let Some(l) = map.linedefs.get(*lid) else { continue };
+        let Some(l) = map.linedefs.get(*lid) else {
+            continue;
+        };
         for slot in [l.right, l.left].iter().copied().flatten() {
             if let Some(side) = map.sidedefs.get(slot) {
                 effective_sectors.insert(side.sector);
@@ -980,13 +984,19 @@ pub fn build_clipboard(
     let mut line_order: Vec<LinedefId> = line_set.iter().copied().collect();
     line_order.sort();
     for lid in &line_order {
-        let Some(l) = map.linedefs.get(*lid) else { continue };
+        let Some(l) = map.linedefs.get(*lid) else {
+            continue;
+        };
         for slot in [l.right, l.left].iter().copied().flatten() {
             if side_index.contains_key(&slot) {
                 continue;
             }
-            let Some(side) = map.sidedefs.get(slot) else { continue };
-            let Some(&sec_idx) = s_index.get(&side.sector) else { continue };
+            let Some(side) = map.sidedefs.get(slot) else {
+                continue;
+            };
+            let Some(&sec_idx) = s_index.get(&side.sector) else {
+                continue;
+            };
             side_index.insert(slot, data.sidedefs.len());
             data.sidedefs.push((side.clone(), sec_idx));
         }
@@ -994,7 +1004,9 @@ pub fn build_clipboard(
 
     // Linedefs (now we can resolve all references).
     for lid in &line_order {
-        let Some(l) = map.linedefs.get(*lid) else { continue };
+        let Some(l) = map.linedefs.get(*lid) else {
+            continue;
+        };
         let (Some(&v1), Some(&v2)) = (v_index.get(&l.v1), v_index.get(&l.v2)) else {
             continue;
         };
@@ -1095,7 +1107,9 @@ pub fn compute_align_linedefs(map: &Map, line_ids: &[LinedefId]) -> Vec<LinedefI
     // mid→centroid vector flipped), the line is already aligned. Else flip.
     let mut to_flip: Vec<LinedefId> = Vec::new();
     for lid in line_ids {
-        let Some(l) = map.linedefs.get(*lid) else { continue };
+        let Some(l) = map.linedefs.get(*lid) else {
+            continue;
+        };
         let (Some(a), Some(b)) = (map.vertices.get(l.v1), map.vertices.get(l.v2)) else {
             continue;
         };
@@ -1153,13 +1167,17 @@ pub fn compute_auto_align_textures(
     for window_idx in 0..path.len().saturating_sub(1) {
         let (from_v, lid) = path[window_idx];
         let (to_v, _) = path[window_idx + 1];
-        let Some(line) = map.linedefs.get(lid) else { continue };
+        let Some(line) = map.linedefs.get(lid) else {
+            continue;
+        };
         let sid = match (line.right, line.left) {
             (Some(r), _) => r,
             (None, Some(l)) => l,
             _ => continue,
         };
-        let Some(side) = map.sidedefs.get(sid) else { continue };
+        let Some(side) = map.sidedefs.get(sid) else {
+            continue;
+        };
         // First line in chain → seed the X with its current offset.
         if changes.is_empty() {
             accumulated = side.x_offset as f32;
@@ -1303,13 +1321,12 @@ impl Command {
                     }
                 }
                 // 2. Remove sidedefs of degenerate lines.
-                let cur_s_ids: Vec<SidedefId> = if state.current_s.len()
-                    == state.removed_side_data.len()
-                {
-                    state.current_s.clone()
-                } else {
-                    state.removed_side_data.iter().map(|(id, _)| *id).collect()
-                };
+                let cur_s_ids: Vec<SidedefId> =
+                    if state.current_s.len() == state.removed_side_data.len() {
+                        state.current_s.clone()
+                    } else {
+                        state.removed_side_data.iter().map(|(id, _)| *id).collect()
+                    };
                 for sid in &cur_s_ids {
                     map.sidedefs.remove(*sid);
                 }
@@ -1326,7 +1343,11 @@ impl Command {
                 let cur_v_ids: Vec<VertexId> = if !remap_v.is_empty() {
                     state.current_v.clone()
                 } else {
-                    state.removed_vertex_data.iter().map(|(id, _)| *id).collect()
+                    state
+                        .removed_vertex_data
+                        .iter()
+                        .map(|(id, _)| *id)
+                        .collect()
                 };
                 for vid in &cur_v_ids {
                     map.vertices.remove(*vid);
@@ -1485,14 +1506,14 @@ impl Command {
                 for m in merges.iter_mut() {
                     // 1. Detach absorbed.right so deletion doesn't cascade
                     //    the sidedef we're about to reassign.
-                    let absorbed_right = if let Some(line) = map.linedefs.get_mut(m.absorbed_line_id)
-                    {
-                        let r = line.right;
-                        line.right = None;
-                        r
-                    } else {
-                        None
-                    };
+                    let absorbed_right =
+                        if let Some(line) = map.linedefs.get_mut(m.absorbed_line_id) {
+                            let r = line.right;
+                            line.right = None;
+                            r
+                        } else {
+                            None
+                        };
                     // 2. Reassign that sidedef onto keeper.left.
                     if let Some(line) = map.linedefs.get_mut(m.keeper) {
                         m.keeper_old_left = line.left;
@@ -1586,31 +1607,22 @@ impl Command {
                 }
                 // 2. Remove sidedefs cascaded along with shared linedefs.
                 state.current_removed_sides.clear();
-                let sides_to_remove: Vec<SidedefId> = state
-                    .removed_sides
-                    .iter()
-                    .map(|(id, _)| *id)
-                    .collect();
+                let sides_to_remove: Vec<SidedefId> =
+                    state.removed_sides.iter().map(|(id, _)| *id).collect();
                 for sid in sides_to_remove {
                     map.sidedefs.remove(sid);
                 }
                 // 3. Remove shared linedefs.
                 state.current_removed_lines.clear();
-                let lines_to_remove: Vec<LinedefId> = state
-                    .removed_lines
-                    .iter()
-                    .map(|(id, _)| *id)
-                    .collect();
+                let lines_to_remove: Vec<LinedefId> =
+                    state.removed_lines.iter().map(|(id, _)| *id).collect();
                 for lid in lines_to_remove {
                     map.linedefs.remove(lid);
                 }
                 // 4. Remove the absorbed sectors themselves.
                 state.current_merged.clear();
-                let secs_to_remove: Vec<SectorId> = state
-                    .merged_snapshots
-                    .iter()
-                    .map(|(id, _)| *id)
-                    .collect();
+                let secs_to_remove: Vec<SectorId> =
+                    state.merged_snapshots.iter().map(|(id, _)| *id).collect();
                 for sid in secs_to_remove {
                     map.sectors.remove(sid);
                 }
@@ -1967,7 +1979,9 @@ impl Command {
 
 fn write_sector_int(s: &mut crate::map::MapSector, field: SectorIntField, value: i32) {
     match field {
-        SectorIntField::FloorHeight => s.floor_height = value.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        SectorIntField::FloorHeight => {
+            s.floor_height = value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        }
         SectorIntField::CeilingHeight => {
             s.ceiling_height = value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
         }
@@ -1991,7 +2005,7 @@ fn write_linedef_int(l: &mut crate::map::MapLinedef, field: LinedefIntField, val
 
 fn write_thing_int(t: &mut crate::map::MapThing, field: ThingIntField, value: i32) {
     match field {
-        ThingIntField::Angle => t.angle = ((value % 360 + 360) % 360).clamp(0, u16::MAX as i32) as u16,
+        ThingIntField::Angle => t.angle = value.rem_euclid(360).clamp(0, u16::MAX as i32) as u16,
         ThingIntField::Flags => t.flags = value.clamp(0, u16::MAX as i32) as u16,
     }
 }
@@ -2129,8 +2143,8 @@ mod tests {
             fields: Default::default(),
         });
         let l1 = map.linedefs.insert(MapLinedef {
-            v1: v1,
-            v2: v2,
+            v1,
+            v2,
             flags: 0,
             special: 0,
             args: [0; 5],
@@ -2323,10 +2337,22 @@ mod tests {
 
         let mut sel_v = HashSet::new();
         sel_v.insert(v0);
-        let state = collect_and_delete(&mut map, &sel_v, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let state = collect_and_delete(
+            &mut map,
+            &sel_v,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
         assert!(map.vertices.get(v0).is_none());
-        assert!(map.linedefs.get(l0).is_none(), "linedef using deleted vertex must go");
-        assert!(map.sidedefs.get(s0).is_none(), "sidedef of deleted linedef must go");
+        assert!(
+            map.linedefs.get(l0).is_none(),
+            "linedef using deleted vertex must go"
+        );
+        assert!(
+            map.sidedefs.get(s0).is_none(),
+            "sidedef of deleted linedef must go"
+        );
         assert_eq!(state.vertex_snaps.len(), 1);
         assert_eq!(state.linedef_snaps.len(), 1);
         assert_eq!(state.sidedef_snaps.len(), 1);
@@ -2371,7 +2397,13 @@ mod tests {
 
         let mut sel_v = HashSet::new();
         sel_v.insert(v0);
-        let state = collect_and_delete(&mut map, &sel_v, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let state = collect_and_delete(
+            &mut map,
+            &sel_v,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
         let mut cmd = Command::DeleteElements(Box::new(state));
         assert_eq!(map.vertices.len(), 1);
 

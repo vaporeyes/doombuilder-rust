@@ -20,23 +20,20 @@ use doombuilder_core::archive::{open as open_asset, Asset, Pk3};
 use doombuilder_core::config::GameConfig;
 use doombuilder_core::edit::{
     collect_and_delete, compute_insert_vertex_on_line, compute_make_sector, compute_split_lines,
-    compute_vertex_merge, Command,
-    LineEndpoint, LinedefChain, LinedefIntField, SectorIntField, SectorSlot, SidedefSlot,
-    ThingIntField, ThingMove, UndoStack, VertexMove,
+    compute_vertex_merge, Command, LineEndpoint, LinedefChain, LinedefIntField, SectorIntField,
+    SectorSlot, SidedefSlot, ThingIntField, ThingMove, UndoStack, VertexMove,
 };
 use doombuilder_core::map::LinedefId;
 use doombuilder_core::map::MapThing;
 use doombuilder_core::map::{
     save_map_as_pwad, save_map_as_pwad_with, Map, MapLinedef, MapSidedef, MapVertex, NodeBuilder,
-    SectorId, TextureName, ThingId,
-    VertexId,
+    SectorId, TextureName, ThingId, VertexId,
 };
 use doombuilder_core::textures::TextureSet;
 use doombuilder_core::wad::WadKind;
 use doombuilder_core::{load_auto, MapFormat, Wad};
 use doombuilder_render::{
-    build_walls, extract_sector_loops, triangulate_sector, FloorMesh,
-    SpatialIndex, Wall,
+    build_walls, extract_sector_loops, triangulate_sector, FloorMesh, SpatialIndex, Wall,
 };
 use glam::Vec2;
 use iced::keyboard::{self, Modifiers};
@@ -76,18 +73,13 @@ pub enum Mode {
     View3D,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EditMode {
     Vertices,
+    #[default]
     Linedefs,
     Sectors,
     Things,
-}
-
-impl Default for EditMode {
-    fn default() -> Self {
-        EditMode::Linedefs
-    }
 }
 
 impl EditMode {
@@ -179,19 +171,27 @@ pub struct DrawingState {
     pub tool: DrawTool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum DrawTool {
+    #[default]
     Free,
-    Rectangle { origin: Option<Vec2>, bevel: u32 },
-    Ellipse { origin: Option<Vec2>, subdivisions: u32 },
-    Curve { points: Vec<Vec2>, subdivisions: u32 },
-    Grid { origin: Option<Vec2>, cols: u32, rows: u32 },
-}
-
-impl Default for DrawTool {
-    fn default() -> Self {
-        DrawTool::Free
-    }
+    Rectangle {
+        origin: Option<Vec2>,
+        bevel: u32,
+    },
+    Ellipse {
+        origin: Option<Vec2>,
+        subdivisions: u32,
+    },
+    Curve {
+        points: Vec<Vec2>,
+        subdivisions: u32,
+    },
+    Grid {
+        origin: Option<Vec2>,
+        cols: u32,
+        rows: u32,
+    },
 }
 
 impl DrawTool {
@@ -324,18 +324,13 @@ impl std::fmt::Display for NodeBuilderKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum View2DMode {
+    #[default]
     Floor,
     Ceiling,
     Brightness,
     Wireframe,
-}
-
-impl Default for View2DMode {
-    fn default() -> Self {
-        View2DMode::Floor
-    }
 }
 
 impl View2DMode {
@@ -398,7 +393,10 @@ impl Settings {
         match self.node_builder {
             NodeBuilderKind::Builtin => Nb::Builtin,
             NodeBuilderKind::Zdbsp => match &self.zdbsp_path {
-                Some(p) => Nb::Zdbsp { exe: p.clone(), extra_args: Vec::new() },
+                Some(p) => Nb::Zdbsp {
+                    exe: p.clone(),
+                    extra_args: Vec::new(),
+                },
                 None => Nb::Builtin,
             },
         }
@@ -502,7 +500,6 @@ pub enum PickerTarget {
     },
 }
 
-
 #[derive(Debug)]
 enum DragMode {
     Rect,
@@ -515,10 +512,17 @@ enum DragMode {
     },
     /// Drag-to-draw for shape tools (Rectangle / Ellipse / Grid). The
     /// drag's start point is the shape's first corner; drag end commits.
-    ShapeDraw { origin: Vec2 },
+    ShapeDraw {
+        origin: Vec2,
+    },
 }
 
 impl Default for App {
+    // iced's canvas `Cache` is single-thread-confined, so `Arc<Cache>` carries
+    // no thread-safety benefit. We keep `Arc` deliberately: all shareable
+    // render state in `App` uses `Arc` uniformly and the atomic cost here is
+    // negligible against per-frame work.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn default() -> Self {
         let settings = Settings::load_or_default();
         palette::set_active(settings.theme.palette());
@@ -614,9 +618,16 @@ pub enum Message {
     ToggleDrawing,
     CancelDrawing,
     CycleGridStep(i32),
-    PanCamera { dx_units: i32, dy_units: i32, fast: bool },
+    PanCamera {
+        dx_units: i32,
+        dy_units: i32,
+        fast: bool,
+    },
     /// 3D-mode-only: change camera height. Positive = up.
-    VerticalCamera { units: i32, fast: bool },
+    VerticalCamera {
+        units: i32,
+        fast: bool,
+    },
     /// Shift+WASD dispatch. Routes to 3D movement when in `Mode::View3D`,
     /// otherwise falls back to existing 2D-mode shortcuts so nothing
     /// regresses (Shift+A = AutoAlignY, Shift+D = MakeDoor).
@@ -684,7 +695,10 @@ pub enum Message {
     AutoAlignBoth,
     /// Multipurpose G hotkey. The handler routes to gradient/grid-cycle based
     /// on edit mode and selection.
-    GHotkey { shift: bool, ctrl: bool },
+    GHotkey {
+        shift: bool,
+        ctrl: bool,
+    },
     SetTheme(ThemeKind),
     TestMap,
     PickEngineRequested,
@@ -708,13 +722,28 @@ pub enum Message {
     PickThingKind(u16),
     PickSectorSpecial(u16),
     PickerFilterChanged(String),
-    ToggleLinedefFlag { id: doombuilder_core::map::LinedefId, bit: u16 },
-    ToggleThingFlag { id: ThingId, bit: u16 },
-    SectorFieldChanged { field: SectorIntField, text: String },
+    ToggleLinedefFlag {
+        id: doombuilder_core::map::LinedefId,
+        bit: u16,
+    },
+    ToggleThingFlag {
+        id: ThingId,
+        bit: u16,
+    },
+    SectorFieldChanged {
+        field: SectorIntField,
+        text: String,
+    },
     SectorFieldSubmit(SectorIntField),
-    LinedefFieldChanged { field: LinedefIntField, text: String },
+    LinedefFieldChanged {
+        field: LinedefIntField,
+        text: String,
+    },
     LinedefFieldSubmit(LinedefIntField),
-    ThingFieldChanged { field: ThingIntField, text: String },
+    ThingFieldChanged {
+        field: ThingIntField,
+        text: String,
+    },
     ThingFieldSubmit(ThingIntField),
     Quit,
     Noop,
@@ -935,8 +964,7 @@ impl App {
                 // Merge textures/sprites only; preserve current map, wad list,
                 // and selection. Lets the user keep a new-map-from-scratch
                 // session and still pick floor/wall textures.
-                let mut sorted: Vec<String> =
-                    asset.texture_handles.keys().cloned().collect();
+                let mut sorted: Vec<String> = asset.texture_handles.keys().cloned().collect();
                 sorted.sort();
                 self.sorted_texture_names = Arc::new(sorted);
                 self.texture_handles = asset.texture_handles;
@@ -1011,14 +1039,17 @@ impl App {
                         }
                     }
                 }
-                self.status = format!("Loaded {} ({})", asset.path.display(), self.current_config_name);
+                self.status = format!(
+                    "Loaded {} ({})",
+                    asset.path.display(),
+                    self.current_config_name
+                );
                 self.settings.push_recent(asset.path.clone());
                 self.persist_settings();
                 self.wad_path = Some(asset.path);
                 self.wad = asset.wad;
                 self.textures = asset.textures;
-                let mut sorted: Vec<String> =
-                    asset.texture_handles.keys().cloned().collect();
+                let mut sorted: Vec<String> = asset.texture_handles.keys().cloned().collect();
                 sorted.sort();
                 self.sorted_texture_names = Arc::new(sorted);
                 self.texture_handles = asset.texture_handles;
@@ -1047,6 +1078,8 @@ impl App {
                 }
                 Task::perform(load_map_payload(wad, name), Message::MapLoaded)
             }
+            // See note on `Default::default`: `Arc<Cache>` is intentional.
+            #[allow(clippy::arc_with_non_send_sync)]
             Message::MapLoaded(Ok(payload)) => {
                 self.status = format!("Loaded {}", payload.stats.name);
                 self.map_stats = Some(payload.stats);
@@ -1063,7 +1096,9 @@ impl App {
                 }
                 self.rebuild_sector_fills();
                 self.rebuild_geometry3d();
-                if let Some((min, max)) = world_aabb(self.map.as_ref().unwrap(), &self.sector_meshes) {
+                if let Some((min, max)) =
+                    world_aabb(self.map.as_ref().unwrap(), &self.sector_meshes)
+                {
                     self.camera3d.frame_aabb(min, max);
                 }
                 Task::none()
@@ -1127,7 +1162,7 @@ impl App {
                 };
                 // Reuse the existing Mode handler so all of its side effects
                 // (camera placement, cache invalidation, etc.) fire too.
-                return self.handle_message(Message::Mode(next));
+                self.handle_message(Message::Mode(next))
             }
             Message::SetGameConfig(name) => {
                 if let Some(cfg) = GameConfig::builtin(&name) {
@@ -1191,7 +1226,9 @@ impl App {
                         EditMode::Linedefs => {
                             map.linedefs.keys().map(HighlightKind::Linedef).collect()
                         }
-                        EditMode::Sectors => map.sectors.keys().map(HighlightKind::Sector).collect(),
+                        EditMode::Sectors => {
+                            map.sectors.keys().map(HighlightKind::Sector).collect()
+                        }
                         EditMode::Things => map.things.keys().map(HighlightKind::Thing).collect(),
                     };
                     self.selection = Arc::new(all);
@@ -1343,10 +1380,8 @@ impl App {
                         let new = TextureName(padded);
 
                         let cmd = match target {
-                            PickerTarget::Sidedef { sidedef, slot } => map_mut
-                                .sidedefs
-                                .get(sidedef)
-                                .map(|s| {
+                            PickerTarget::Sidedef { sidedef, slot } => {
+                                map_mut.sidedefs.get(sidedef).map(|s| {
                                     let old = match slot {
                                         SidedefSlot::Upper => s.upper_texture,
                                         SidedefSlot::Middle => s.middle_texture,
@@ -1358,11 +1393,10 @@ impl App {
                                         old,
                                         new,
                                     }
-                                }),
-                            PickerTarget::Sector { sector, slot } => map_mut
-                                .sectors
-                                .get(sector)
-                                .map(|s| {
+                                })
+                            }
+                            PickerTarget::Sector { sector, slot } => {
+                                map_mut.sectors.get(sector).map(|s| {
                                     let old = match slot {
                                         SectorSlot::Floor => s.floor_texture,
                                         SectorSlot::Ceiling => s.ceiling_texture,
@@ -1373,7 +1407,8 @@ impl App {
                                         old,
                                         new,
                                     }
-                                }),
+                                })
+                            }
                         };
                         if let Some(mut cmd) = cmd {
                             cmd.apply(map_mut);
@@ -1543,7 +1578,8 @@ impl App {
                     self.commit_drawing();
                 } else if self.map.is_some() {
                     self.drawing = Some(DrawingState::default());
-                    self.status = "Drawing: click to chain linedefs (Esc cancels, D commits)".into();
+                    self.status =
+                        "Drawing: click to chain linedefs (Esc cancels, D commits)".into();
                 }
                 self.cache2d.clear();
                 Task::none()
@@ -1616,10 +1652,8 @@ impl App {
             Message::PlaceVisualCamera => {
                 if let Some(world) = self.cursor_world {
                     self.visual_camera_start = Some(world);
-                    self.status = format!(
-                        "Visual camera placed at ({:.0}, {:.0}).",
-                        world.x, world.y
-                    );
+                    self.status =
+                        format!("Visual camera placed at ({:.0}, {:.0}).", world.x, world.y);
                 } else {
                     self.status = "Visual camera: move cursor over canvas first.".into();
                 }
@@ -1680,7 +1714,10 @@ impl App {
                 Task::none()
             }
             Message::StartRectangleDraw => {
-                self.start_shape_draw(DrawTool::Rectangle { origin: None, bevel: 0 });
+                self.start_shape_draw(DrawTool::Rectangle {
+                    origin: None,
+                    bevel: 0,
+                });
                 Task::none()
             }
             Message::StartEllipseDraw => {
@@ -1789,7 +1826,9 @@ impl App {
                 Task::none()
             }
             Message::OpenConfigFolder => {
-                if let Some(folder) = Settings::config_path().and_then(|p| p.parent().map(|p| p.to_path_buf())) {
+                if let Some(folder) =
+                    Settings::config_path().and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                {
                     let _ = std::fs::create_dir_all(&folder);
                     let opener = if cfg!(target_os = "macos") {
                         "open"
@@ -1896,10 +1935,8 @@ impl App {
                 if let Some(group) = self.selection_groups.get(idx).and_then(|g| g.clone()) {
                     self.selection = Arc::new(group);
                     self.cache2d.clear();
-                    self.status = format!(
-                        "Recalled group {idx} ({} item(s)).",
-                        self.selection.len()
-                    );
+                    self.status =
+                        format!("Recalled group {idx} ({} item(s)).", self.selection.len());
                 } else {
                     self.status = format!("Group {idx} is empty.");
                 }
@@ -1939,7 +1976,10 @@ impl App {
             }
             Message::GHotkey { shift, ctrl } => {
                 let has_sector_sel = self.edit_mode == EditMode::Sectors
-                    && self.selection.iter().any(|h| matches!(h, HighlightKind::Sector(_)));
+                    && self
+                        .selection
+                        .iter()
+                        .any(|h| matches!(h, HighlightKind::Sector(_)));
                 if has_sector_sel {
                     if ctrl {
                         self.make_sector_gradient(SectorIntField::FloorHeight);
@@ -1972,7 +2012,9 @@ impl App {
                 } else {
                     // Preserve existing 2D-mode Shift+letter bindings.
                     match dir {
-                        FlyDirection::StrafeLeft => return self.handle_message(Message::AutoAlignY),
+                        FlyDirection::StrafeLeft => {
+                            return self.handle_message(Message::AutoAlignY)
+                        }
                         FlyDirection::StrafeRight => return self.handle_message(Message::MakeDoor),
                         _ => {}
                     }
@@ -1986,7 +2028,11 @@ impl App {
                 }
                 Task::none()
             }
-            Message::PanCamera { dx_units, dy_units, fast } => {
+            Message::PanCamera {
+                dx_units,
+                dy_units,
+                fast,
+            } => {
                 let step = self.effective_grid_step().max(8.0);
                 let mul = if fast { 4.0 } else { 1.0 };
                 let dx = dx_units as f32 * step * mul;
@@ -2111,8 +2157,11 @@ impl App {
         // Empty derived caches; geometry rebuild will populate them as the
         // user draws. Frame a 1024-unit window so they have visible grid.
         self.rebuild_geometry_indices();
-        self.camera2d
-            .frame_aabb(Vec2::new(-512.0, -512.0), Vec2::new(512.0, 512.0), Vec2::new(800.0, 600.0));
+        self.camera2d.frame_aabb(
+            Vec2::new(-512.0, -512.0),
+            Vec2::new(512.0, 512.0),
+            Vec2::new(800.0, 600.0),
+        );
         let label = match format {
             MapFormat::Doom => "Doom",
             MapFormat::Hexen => "Hexen",
@@ -2120,6 +2169,8 @@ impl App {
         self.status = format!("New {label}-format map (MAP01). Press D to draw.");
     }
 
+    // See note on `Default::default`: `Arc<Cache>` is intentional.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn reset_map_state(&mut self) {
         self.selected_map = None;
         self.map = None;
@@ -2141,18 +2192,26 @@ impl App {
             keyboard::Event::ModifiersChanged(m) => Message::ModifiersChanged(m),
             keyboard::Event::KeyPressed { key, modifiers, .. } => match key.as_ref() {
                 keyboard::Key::Named(keyboard::key::Named::Escape) => Message::KeyboardEsc,
-                keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
-                    Message::PanCamera { dx_units: -1, dy_units: 0, fast: modifiers.shift() }
-                }
-                keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
-                    Message::PanCamera { dx_units: 1, dy_units: 0, fast: modifiers.shift() }
-                }
-                keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
-                    Message::PanCamera { dx_units: 0, dy_units: 1, fast: modifiers.shift() }
-                }
-                keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
-                    Message::PanCamera { dx_units: 0, dy_units: -1, fast: modifiers.shift() }
-                }
+                keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => Message::PanCamera {
+                    dx_units: -1,
+                    dy_units: 0,
+                    fast: modifiers.shift(),
+                },
+                keyboard::Key::Named(keyboard::key::Named::ArrowRight) => Message::PanCamera {
+                    dx_units: 1,
+                    dy_units: 0,
+                    fast: modifiers.shift(),
+                },
+                keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Message::PanCamera {
+                    dx_units: 0,
+                    dy_units: 1,
+                    fast: modifiers.shift(),
+                },
+                keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Message::PanCamera {
+                    dx_units: 0,
+                    dy_units: -1,
+                    fast: modifiers.shift(),
+                },
                 keyboard::Key::Character("a") if modifiers.command() && !modifiers.shift() => {
                     Message::SelectAll
                 }
@@ -2173,9 +2232,10 @@ impl App {
                 keyboard::Key::Character("g") if modifiers.command() && modifiers.shift() => {
                     Message::OpenGoToCoords
                 }
-                keyboard::Key::Character("g") if modifiers.command() => {
-                    Message::GHotkey { shift: false, ctrl: true }
-                }
+                keyboard::Key::Character("g") if modifiers.command() => Message::GHotkey {
+                    shift: false,
+                    ctrl: true,
+                },
                 // Alt+G — toggle grid rendering (matches GZDoom Builder).
                 keyboard::Key::Character("g") if modifiers.alt() => {
                     Message::ToggleSetting(SettingKey::ShowGrid)
@@ -2183,7 +2243,9 @@ impl App {
                 keyboard::Key::Character("[") => Message::CycleGridStep(1),
                 keyboard::Key::Character("]") => Message::CycleGridStep(-1),
                 keyboard::Key::Character("h") if !modifiers.command() => Message::ToggleHighlights,
-                keyboard::Key::Character("b") if !modifiers.command() => Message::ToggleFullBrightness,
+                keyboard::Key::Character("b") if !modifiers.command() => {
+                    Message::ToggleFullBrightness
+                }
                 keyboard::Key::Character("w") if modifiers.command() => Message::PlaceVisualCamera,
                 keyboard::Key::Named(keyboard::key::Named::Space) => Message::SpaceHeld(true),
                 keyboard::Key::Named(keyboard::key::Named::Insert) => Message::InsertThing,
@@ -2222,7 +2284,9 @@ impl App {
                     Message::PasteProperties
                 }
                 keyboard::Key::Character("v") if modifiers.command() => Message::PasteSelection,
-                keyboard::Key::Character("e") if modifiers.shift() => Message::FlipSelectionVertical,
+                keyboard::Key::Character("e") if modifiers.shift() => {
+                    Message::FlipSelectionVertical
+                }
                 keyboard::Key::Character("e") if modifiers.command() => {
                     Message::FlipSelectionHorizontal
                 }
@@ -2256,12 +2320,10 @@ impl App {
                 keyboard::Key::Character("j") if !modifiers.command() => Message::JoinSectors,
                 // `g` is context-sensitive: gradients in Sectors mode, grid
                 // cycling otherwise. Decision lives in the handler.
-                keyboard::Key::Character("g") if !modifiers.command() => {
-                    Message::GHotkey {
-                        shift: modifiers.shift(),
-                        ctrl: false,
-                    }
-                }
+                keyboard::Key::Character("g") if !modifiers.command() => Message::GHotkey {
+                    shift: modifiers.shift(),
+                    ctrl: false,
+                },
                 keyboard::Key::Named(keyboard::key::Named::F5) => Message::TestMap,
                 keyboard::Key::Named(keyboard::key::Named::F9) if modifiers.command() => {
                     Message::TestMapAtCursor
@@ -2301,9 +2363,7 @@ impl App {
                 keyboard::Key::Character("8") if !modifiers.command() => Message::SelectGroup(8),
                 keyboard::Key::Character("9") if !modifiers.command() => Message::SelectGroup(9),
                 // Q toggles between 2D and 3D Visual Mode (GZDB convention).
-                keyboard::Key::Character("q") if !modifiers.command() => {
-                    Message::ToggleVisualMode
-                }
+                keyboard::Key::Character("q") if !modifiers.command() => Message::ToggleVisualMode,
                 keyboard::Key::Character("v") if !modifiers.command() => {
                     Message::SetEditMode(EditMode::Vertices)
                 }
@@ -2329,12 +2389,11 @@ impl App {
         match msg {
             View3DMessage::OrbitBy { dx, dy } => {
                 self.camera3d.yaw -= dx * 0.005;
-                self.camera3d.pitch =
-                    (self.camera3d.pitch - dy * 0.005).clamp(0.05, std::f32::consts::FRAC_PI_2 - 0.05);
+                self.camera3d.pitch = (self.camera3d.pitch - dy * 0.005)
+                    .clamp(0.05, std::f32::consts::FRAC_PI_2 - 0.05);
             }
             View3DMessage::Zoom { factor } => {
-                self.camera3d.distance =
-                    (self.camera3d.distance * factor).clamp(64.0, 50_000.0);
+                self.camera3d.distance = (self.camera3d.distance * factor).clamp(64.0, 50_000.0);
             }
         }
     }
@@ -2375,7 +2434,11 @@ impl App {
                 factor,
                 viewport,
             } => self.camera2d.zoom_about(pivot, viewport, factor),
-            View2DMessage::Wheel { units, pivot, viewport } => {
+            View2DMessage::Wheel {
+                units,
+                pivot,
+                viewport,
+            } => {
                 self.handle_wheel(units, pivot, viewport);
             }
             View2DMessage::HoverAt(world) => {
@@ -2420,10 +2483,7 @@ impl App {
                     // the picker leaves the placeholder; they can delete or
                     // re-pick. Cheaper UX than a separate "type then place"
                     // gesture and matches how vertex/sector specials work.
-                    if is_double
-                        && hit.is_none()
-                        && self.edit_mode == EditMode::Things
-                    {
+                    if is_double && hit.is_none() && self.edit_mode == EditMode::Things {
                         self.insert_thing_and_open_picker(world);
                         return;
                     }
@@ -2433,10 +2493,9 @@ impl App {
                     if hit.is_none()
                         && self.edit_mode == EditMode::Vertices
                         && !self.modifiers.shift()
+                        && self.try_insert_vertex_on_line(world)
                     {
-                        if self.try_insert_vertex_on_line(world) {
-                            return;
-                        }
+                        return;
                     }
                     let additive = self.modifiers.shift();
                     let mut sel: HashSet<HighlightKind> = (*self.selection).clone();
@@ -2506,6 +2565,7 @@ impl App {
     ///   * Sectors mode + sector selection + Alt           => ceiling height
     ///   * Sectors mode + sector selection + (no mod)      => floor height
     ///   * Shift halves the step magnitude (8 → 1).
+    ///
     /// Anything else falls back to the existing zoom-about-cursor behavior.
     fn handle_wheel(&mut self, units: f32, pivot: Vec2, viewport: Vec2) {
         let sector_sel: Vec<SectorId> = self
@@ -2554,7 +2614,9 @@ impl App {
         let Some(map) = self.map.as_ref() else { return };
         let mut cmds: Vec<Command> = Vec::with_capacity(sectors.len());
         for sid in sectors {
-            let Some(sec) = map.sectors.get(*sid) else { continue };
+            let Some(sec) = map.sectors.get(*sid) else {
+                continue;
+            };
             let old: i32 = match field {
                 SectorIntField::FloorHeight => sec.floor_height as i32,
                 SectorIntField::CeilingHeight => sec.ceiling_height as i32,
@@ -2630,7 +2692,9 @@ impl App {
         let n = sectors.len();
         let mut cmds: Vec<Command> = Vec::with_capacity(n);
         for (i, sid) in sectors.iter().enumerate() {
-            let Some(sec) = map.sectors.get(*sid) else { continue };
+            let Some(sec) = map.sectors.get(*sid) else {
+                continue;
+            };
             let t = i as f32 / (n - 1) as f32;
             let target = (first as f32 + (last as f32 - first as f32) * t).round() as i32;
             let old = read(sec);
@@ -2714,7 +2778,9 @@ impl App {
         let Some(map) = self.map.as_ref() else { return };
         let mut cmds: Vec<Command> = Vec::new();
         for sid in &sectors {
-            let Some(sec) = map.sectors.get(*sid) else { continue };
+            let Some(sec) = map.sectors.get(*sid) else {
+                continue;
+            };
             let floor = sec.floor_height as i32;
             let ceil = sec.ceiling_height as i32;
             if ceil != floor {
@@ -2781,10 +2847,8 @@ impl App {
                 }
             }
         }
-        let any = !sel_v.is_empty()
-            || !sel_l.is_empty()
-            || !sel_sec.is_empty()
-            || !sel_t.is_empty();
+        let any =
+            !sel_v.is_empty() || !sel_l.is_empty() || !sel_sec.is_empty() || !sel_t.is_empty();
         if !any {
             return;
         }
@@ -2797,8 +2861,7 @@ impl App {
                 && state.linedef_snaps.is_empty()
                 && state.thing_snaps.is_empty();
             if !nothing {
-                self.undo
-                    .push(Command::DeleteElements(Box::new(state)));
+                self.undo.push(Command::DeleteElements(Box::new(state)));
                 self.selection = Arc::new(HashSet::new());
                 self.rebuild_geometry_indices();
                 self.cache2d.clear();
@@ -3088,9 +3151,7 @@ impl App {
         if let Some(d) = self.drawing.as_ref() {
             if matches!(
                 d.tool,
-                DrawTool::Rectangle { .. }
-                    | DrawTool::Ellipse { .. }
-                    | DrawTool::Grid { .. }
+                DrawTool::Rectangle { .. } | DrawTool::Ellipse { .. } | DrawTool::Grid { .. }
             ) {
                 let snapped = self.snap_world(start);
                 // Seed the tool's origin so the live preview tracks the
@@ -3409,7 +3470,9 @@ impl App {
         // Sectors → sectors.
         if let Some(src_sec) = data.sectors.first().cloned() {
             for sid in self.selected_sectors() {
-                let Some(s) = map.sectors.get(sid) else { continue };
+                let Some(s) = map.sectors.get(sid) else {
+                    continue;
+                };
                 cmds.push(Command::SetSectorIntField {
                     id: sid,
                     field: SectorIntField::FloorHeight,
@@ -3448,7 +3511,9 @@ impl App {
         // not touched: those define geometry, not "properties."
         if let Some((src_line, _, _, _, _)) = data.linedefs.first().cloned() {
             for lid in self.selected_linedefs() {
-                let Some(l) = map.linedefs.get(lid) else { continue };
+                let Some(l) = map.linedefs.get(lid) else {
+                    continue;
+                };
                 if l.special != src_line.special {
                     cmds.push(Command::SetLinedefSpecial {
                         id: lid,
@@ -3498,7 +3563,9 @@ impl App {
         // alone — same "properties not geometry" rule.
         if let Some(src_thing) = data.things.first().cloned() {
             for tid in self.selected_things() {
-                let Some(t) = map.things.get(tid) else { continue };
+                let Some(t) = map.things.get(tid) else {
+                    continue;
+                };
                 if t.kind != src_thing.kind {
                     cmds.push(Command::SetThingKind {
                         id: tid,
@@ -3603,7 +3670,9 @@ impl App {
         // command, and it composes well with undo.
         let mut vmoves: Vec<doombuilder_core::edit::VertexMove> = Vec::new();
         for vid in &vertex_ids {
-            let Some(v) = map.vertices.get(*vid) else { continue };
+            let Some(v) = map.vertices.get(*vid) else {
+                continue;
+            };
             let (nx, ny) = txform(v.x as f32, v.y as f32);
             let dx = nx.round() as i32 - v.x;
             let dy = ny.round() as i32 - v.y;
@@ -3613,7 +3682,9 @@ impl App {
         }
         let mut tmoves: Vec<doombuilder_core::edit::ThingMove> = Vec::new();
         for tid in &thing_ids {
-            let Some(t) = map.things.get(*tid) else { continue };
+            let Some(t) = map.things.get(*tid) else {
+                continue;
+            };
             let (nx, ny) = txform(t.x as f32, t.y as f32);
             let dx = nx.round() as i32 - t.x;
             let dy = ny.round() as i32 - t.y;
@@ -3655,7 +3726,9 @@ impl App {
         let Some(map) = self.map.as_ref() else { return };
         let mut cmds: Vec<Command> = Vec::new();
         for (i, sid) in sectors.iter().enumerate() {
-            let Some(s) = map.sectors.get(*sid) else { continue };
+            let Some(s) = map.sectors.get(*sid) else {
+                continue;
+            };
             let old = s.tag as i32;
             let new = (start + i as i32).clamp(0, u16::MAX as i32);
             if new != old {
@@ -3681,7 +3754,9 @@ impl App {
     /// Run the map-analysis scanner and return its findings. Cheap; called on
     /// each open of the analysis modal so results stay current.
     fn analyze_map(&self) -> Vec<MapIssue> {
-        let Some(map) = self.map.as_ref() else { return Vec::new() };
+        let Some(map) = self.map.as_ref() else {
+            return Vec::new();
+        };
         let mut issues: Vec<MapIssue> = Vec::new();
 
         // Lines with no sidedefs on either side — invisible to engines.
@@ -3696,9 +3771,7 @@ impl App {
         }
         // Zero-length linedefs.
         for (lid, l) in &map.linedefs {
-            if let (Some(a), Some(b)) =
-                (map.vertices.get(l.v1), map.vertices.get(l.v2))
-            {
+            if let (Some(a), Some(b)) = (map.vertices.get(l.v1), map.vertices.get(l.v2)) {
                 if a.x == b.x && a.y == b.y {
                     issues.push(MapIssue {
                         severity: IssueSeverity::Error,
@@ -3709,10 +3782,19 @@ impl App {
             }
         }
         // Overlapping lines: same (v1, v2) regardless of orientation.
-        let mut seen: HashMap<(doombuilder_core::map::VertexId, doombuilder_core::map::VertexId), LinedefId> =
-            HashMap::new();
+        let mut seen: HashMap<
+            (
+                doombuilder_core::map::VertexId,
+                doombuilder_core::map::VertexId,
+            ),
+            LinedefId,
+        > = HashMap::new();
         for (lid, l) in &map.linedefs {
-            let key = if l.v1 <= l.v2 { (l.v1, l.v2) } else { (l.v2, l.v1) };
+            let key = if l.v1 <= l.v2 {
+                (l.v1, l.v2)
+            } else {
+                (l.v2, l.v1)
+            };
             if let Some(other) = seen.get(&key) {
                 issues.push(MapIssue {
                     severity: IssueSeverity::Error,
@@ -3813,9 +3895,7 @@ impl App {
                 }
             }
         }
-        issues.sort_by(|a, b| {
-            (a.severity, a.category).cmp(&(b.severity, b.category))
-        });
+        issues.sort_by(|a, b| (a.severity, a.category).cmp(&(b.severity, b.category)));
         issues
     }
 
@@ -3879,17 +3959,19 @@ impl App {
         };
         let mut cmds: Vec<Command> = Vec::new();
         for tid in &thing_ids {
-            let Some(t) = map.things.get(*tid) else { continue };
+            let Some(t) = map.things.get(*tid) else {
+                continue;
+            };
             let tx = t.x as f32;
             let ty = t.y as f32;
             // Map-spanning radius so we always get *some* nearest line.
             let Some(lid) = spatial.nearest_linedef(tx, ty, 65_536.0) else {
                 continue;
             };
-            let Some(line) = map.linedefs.get(lid) else { continue };
-            let (Some(a), Some(b)) =
-                (map.vertices.get(line.v1), map.vertices.get(line.v2))
-            else {
+            let Some(line) = map.linedefs.get(lid) else {
+                continue;
+            };
+            let (Some(a), Some(b)) = (map.vertices.get(line.v1), map.vertices.get(line.v2)) else {
                 continue;
             };
             let dx = (b.x - a.x) as f32;
@@ -3944,7 +4026,9 @@ impl App {
         let Some(map) = self.map.as_ref() else { return };
         let mut cmds: Vec<Command> = Vec::new();
         for tid in &thing_ids {
-            let Some(t) = map.things.get(*tid) else { continue };
+            let Some(t) = map.things.get(*tid) else {
+                continue;
+            };
             let dx = cursor.x - t.x as f32;
             let dy = cursor.y - t.y as f32;
             if dx * dx + dy * dy < 1.0 {
@@ -4009,7 +4093,8 @@ impl App {
         let Some(map) = self.map.as_ref() else { return };
         let merges = doombuilder_core::edit::compute_stitch_lines(map, &line_ids);
         if merges.is_empty() {
-            self.status = "Stitch: no overlapping pairs (opposite direction, shared vertices) found.".into();
+            self.status =
+                "Stitch: no overlapping pairs (opposite direction, shared vertices) found.".into();
             return;
         }
         let count = merges.len();
@@ -4150,11 +4235,13 @@ impl App {
                     "Make Sector: at least one selected linedef already has a sidedef.".into();
             }
             Err(doombuilder_core::edit::MakeSectorError::NotAClosedLoop) => {
-                self.status = "Make Sector: selected lines do not form a single closed loop.".into();
+                self.status =
+                    "Make Sector: selected lines do not form a single closed loop.".into();
             }
             Err(doombuilder_core::edit::MakeSectorError::DanglingVertex) => {
                 self.status =
-                    "Make Sector: each vertex in the loop must touch exactly two selected lines.".into();
+                    "Make Sector: each vertex in the loop must touch exactly two selected lines."
+                        .into();
             }
         }
     }
@@ -4308,11 +4395,10 @@ impl App {
                 };
                 let new_lid = map_mut.linedefs.insert(template.clone());
                 drawing.chain.current_l.push(new_lid);
-                drawing.chain.linedefs.push((
-                    from_endpoint,
-                    target_endpoint.clone(),
-                    template,
-                ));
+                drawing
+                    .chain
+                    .linedefs
+                    .push((from_endpoint, target_endpoint.clone(), template));
             }
         }
         drawing.last = Some((target_vid, target_endpoint));
@@ -4437,14 +4523,18 @@ impl App {
                     bevel: *bevel,
                 })
             }
-            DrawTool::Ellipse { origin, subdivisions } => {
-                origin.map(|o| view2d::ShapePreview::Ellipse {
-                    origin: o,
-                    cursor,
-                    subdivisions: *subdivisions,
-                })
-            }
-            DrawTool::Curve { points, subdivisions } => {
+            DrawTool::Ellipse {
+                origin,
+                subdivisions,
+            } => origin.map(|o| view2d::ShapePreview::Ellipse {
+                origin: o,
+                cursor,
+                subdivisions: *subdivisions,
+            }),
+            DrawTool::Curve {
+                points,
+                subdivisions,
+            } => {
                 if points.is_empty() {
                     None
                 } else {
@@ -4455,14 +4545,12 @@ impl App {
                     })
                 }
             }
-            DrawTool::Grid { origin, cols, rows } => {
-                origin.map(|o| view2d::ShapePreview::Grid {
-                    origin: o,
-                    cursor,
-                    cols: *cols,
-                    rows: *rows,
-                })
-            }
+            DrawTool::Grid { origin, cols, rows } => origin.map(|o| view2d::ShapePreview::Grid {
+                origin: o,
+                cursor,
+                cols: *cols,
+                rows: *rows,
+            }),
             DrawTool::Free => {
                 // Rubber-band from the last placed vertex to the cursor.
                 // Highlights green when the cursor is within snap range of
@@ -4493,7 +4581,9 @@ impl App {
                 // Result is in integer map units to match how the engine
                 // measures lines.
                 let target = if closes_loop {
-                    start_v.map(|v| Vec2::new(v.x as f32, v.y as f32)).unwrap_or(cursor)
+                    start_v
+                        .map(|v| Vec2::new(v.x as f32, v.y as f32))
+                        .unwrap_or(cursor)
                 } else if self.settings.snap_to_grid {
                     let step = self.effective_grid_step().max(1.0);
                     Vec2::new(
@@ -4555,7 +4645,9 @@ impl App {
     /// origin / control points; the final click commits the generated
     /// geometry and clears the drawing state.
     fn shape_tool_click(&mut self, world: Vec2) {
-        let Some(drawing) = self.drawing.as_mut() else { return };
+        let Some(drawing) = self.drawing.as_mut() else {
+            return;
+        };
         match &mut drawing.tool {
             DrawTool::Rectangle { origin, bevel } => {
                 if origin.is_none() {
@@ -4568,7 +4660,10 @@ impl App {
                     self.commit_shape(rectangle_vertices(o, world, b), true);
                 }
             }
-            DrawTool::Ellipse { origin, subdivisions } => {
+            DrawTool::Ellipse {
+                origin,
+                subdivisions,
+            } => {
                 if origin.is_none() {
                     *origin = Some(world);
                     self.status = "Ellipse: click opposite corner.".into();
@@ -4579,7 +4674,10 @@ impl App {
                     self.commit_shape(ellipse_vertices(o, world, n), true);
                 }
             }
-            DrawTool::Curve { points, subdivisions } => {
+            DrawTool::Curve {
+                points,
+                subdivisions,
+            } => {
                 points.push(world);
                 if points.len() < 3 {
                     self.status = match points.len() {
@@ -4657,9 +4755,10 @@ impl App {
                 .map(|(from, to, template)| (from.clone(), to.clone(), template.clone()))
                 .collect();
             for (from, to, mut template) in line_specs {
-                let (Some(v1), Some(v2)) =
-                    (endpoint(&from, &chain.current_v), endpoint(&to, &chain.current_v))
-                else {
+                let (Some(v1), Some(v2)) = (
+                    endpoint(&from, &chain.current_v),
+                    endpoint(&to, &chain.current_v),
+                ) else {
                     continue;
                 };
                 template.v1 = v1;
@@ -4677,12 +4776,12 @@ impl App {
         // whichever) until they press Esc, matching DCC conventions.
         // Free/Curve tools fall back to nuking the drawing state so they
         // re-enter their own discrete-click flows.
-        let keep_tool = match self.drawing.as_ref().map(|d| &d.tool) {
+        let keep_tool = matches!(
+            self.drawing.as_ref().map(|d| &d.tool),
             Some(DrawTool::Rectangle { .. })
-            | Some(DrawTool::Ellipse { .. })
-            | Some(DrawTool::Grid { .. }) => true,
-            _ => false,
-        };
+                | Some(DrawTool::Ellipse { .. })
+                | Some(DrawTool::Grid { .. })
+        );
         if keep_tool {
             if let Some(d) = self.drawing.as_mut() {
                 d.chain = LinedefChain::default();
@@ -4712,7 +4811,9 @@ impl App {
     }
 
     fn adjust_draw_param(&mut self, delta: i32) {
-        let Some(drawing) = self.drawing.as_mut() else { return };
+        let Some(drawing) = self.drawing.as_mut() else {
+            return;
+        };
         let nudge_u32 = |v: u32, d: i32, min: u32, max: u32| -> u32 {
             ((v as i32 + d).clamp(min as i32, max as i32)) as u32
         };
@@ -4793,10 +4894,9 @@ impl App {
         // Reposition the n-2 interior vertices uniformly along the bezier.
         let n = path.len();
         let mut moves: Vec<doombuilder_core::edit::VertexMove> = Vec::new();
-        for i in 1..(n - 1) {
+        for (i, &vid) in path.iter().enumerate().take(n - 1).skip(1) {
             let t = i as f32 / (n - 1) as f32;
             let p = quadratic_bezier_point(start, cp, end, t);
-            let vid = path[i];
             if let Some(v) = map.vertices.get(vid) {
                 let dx = (p.x.round() as i32) - v.x;
                 let dy = (p.y.round() as i32) - v.y;
@@ -4897,18 +4997,20 @@ impl App {
         for (sid, mesh) in self.sector_meshes.iter() {
             let fill = match self.settings.view_mode {
                 View2DMode::Floor | View2DMode::Ceiling => {
-                    let Some(textures) = &self.textures else { continue };
+                    let Some(textures) = &self.textures else {
+                        continue;
+                    };
                     let slot = if self.settings.view_mode == View2DMode::Ceiling {
                         doombuilder_render::FillSlot::Ceiling
                     } else {
                         doombuilder_render::FillSlot::Floor
                     };
-                    doombuilder_render::rasterise_sector_fill_slot(
-                        map, *sid, mesh, textures, slot,
-                    )
+                    doombuilder_render::rasterise_sector_fill_slot(map, *sid, mesh, textures, slot)
                 }
                 View2DMode::Brightness => {
-                    let Some(sec) = map.sectors.get(*sid) else { continue };
+                    let Some(sec) = map.sectors.get(*sid) else {
+                        continue;
+                    };
                     let color = brightness_color(sec.light);
                     doombuilder_render::rasterise_sector_solid(*sid, mesh, color)
                 }
@@ -4919,11 +5021,11 @@ impl App {
                 continue;
             }
             let handle = ImageHandle::from_rgba(fill.width, fill.height, fill.rgba);
-            let world_min = Vec2::new(fill.origin_world.0, fill.origin_world.1 - fill.height as f32);
-            let world_max = Vec2::new(
-                fill.origin_world.0 + fill.width as f32,
-                fill.origin_world.1,
+            let world_min = Vec2::new(
+                fill.origin_world.0,
+                fill.origin_world.1 - fill.height as f32,
             );
+            let world_max = Vec2::new(fill.origin_world.0 + fill.width as f32, fill.origin_world.1);
             tiles.push(FillTile {
                 handle,
                 world_min,
@@ -4986,7 +5088,9 @@ impl App {
             EditMode::Linedefs => spatial
                 .nearest_linedef(world.x, world.y, linedef_radius)
                 .map(HighlightKind::Linedef),
-            EditMode::Sectors => spatial.sector_at(world.x, world.y).map(HighlightKind::Sector),
+            EditMode::Sectors => spatial
+                .sector_at(world.x, world.y)
+                .map(HighlightKind::Sector),
             EditMode::Things => spatial
                 .nearest_thing(world.x, world.y, 24.0)
                 .map(HighlightKind::Thing),
@@ -5001,17 +5105,15 @@ impl App {
         // top-right of the viewport row. The preview pad fills the rest of
         // that right column with transparent space so the viewport keeps the
         // remaining width and full height beside it.
-        let middle: Element<'_, Message> = if self.settings.show_3d_overlay
-            && self.map.is_some()
-            && self.mode == Mode::View2D
-        {
-            row![viewport, self.view3d_side_panel()]
-                .spacing(0)
-                .height(Length::Fill)
-                .into()
-        } else {
-            viewport
-        };
+        let middle: Element<'_, Message> =
+            if self.settings.show_3d_overlay && self.map.is_some() && self.mode == Mode::View2D {
+                row![viewport, self.view3d_side_panel()]
+                    .spacing(0)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                viewport
+            };
         let mut layout = column![menu, toolbar, middle].spacing(0);
         if let Some(panel) = self.bottom_panel() {
             layout = layout.push(panel);
@@ -5096,19 +5198,49 @@ impl App {
         };
 
         let toolbar_row = row![
-            icons::icon_cmd_btn(icons::NEW_DOC, "New map (Doom format)", Message::NewMap(MapFormat::Doom)),
-            icons::icon_cmd_btn(icons::FOLDER_OPEN, "Open WAD\u{2026}", Message::OpenWadRequested),
-            icons::icon_cmd_btn(icons::LOAD_RESOURCES, "Load resource WAD (textures + sprites only)\u{2026}", Message::LoadResourcesRequested),
-            icons::icon_cmd_btn(icons::SAVE_DISK, "Save Map As\u{2026}", Message::SaveMapRequested),
-            icons::icon_cmd_btn(icons::PLAY_TRIANGLE, "Test map in engine (F5)", Message::TestMap),
+            icons::icon_cmd_btn(
+                icons::NEW_DOC,
+                "New map (Doom format)",
+                Message::NewMap(MapFormat::Doom)
+            ),
+            icons::icon_cmd_btn(
+                icons::FOLDER_OPEN,
+                "Open WAD\u{2026}",
+                Message::OpenWadRequested
+            ),
+            icons::icon_cmd_btn(
+                icons::LOAD_RESOURCES,
+                "Load resource WAD (textures + sprites only)\u{2026}",
+                Message::LoadResourcesRequested
+            ),
+            icons::icon_cmd_btn(
+                icons::SAVE_DISK,
+                "Save Map As\u{2026}",
+                Message::SaveMapRequested
+            ),
+            icons::icon_cmd_btn(
+                icons::PLAY_TRIANGLE,
+                "Test map in engine (F5)",
+                Message::TestMap
+            ),
             vertical_separator(),
             icons::icon_cmd_btn(icons::UNDO, "Undo (\u{2318}Z)", Message::Undo),
             icons::icon_cmd_btn(icons::REDO, "Redo (\u{2318}\u{21E7}Z)", Message::Redo),
             vertical_separator(),
             map_picker,
             vertical_separator(),
-            icons::icon_btn(icons::VIEW_2D, "2D View", Message::Mode(Mode::View2D), self.mode == Mode::View2D),
-            icons::icon_btn(icons::VIEW_3D, "3D View", Message::Mode(Mode::View3D), self.mode == Mode::View3D),
+            icons::icon_btn(
+                icons::VIEW_2D,
+                "2D View",
+                Message::Mode(Mode::View2D),
+                self.mode == Mode::View2D
+            ),
+            icons::icon_btn(
+                icons::VIEW_3D,
+                "3D View",
+                Message::Mode(Mode::View3D),
+                self.mode == Mode::View3D
+            ),
             vertical_separator(),
             pick_list(
                 GameConfig::builtin_names()
@@ -5119,18 +5251,68 @@ impl App {
                 Message::SetGameConfig,
             ),
             vertical_separator(),
-            icons::icon_btn(icons::VERTEX, "Vertices mode (1)", Message::SetEditMode(EditMode::Vertices), self.edit_mode == EditMode::Vertices),
-            icons::icon_btn(icons::LINEDEF, "Linedefs mode (2)", Message::SetEditMode(EditMode::Linedefs), self.edit_mode == EditMode::Linedefs),
-            icons::icon_btn(icons::SECTOR, "Sectors mode (3)", Message::SetEditMode(EditMode::Sectors), self.edit_mode == EditMode::Sectors),
-            icons::icon_btn(icons::THING, "Things mode (4)", Message::SetEditMode(EditMode::Things), self.edit_mode == EditMode::Things),
+            icons::icon_btn(
+                icons::VERTEX,
+                "Vertices mode (1)",
+                Message::SetEditMode(EditMode::Vertices),
+                self.edit_mode == EditMode::Vertices
+            ),
+            icons::icon_btn(
+                icons::LINEDEF,
+                "Linedefs mode (2)",
+                Message::SetEditMode(EditMode::Linedefs),
+                self.edit_mode == EditMode::Linedefs
+            ),
+            icons::icon_btn(
+                icons::SECTOR,
+                "Sectors mode (3)",
+                Message::SetEditMode(EditMode::Sectors),
+                self.edit_mode == EditMode::Sectors
+            ),
+            icons::icon_btn(
+                icons::THING,
+                "Things mode (4)",
+                Message::SetEditMode(EditMode::Things),
+                self.edit_mode == EditMode::Things
+            ),
             vertical_separator(),
-            icons::icon_btn(icons::DRAW_PEN, "Draw lines (D)", Message::ToggleDrawing, self.drawing.is_some()),
-            icons::icon_cmd_btn(icons::MAKE_SECTOR, "Make sector from selected lines (\u{2318}M)", Message::MakeSector),
-            icons::icon_cmd_btn(icons::SPLIT_LINE, "Split selected linedefs at midpoint", Message::SplitLines),
-            icons::icon_cmd_btn(icons::MERGE_VERTS, "Merge selected vertices", Message::MergeVertices),
-            icons::icon_cmd_btn(icons::FLIP_LINE, "Flip selected linedefs (swap front/back)", Message::FlipLines),
-            icons::icon_btn(icons::TEXTURES, "Show sector textures", Message::ToggleTextures, self.settings.show_textures),
-            icons::icon_cmd_btn(icons::SETTINGS_GEAR, "Settings\u{2026}", Message::OpenSettings),
+            icons::icon_btn(
+                icons::DRAW_PEN,
+                "Draw lines (D)",
+                Message::ToggleDrawing,
+                self.drawing.is_some()
+            ),
+            icons::icon_cmd_btn(
+                icons::MAKE_SECTOR,
+                "Make sector from selected lines (\u{2318}M)",
+                Message::MakeSector
+            ),
+            icons::icon_cmd_btn(
+                icons::SPLIT_LINE,
+                "Split selected linedefs at midpoint",
+                Message::SplitLines
+            ),
+            icons::icon_cmd_btn(
+                icons::MERGE_VERTS,
+                "Merge selected vertices",
+                Message::MergeVertices
+            ),
+            icons::icon_cmd_btn(
+                icons::FLIP_LINE,
+                "Flip selected linedefs (swap front/back)",
+                Message::FlipLines
+            ),
+            icons::icon_btn(
+                icons::TEXTURES,
+                "Show sector textures",
+                Message::ToggleTextures,
+                self.settings.show_textures
+            ),
+            icons::icon_cmd_btn(
+                icons::SETTINGS_GEAR,
+                "Settings\u{2026}",
+                Message::OpenSettings
+            ),
         ]
         .spacing(2)
         .padding(4)
@@ -5270,11 +5452,14 @@ impl App {
                     .spacing(10)
                     .into()
             }
-            Some(HighlightKind::Thing(id)) => {
-                row![thing_preview_panel(map, &self.config, &self.sprite_handles, id)]
-                    .spacing(10)
-                    .into()
-            }
+            Some(HighlightKind::Thing(id)) => row![thing_preview_panel(
+                map,
+                &self.config,
+                &self.sprite_handles,
+                id
+            )]
+            .spacing(10)
+            .into(),
             _ => row![
                 side_panel("Front Side", None, &self.texture_handles),
                 side_panel("Back Side", None, &self.texture_handles),
@@ -5284,15 +5469,11 @@ impl App {
         };
 
         Some(
-            container(
-                row![details, texture_panels]
-                    .spacing(10)
-                    .padding(8),
-            )
-            .style(panel_style)
-            .width(Length::Fill)
-            .height(Length::Fixed(160.0))
-            .into(),
+            container(row![details, texture_panels].spacing(10).padding(8))
+                .style(panel_style)
+                .width(Length::Fill)
+                .height(Length::Fixed(160.0))
+                .into(),
         )
     }
 
@@ -5393,7 +5574,9 @@ impl App {
         let title_row = row![
             text("Pick a texture").size(18),
             Space::new().width(Length::Fill),
-            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -5484,7 +5667,9 @@ impl App {
         let title_row = row![
             text("Pick a linedef action").size(18),
             Space::new().width(Length::Fill),
-            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -5521,7 +5706,9 @@ impl App {
         let mut rows: Vec<Element<'_, Message>> = Vec::new();
         let mut last_category: Option<&str> = None;
         for entry in &filtered {
-            if last_category.map(|c| c != entry.category.as_str()).unwrap_or(true)
+            if last_category
+                .map(|c| c != entry.category.as_str())
+                .unwrap_or(true)
                 && !entry.category.is_empty()
             {
                 last_category = Some(entry.category.as_str());
@@ -5602,10 +5789,15 @@ impl App {
             .style(style::win32_standard_button)
             .on_press(Message::GoToCoordsSubmit);
 
-        column![title_row, x_input, y_input, row![Space::new().width(Length::Fill), go]]
-            .spacing(12)
-            .padding(16)
-            .into()
+        column![
+            title_row,
+            x_input,
+            y_input,
+            row![Space::new().width(Length::Fill), go]
+        ]
+        .spacing(12)
+        .padding(16)
+        .into()
     }
 
     fn map_stats_panel(&self) -> Element<'_, Message> {
@@ -5631,9 +5823,7 @@ impl App {
             MapFormat::Doom => "Doom",
             MapFormat::Hexen => "Hexen",
         };
-        let header = row![
-            text(format!("{} ({})", map.name, format_str)).size(15),
-        ];
+        let header = row![text(format!("{} ({})", map.name, format_str)).size(15),];
 
         // ---- Geometry counts grid ----
         let counts = [
@@ -5716,7 +5906,11 @@ impl App {
             ceil_max = ceil_max.max(s.ceiling_height as i32);
         }
         let n_sec = map.sectors.len().max(1) as i64;
-        let avg_light = if map.sectors.is_empty() { 0 } else { (light_sum / n_sec) as i32 };
+        let avg_light = if map.sectors.is_empty() {
+            0
+        } else {
+            (light_sum / n_sec) as i32
+        };
 
         // ---- Thing breakdown by category and skill flag ----
         let mut by_cat: HashMap<String, usize> = HashMap::new();
@@ -5771,11 +5965,8 @@ impl App {
         if !bounds_size.is_empty() {
             geometry_rows.push(kv("Size", bounds_size));
         }
-        let geometry_section = column![
-            text("Geometry").size(14),
-            column(geometry_rows).spacing(2),
-        ]
-        .spacing(6);
+        let geometry_section =
+            column![text("Geometry").size(14), column(geometry_rows).spacing(2),].spacing(6);
 
         let lines_section = column![
             text("Linedefs").size(14),
@@ -5792,19 +5983,16 @@ impl App {
             column![
                 text("Sectors").size(14),
                 kv("With special", sec_with_special.to_string()),
-                kv("Tagged", format!("{tagged_secs} ({} unique)", unique_tags.len())),
+                kv(
+                    "Tagged",
+                    format!("{tagged_secs} ({} unique)", unique_tags.len())
+                ),
                 kv(
                     "Light",
                     format!("min {light_min}  avg {avg_light}  max {light_max}"),
                 ),
-                kv(
-                    "Floor height",
-                    format!("min {floor_min}  max {floor_max}"),
-                ),
-                kv(
-                    "Ceiling height",
-                    format!("min {ceil_min}  max {ceil_max}"),
-                ),
+                kv("Floor height", format!("min {floor_min}  max {floor_max}"),),
+                kv("Ceiling height", format!("min {ceil_min}  max {ceil_max}"),),
             ]
             .spacing(2)
         };
@@ -5879,9 +6067,7 @@ impl App {
                         .size(11)
                         .width(Length::Fixed(60.0))
                         .color(sev_color),
-                    text(issue.category)
-                        .size(11)
-                        .width(Length::Fixed(160.0)),
+                    text(issue.category).size(11).width(Length::Fixed(160.0)),
                     text(issue.message).size(11).width(Length::Fill),
                 ]
                 .spacing(8)
@@ -5956,9 +6142,12 @@ impl App {
         let body: Element<'_, Message> = if rows.is_empty() {
             text("No tags in use.").size(12).into()
         } else {
-            column![header, scrollable(column(rows).spacing(2)).height(Length::Fill)]
-                .spacing(8)
-                .into()
+            column![
+                header,
+                scrollable(column(rows).spacing(2)).height(Length::Fill)
+            ]
+            .spacing(8)
+            .into()
         };
         column![title_row, body]
             .spacing(12)
@@ -6044,9 +6233,7 @@ impl App {
                 let title = info
                     .map(|t| t.title.clone())
                     .unwrap_or_else(|| "(unknown)".into());
-                let cat = info
-                    .map(|t| t.category.clone())
-                    .unwrap_or_else(|| String::new());
+                let cat = info.map(|t| t.category.clone()).unwrap_or_default();
                 row![
                     text(kind.to_string()).size(11).width(Length::Fixed(60.0)),
                     text(n.to_string()).size(11).width(Length::Fixed(60.0)),
@@ -6059,9 +6246,12 @@ impl App {
         let body: Element<'_, Message> = if rows.is_empty() {
             text("No things on the map.").size(12).into()
         } else {
-            column![header, scrollable(column(rows).spacing(2)).height(Length::Fill)]
-                .spacing(8)
-                .into()
+            column![
+                header,
+                scrollable(column(rows).spacing(2)).height(Length::Fill)
+            ]
+            .spacing(8)
+            .into()
         };
         column![title_row, body]
             .spacing(12)
@@ -6212,7 +6402,9 @@ impl App {
         let title_row = row![
             text("Pick a sector special").size(18),
             Space::new().width(Length::Fill),
-            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -6285,7 +6477,9 @@ impl App {
         let title_row = row![
             text("Open map in current WAD").size(18),
             Space::new().width(Length::Fill),
-            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -6390,7 +6584,10 @@ impl App {
         // Key/value info card.
         let info_row = |k: &'static str, v: String| -> Element<'_, Message> {
             row![
-                text(k).size(12).color(p.text_dim).width(Length::Fixed(120.0)),
+                text(k)
+                    .size(12)
+                    .color(p.text_dim)
+                    .width(Length::Fixed(120.0)),
                 text(v).size(12).color(p.text),
             ]
             .spacing(8)
@@ -6415,9 +6612,7 @@ impl App {
         .width(Length::Fixed(360.0))
         .style(settings_card_style);
 
-        let footer = text("Built with Rust + iced")
-            .size(11)
-            .color(p.text_dim);
+        let footer = text("Built with Rust + iced").size(11).color(p.text_dim);
 
         // Vertically center the whole stack inside the (tall) modal.
         let centered = container(
@@ -6436,10 +6631,7 @@ impl App {
         .center_x(Length::Fill)
         .center_y(Length::Fill);
 
-        column![close_row, centered]
-            .spacing(0)
-            .padding(16)
-            .into()
+        column![close_row, centered].spacing(0).padding(16).into()
     }
 
     /// F2 modal showing the map's metadata. Read-mostly: name is editable
@@ -6502,7 +6694,9 @@ impl App {
         let title_row = row![
             text("Pick a thing type").size(18),
             Space::new().width(Length::Fill),
-            button("Close").style(style::win32_standard_button).on_press(Message::ClosePicker),
+            button("Close")
+                .style(style::win32_standard_button)
+                .on_press(Message::ClosePicker),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -6542,30 +6736,27 @@ impl App {
         let mut rows: Vec<Element<'_, Message>> = Vec::new();
         let mut current_row: Vec<Element<'_, Message>> = Vec::with_capacity(COLS);
         for entry in &filtered {
-            let preview: Element<'_, Message> = match find_sprite_handle(
-                &self.config,
-                &self.sprite_handles,
-                entry.id,
-            ) {
-                Some(handle) => container(
-                    image(handle.clone())
-                        .width(Length::Fixed(TILE))
-                        .height(Length::Fixed(TILE)),
-                )
-                .width(Length::Fixed(TILE))
-                .height(Length::Fixed(TILE))
-                .center_x(Length::Fixed(TILE))
-                .center_y(Length::Fixed(TILE))
-                .style(texture_slot_style)
-                .into(),
-                None => container(text(format!("kind {}", entry.id)).size(11))
+            let preview: Element<'_, Message> =
+                match find_sprite_handle(&self.config, &self.sprite_handles, entry.id) {
+                    Some(handle) => container(
+                        image(handle.clone())
+                            .width(Length::Fixed(TILE))
+                            .height(Length::Fixed(TILE)),
+                    )
                     .width(Length::Fixed(TILE))
                     .height(Length::Fixed(TILE))
                     .center_x(Length::Fixed(TILE))
                     .center_y(Length::Fixed(TILE))
                     .style(texture_slot_style)
                     .into(),
-            };
+                    None => container(text(format!("kind {}", entry.id)).size(11))
+                        .width(Length::Fixed(TILE))
+                        .height(Length::Fixed(TILE))
+                        .center_x(Length::Fixed(TILE))
+                        .center_y(Length::Fixed(TILE))
+                        .style(texture_slot_style)
+                        .into(),
+                };
             let label = format!("{} - {}", entry.id, entry.title);
             let tile = column![preview, text(label).size(10)]
                 .spacing(2)
@@ -6652,7 +6843,7 @@ impl App {
                     .on_input(move |t| Message::LinedefFieldChanged { field, text: t })
                     .on_submit(Message::LinedefFieldSubmit(field))
                     .padding(4)
-            .style(style::win32_text_input)
+                    .style(style::win32_text_input)
                     .width(Length::Fixed(80.0)),
             ]
             .spacing(6)
@@ -6683,7 +6874,7 @@ impl App {
                         })
                         .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg0))
                         .padding(4)
-            .style(style::win32_text_input)
+                        .style(style::win32_text_input)
                         .width(Length::Fixed(56.0)),
                     text_input("0", &buf.args[1])
                         .on_input(|t| Message::LinedefFieldChanged {
@@ -6692,7 +6883,7 @@ impl App {
                         })
                         .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg1))
                         .padding(4)
-            .style(style::win32_text_input)
+                        .style(style::win32_text_input)
                         .width(Length::Fixed(56.0)),
                     text_input("0", &buf.args[2])
                         .on_input(|t| Message::LinedefFieldChanged {
@@ -6701,7 +6892,7 @@ impl App {
                         })
                         .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg2))
                         .padding(4)
-            .style(style::win32_text_input)
+                        .style(style::win32_text_input)
                         .width(Length::Fixed(56.0)),
                     text_input("0", &buf.args[3])
                         .on_input(|t| Message::LinedefFieldChanged {
@@ -6710,7 +6901,7 @@ impl App {
                         })
                         .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg3))
                         .padding(4)
-            .style(style::win32_text_input)
+                        .style(style::win32_text_input)
                         .width(Length::Fixed(56.0)),
                     text_input("0", &buf.args[4])
                         .on_input(|t| Message::LinedefFieldChanged {
@@ -6719,7 +6910,7 @@ impl App {
                         })
                         .on_submit(Message::LinedefFieldSubmit(LinedefIntField::Arg4))
                         .padding(4)
-            .style(style::win32_text_input)
+                        .style(style::win32_text_input)
                         .width(Length::Fixed(56.0)),
                 ]
                 .spacing(4),
@@ -6768,7 +6959,7 @@ impl App {
                 })
                 .on_submit(Message::ThingFieldSubmit(ThingIntField::Angle))
                 .padding(4)
-            .style(style::win32_text_input)
+                .style(style::win32_text_input)
                 .width(Length::Fixed(80.0)),
             text("\u{00B0}").size(13),
         ]
@@ -6810,7 +7001,7 @@ impl App {
                     .on_input(move |t| Message::SectorFieldChanged { field, text: t })
                     .on_submit(Message::SectorFieldSubmit(field))
                     .padding(4)
-            .style(style::win32_text_input)
+                    .style(style::win32_text_input)
                     .width(Length::Fixed(120.0)),
             ]
             .spacing(6)
@@ -6825,7 +7016,11 @@ impl App {
         column![
             text("Sector").size(15),
             row_input("Floor:", buf.floor.clone(), SectorIntField::FloorHeight),
-            row_input("Ceiling:", buf.ceiling.clone(), SectorIntField::CeilingHeight),
+            row_input(
+                "Ceiling:",
+                buf.ceiling.clone(),
+                SectorIntField::CeilingHeight
+            ),
             row_input("Light:", buf.light.clone(), SectorIntField::Light),
             row_input("Tag:", buf.tag.clone(), SectorIntField::Tag),
             button(text(format!("Special: {special_label}")).size(13))
@@ -6867,7 +7062,7 @@ impl App {
         let preview_card = container(
             column![header, viewport_3d]
                 .width(Length::Fill)
-                .height(Length::Fixed(PREVIEW_H))
+                .height(Length::Fixed(PREVIEW_H)),
         )
         .style(style::win32_modal_panel)
         .padding(0);
@@ -6893,6 +7088,8 @@ impl App {
         .into()
     }
 
+    // See note on `Default::default`: `Arc<Cache>` is intentional.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn view2d_minimap_card(&self) -> Element<'_, Message> {
         const MINIMAP_H: f32 = 200.0;
         let Some(map) = self.map.as_ref() else {
@@ -6905,11 +7102,7 @@ impl App {
         // width as the viewport hint so the fit math matches what the
         // rendered widget will actually display.
         let mut cam = self.camera2d;
-        cam.frame_aabb(
-            min,
-            max,
-            Vec2::new(284.0, MINIMAP_H - 18.0),
-        );
+        cam.frame_aabb(min, max, Vec2::new(284.0, MINIMAP_H - 18.0));
         let view = view2d::View2D {
             map: map.clone(),
             meshes: self.sector_meshes.clone(),
@@ -7173,27 +7366,27 @@ fn thing_preview_panel<'a>(
                 .thing_type(t.kind)
                 .map(|tt| tt.title.clone())
                 .unwrap_or_else(|| format!("Thing {}", t.kind));
-            let preview: Element<'_, Message> = match find_sprite_handle(config, sprite_handles, t.kind)
-            {
-                Some(handle) => container(
-                    image(handle.clone())
-                        .width(Length::Fixed(96.0))
-                        .height(Length::Fixed(96.0)),
-                )
-                .width(Length::Fixed(96.0))
-                .height(Length::Fixed(96.0))
-                .center_x(Length::Fixed(96.0))
-                .center_y(Length::Fixed(96.0))
-                .style(texture_slot_style)
-                .into(),
-                None => container(text(format!("kind {}", t.kind)).size(11))
+            let preview: Element<'_, Message> =
+                match find_sprite_handle(config, sprite_handles, t.kind) {
+                    Some(handle) => container(
+                        image(handle.clone())
+                            .width(Length::Fixed(96.0))
+                            .height(Length::Fixed(96.0)),
+                    )
                     .width(Length::Fixed(96.0))
                     .height(Length::Fixed(96.0))
                     .center_x(Length::Fixed(96.0))
                     .center_y(Length::Fixed(96.0))
                     .style(texture_slot_style)
                     .into(),
-            };
+                    None => container(text(format!("kind {}", t.kind)).size(11))
+                        .width(Length::Fixed(96.0))
+                        .height(Length::Fixed(96.0))
+                        .center_x(Length::Fixed(96.0))
+                        .center_y(Length::Fixed(96.0))
+                        .style(texture_slot_style)
+                        .into(),
+                };
             column![preview, text(title).size(11)]
                 .spacing(2)
                 .align_x(iced::Alignment::Center)
@@ -7290,21 +7483,29 @@ fn texture_slot<'a>(
         .style(texture_slot_style)
         .into()
     } else if let Some(handle) = handles.get(&displayed) {
-        container(image(handle.clone()).width(Length::Fixed(72.0)).height(Length::Fixed(72.0)))
-            .width(Length::Fixed(72.0))
-            .height(Length::Fixed(72.0))
-            .center_x(Length::Fixed(72.0))
-            .center_y(Length::Fixed(72.0))
-            .style(texture_slot_style)
-            .into()
+        container(
+            image(handle.clone())
+                .width(Length::Fixed(72.0))
+                .height(Length::Fixed(72.0)),
+        )
+        .width(Length::Fixed(72.0))
+        .height(Length::Fixed(72.0))
+        .center_x(Length::Fixed(72.0))
+        .center_y(Length::Fixed(72.0))
+        .style(texture_slot_style)
+        .into()
     } else {
-        container(text(displayed.clone()).size(11).color(Color::from_rgb(0.9, 0.9, 0.9)))
-            .width(Length::Fixed(72.0))
-            .height(Length::Fixed(72.0))
-            .center_x(Length::Fixed(72.0))
-            .center_y(Length::Fixed(72.0))
-            .style(texture_slot_style)
-            .into()
+        container(
+            text(displayed.clone())
+                .size(11)
+                .color(Color::from_rgb(0.9, 0.9, 0.9)),
+        )
+        .width(Length::Fixed(72.0))
+        .height(Length::Fixed(72.0))
+        .center_x(Length::Fixed(72.0))
+        .center_y(Length::Fixed(72.0))
+        .style(texture_slot_style)
+        .into()
     };
 
     let slot: Element<'_, Message> = if let Some(t) = target {
@@ -7321,7 +7522,11 @@ fn texture_slot<'a>(
     // Builder does this and it's the fastest way to know which "BROWN1"
     // variant you're looking at without opening the picker. Render dim
     // and fixed-width to keep the column aligned across all three slots.
-    let name_text = if is_missing { "-".to_string() } else { displayed };
+    let name_text = if is_missing {
+        "-".to_string()
+    } else {
+        displayed
+    };
     let name_label = text(name_text)
         .size(10)
         .color(Color::from_rgb(0.7, 0.7, 0.75));
@@ -7654,9 +7859,7 @@ where
                 .into()
         })
         .collect();
-    column![row(cells).spacing(4).wrap()]
-        .spacing(2)
-        .into()
+    column![row(cells).spacing(4).wrap()].spacing(2).into()
 }
 
 fn linedef_buffer_field(b: &LinedefBuffers, field: LinedefIntField) -> &str {
@@ -7671,10 +7874,7 @@ fn linedef_buffer_field(b: &LinedefBuffers, field: LinedefIntField) -> &str {
     }
 }
 
-fn linedef_buffer_field_mut<'a>(
-    b: &'a mut LinedefBuffers,
-    field: LinedefIntField,
-) -> Option<&'a mut String> {
+fn linedef_buffer_field_mut(b: &mut LinedefBuffers, field: LinedefIntField) -> Option<&mut String> {
     match field {
         LinedefIntField::Tag => Some(&mut b.tag),
         LinedefIntField::Arg0 => Some(&mut b.args[0]),
@@ -7693,10 +7893,7 @@ fn thing_buffer_field(b: &ThingBuffers, field: ThingIntField) -> &str {
     }
 }
 
-fn thing_buffer_field_mut<'a>(
-    b: &'a mut ThingBuffers,
-    field: ThingIntField,
-) -> Option<&'a mut String> {
+fn thing_buffer_field_mut(b: &mut ThingBuffers, field: ThingIntField) -> Option<&mut String> {
     match field {
         ThingIntField::Angle => Some(&mut b.angle),
         ThingIntField::Flags => None,
@@ -7713,10 +7910,7 @@ fn sector_buffer_field(b: &SectorBuffers, field: SectorIntField) -> &str {
     }
 }
 
-fn sector_buffer_field_mut<'a>(
-    b: &'a mut SectorBuffers,
-    field: SectorIntField,
-) -> Option<&'a mut String> {
+fn sector_buffer_field_mut(b: &mut SectorBuffers, field: SectorIntField) -> Option<&mut String> {
     match field {
         SectorIntField::FloorHeight => Some(&mut b.floor),
         SectorIntField::CeilingHeight => Some(&mut b.ceiling),
@@ -7968,7 +8162,9 @@ async fn save_map_to_path(
     // Builtin path stays infallible; external builders surface their error.
     let bytes = match builder {
         NodeBuilder::Builtin => save_map_as_pwad(&map),
-        b @ NodeBuilder::Zdbsp { .. } => save_map_as_pwad_with(&map, &b).map_err(|e| e.to_string())?,
+        b @ NodeBuilder::Zdbsp { .. } => {
+            save_map_as_pwad_with(&map, &b).map_err(|e| e.to_string())?
+        }
     };
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path)
@@ -8080,12 +8276,10 @@ fn quadratic_bezier_vertices(p0: Vec2, p2: Vec2, p1: Vec2, subdivisions: u32) ->
 fn chain_from_polyline(points: &[Vec2], closed: bool) -> LinedefChain {
     let mut chain = LinedefChain::default();
     for p in points {
-        chain
-            .vertex_inserts
-            .push(doombuilder_core::map::MapVertex {
-                x: p.x.round() as i32,
-                y: p.y.round() as i32,
-            });
+        chain.vertex_inserts.push(doombuilder_core::map::MapVertex {
+            x: p.x.round() as i32,
+            y: p.y.round() as i32,
+        });
     }
     let n = points.len();
     let line_count = if closed { n } else { n - 1 };
@@ -8131,12 +8325,10 @@ fn chain_from_grid(a: Vec2, b: Vec2, cols: u32, rows: u32) -> LinedefChain {
         for c in 0..nx {
             let x = min.x + c as f32 * dx;
             let y = min.y + r as f32 * dy;
-            chain
-                .vertex_inserts
-                .push(doombuilder_core::map::MapVertex {
-                    x: x.round() as i32,
-                    y: y.round() as i32,
-                });
+            chain.vertex_inserts.push(doombuilder_core::map::MapVertex {
+                x: x.round() as i32,
+                y: y.round() as i32,
+            });
         }
     }
     let new_line = |a: usize, b: usize| {
@@ -8185,8 +8377,11 @@ fn order_line_chain(map: &Map, line_ids: &[LinedefId]) -> Option<Vec<VertexId>> 
     if adj.values().any(|v| v.len() > 2) {
         return None;
     }
-    let endpoints: Vec<VertexId> =
-        adj.iter().filter(|(_, ns)| ns.len() == 1).map(|(v, _)| *v).collect();
+    let endpoints: Vec<VertexId> = adj
+        .iter()
+        .filter(|(_, ns)| ns.len() == 1)
+        .map(|(v, _)| *v)
+        .collect();
     if endpoints.len() != 2 {
         return None;
     }
@@ -8224,6 +8419,7 @@ async fn pick_file() -> Option<PathBuf> {
 /// Decode a map name into `-warp` arguments. Vanilla engines take:
 ///   * `-warp E M` for E#M# (Doom 1, Heretic)
 ///   * `-warp NN` for MAPNN (Doom 2, Hexen)
+///
 /// Returns None for unrecognised names; engine launches at title.
 fn warp_args_for(name: &str) -> Option<Vec<String>> {
     let up = name.to_ascii_uppercase();
@@ -8331,12 +8527,10 @@ async fn load_map_payload(wad: Wad, name: String) -> Result<MapPayload, String> 
     })
 }
 
-fn open_and_summarise(
-    path: &Path,
-) -> Result<
-    (Option<Wad>, Option<Arc<TextureSet>>, String, Vec<String>),
-    doombuilder_core::Error,
-> {
+/// `(wad, textures, summary, map_names)` produced from opening an asset.
+type OpenSummary = (Option<Wad>, Option<Arc<TextureSet>>, String, Vec<String>);
+
+fn open_and_summarise(path: &Path) -> Result<OpenSummary, doombuilder_core::Error> {
     match open_asset(path)? {
         Asset::Wad(wad) => {
             let textures = Arc::new(TextureSet::load_from_wad(&wad));

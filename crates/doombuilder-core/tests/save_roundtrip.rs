@@ -4,7 +4,7 @@
 use doombuilder_core::map::{
     save_map_as_pwad, MapLinedef, MapSector, MapSidedef, MapVertex, TextureName,
 };
-use doombuilder_core::{load_doom, MapFormat, Map, Wad};
+use doombuilder_core::{load_doom, Map, MapFormat, Wad};
 
 fn synthetic_doom_map() -> Map {
     let mut map = Map::new("MAP01", MapFormat::Doom);

@@ -1,9 +1,7 @@
 // ABOUTME: Verify loop extraction and triangulation against a synthetic
 // ABOUTME: single-sector square map. Real-WAD coverage comes from manual smoke tests.
 
-use doombuilder_core::map::{
-    Map, MapLinedef, MapSector, MapSidedef, MapVertex, TextureName,
-};
+use doombuilder_core::map::{Map, MapLinedef, MapSector, MapSidedef, MapVertex, TextureName};
 use doombuilder_core::MapFormat;
 use doombuilder_render::{extract_sector_loops, triangulate_sector};
 

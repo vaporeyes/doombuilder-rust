@@ -135,8 +135,12 @@ fn load(wad: &Wad, name: MapName, format: MapFormat) -> Result<Map> {
         .collect::<Result<_>>()?;
 
     match format {
-        MapFormat::Doom => load_linedefs_doom(wad, linedef_lump, &mut map, &vertex_ids, &sidedef_ids)?,
-        MapFormat::Hexen => load_linedefs_hexen(wad, linedef_lump, &mut map, &vertex_ids, &sidedef_ids)?,
+        MapFormat::Doom => {
+            load_linedefs_doom(wad, linedef_lump, &mut map, &vertex_ids, &sidedef_ids)?
+        }
+        MapFormat::Hexen => {
+            load_linedefs_hexen(wad, linedef_lump, &mut map, &vertex_ids, &sidedef_ids)?
+        }
     }
 
     match format {
@@ -275,11 +279,7 @@ fn locate_map<'a>(wad: &'a Wad, name: &str) -> Result<Vec<&'a DirEntry>> {
         .ok_or_else(|| Error::MapNotFound(name.to_string()))?;
 
     let mut lumps = Vec::with_capacity(MAX_MAP_LUMPS);
-    for entry in dir
-        .iter()
-        .skip(marker_idx + 1)
-        .take(MAX_MAP_LUMPS)
-    {
+    for entry in dir.iter().skip(marker_idx + 1).take(MAX_MAP_LUMPS) {
         let n = entry.name_str();
         if MAP_LUMP_NAMES.iter().any(|w| w.eq_ignore_ascii_case(n)) {
             lumps.push(entry);
@@ -290,11 +290,7 @@ fn locate_map<'a>(wad: &'a Wad, name: &str) -> Result<Vec<&'a DirEntry>> {
     Ok(lumps)
 }
 
-fn require_lump<'a>(
-    lumps: &'a [&'a DirEntry],
-    name: &str,
-    map_name: &str,
-) -> Result<&'a DirEntry> {
+fn require_lump<'a>(lumps: &'a [&'a DirEntry], name: &str, map_name: &str) -> Result<&'a DirEntry> {
     lumps
         .iter()
         .copied()

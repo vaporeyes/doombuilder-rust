@@ -95,13 +95,11 @@ impl Wad {
         let offset = entry.filepos as usize;
         let size = entry.size as usize;
         let bytes = self.backing.bytes();
-        let end = offset
-            .checked_add(size)
-            .ok_or_else(|| Error::Truncated {
-                offset: offset as u64,
-                expected: size as u64,
-                actual: bytes.len() as u64,
-            })?;
+        let end = offset.checked_add(size).ok_or(Error::Truncated {
+            offset: offset as u64,
+            expected: size as u64,
+            actual: bytes.len() as u64,
+        })?;
         if end > bytes.len() {
             return Err(Error::Truncated {
                 offset: offset as u64,
@@ -160,11 +158,7 @@ impl Wad {
             let src = &bytes[i * stride..(i + 1) * stride];
             let mut v = std::mem::MaybeUninit::<T>::uninit();
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    src.as_ptr(),
-                    v.as_mut_ptr() as *mut u8,
-                    stride,
-                );
+                std::ptr::copy_nonoverlapping(src.as_ptr(), v.as_mut_ptr() as *mut u8, stride);
                 out.push(v.assume_init());
             }
         }

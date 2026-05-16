@@ -31,10 +31,18 @@ pub enum UniValue {
 
 impl UniValue {
     pub fn as_bool(&self) -> Option<bool> {
-        if let UniValue::Bool(v) = self { Some(*v) } else { None }
+        if let UniValue::Bool(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
     }
     pub fn as_int(&self) -> Option<i64> {
-        if let UniValue::Int(v) = self { Some(*v) } else { None }
+        if let UniValue::Int(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
     }
     pub fn as_float(&self) -> Option<f64> {
         match self {
@@ -44,7 +52,11 @@ impl UniValue {
         }
     }
     pub fn as_str(&self) -> Option<&str> {
-        if let UniValue::String(v) = self { Some(v.as_str()) } else { None }
+        if let UniValue::String(v) = self {
+            Some(v.as_str())
+        } else {
+            None
+        }
     }
 }
 

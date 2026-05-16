@@ -27,20 +27,16 @@ impl DirEntry {
 pub fn parse(bytes: &[u8], header: &WadHeader) -> Result<Vec<DirEntry>> {
     let offset = header.directory_offset as usize;
     let count = header.num_lumps as usize;
-    let needed = count
-        .checked_mul(ENTRY_SIZE)
-        .ok_or_else(|| Error::Truncated {
-            offset: offset as u64,
-            expected: u64::MAX,
-            actual: bytes.len() as u64,
-        })?;
-    let end = offset
-        .checked_add(needed)
-        .ok_or_else(|| Error::Truncated {
-            offset: offset as u64,
-            expected: needed as u64,
-            actual: bytes.len() as u64,
-        })?;
+    let needed = count.checked_mul(ENTRY_SIZE).ok_or(Error::Truncated {
+        offset: offset as u64,
+        expected: u64::MAX,
+        actual: bytes.len() as u64,
+    })?;
+    let end = offset.checked_add(needed).ok_or(Error::Truncated {
+        offset: offset as u64,
+        expected: needed as u64,
+        actual: bytes.len() as u64,
+    })?;
     if end > bytes.len() {
         return Err(Error::Truncated {
             offset: offset as u64,

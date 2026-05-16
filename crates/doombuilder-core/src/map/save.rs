@@ -52,23 +52,57 @@ pub fn serialize_map_with<'a>(map: &'a Map, builder: &NodeBuilder) -> Result<Vec
     }
     let sectors = serialize_sectors(map);
 
-    let mut lumps: Vec<LumpEntry<'_>> = Vec::new();
-    lumps.push(LumpEntry {
-        name: &map.name,
-        data: Vec::new(),
-    });
-    lumps.push(LumpEntry { name: "THINGS", data: things });
-    lumps.push(LumpEntry { name: "LINEDEFS", data: linedefs });
-    lumps.push(LumpEntry { name: "SIDEDEFS", data: sidedefs });
-    lumps.push(LumpEntry { name: "VERTEXES", data: vertexes });
-    lumps.push(LumpEntry { name: "SEGS", data: nodes.segs });
-    lumps.push(LumpEntry { name: "SSECTORS", data: nodes.ssectors });
-    lumps.push(LumpEntry { name: "NODES", data: nodes.nodes });
-    lumps.push(LumpEntry { name: "SECTORS", data: sectors });
-    lumps.push(LumpEntry { name: "REJECT", data: nodes.reject });
-    lumps.push(LumpEntry { name: "BLOCKMAP", data: nodes.blockmap });
+    let mut lumps: Vec<LumpEntry<'_>> = vec![
+        LumpEntry {
+            name: &map.name,
+            data: Vec::new(),
+        },
+        LumpEntry {
+            name: "THINGS",
+            data: things,
+        },
+        LumpEntry {
+            name: "LINEDEFS",
+            data: linedefs,
+        },
+        LumpEntry {
+            name: "SIDEDEFS",
+            data: sidedefs,
+        },
+        LumpEntry {
+            name: "VERTEXES",
+            data: vertexes,
+        },
+        LumpEntry {
+            name: "SEGS",
+            data: nodes.segs,
+        },
+        LumpEntry {
+            name: "SSECTORS",
+            data: nodes.ssectors,
+        },
+        LumpEntry {
+            name: "NODES",
+            data: nodes.nodes,
+        },
+        LumpEntry {
+            name: "SECTORS",
+            data: sectors,
+        },
+        LumpEntry {
+            name: "REJECT",
+            data: nodes.reject,
+        },
+        LumpEntry {
+            name: "BLOCKMAP",
+            data: nodes.blockmap,
+        },
+    ];
     if map.format == MapFormat::Hexen {
-        lumps.push(LumpEntry { name: "BEHAVIOR", data: Vec::new() });
+        lumps.push(LumpEntry {
+            name: "BEHAVIOR",
+            data: Vec::new(),
+        });
     }
     Ok(lumps)
 }
@@ -138,6 +172,89 @@ fn normalize_tex_name(bytes: &[u8; 8]) -> [u8; 8] {
     }
 }
 
+pub(crate) fn serialize_linedefs(
+    map: &Map,
+    vertex_idx: &HashMap<VertexId, u16>,
+    sidedef_idx: &HashMap<SidedefId, u16>,
+) -> Vec<u8> {
+    let stride = if map.format == MapFormat::Hexen {
+        16
+    } else {
+        14
+    };
+    let mut out = Vec::with_capacity(map.linedefs.len() * stride);
+    for (_, l) in &map.linedefs {
+        let v1 = vertex_idx.get(&l.v1).copied().unwrap_or(0);
+        let v2 = vertex_idx.get(&l.v2).copied().unwrap_or(0);
+        let right = l
+            .right
+            .and_then(|s| sidedef_idx.get(&s).copied())
+            .unwrap_or(0xFFFF);
+        let left = l
+            .left
+            .and_then(|s| sidedef_idx.get(&s).copied())
+            .unwrap_or(0xFFFF);
+        out.extend_from_slice(&v1.to_le_bytes());
+        out.extend_from_slice(&v2.to_le_bytes());
+        out.extend_from_slice(&l.flags.to_le_bytes());
+        match map.format {
+            MapFormat::Doom => {
+                out.extend_from_slice(&l.special.to_le_bytes());
+                out.extend_from_slice(&l.tag.to_le_bytes());
+            }
+            MapFormat::Hexen => {
+                out.push(l.special as u8);
+                out.extend_from_slice(&l.args);
+            }
+        }
+        out.extend_from_slice(&right.to_le_bytes());
+        out.extend_from_slice(&left.to_le_bytes());
+    }
+    out
+}
+
+fn _suppress_unused(_id: LinedefId) {}
+
+pub(crate) fn serialize_things(map: &Map) -> Vec<u8> {
+    let stride = if map.format == MapFormat::Hexen {
+        20
+    } else {
+        10
+    };
+    let mut out = Vec::with_capacity(map.things.len() * stride);
+    for (_, t) in &map.things {
+        match map.format {
+            MapFormat::Doom => {
+                out.extend_from_slice(
+                    &(t.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes(),
+                );
+                out.extend_from_slice(
+                    &(t.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes(),
+                );
+                out.extend_from_slice(&t.angle.to_le_bytes());
+                out.extend_from_slice(&t.kind.to_le_bytes());
+                out.extend_from_slice(&t.flags.to_le_bytes());
+            }
+            MapFormat::Hexen => {
+                out.extend_from_slice(&t.tid.to_le_bytes());
+                out.extend_from_slice(
+                    &(t.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes(),
+                );
+                out.extend_from_slice(
+                    &(t.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes(),
+                );
+                out.extend_from_slice(&t.z.to_le_bytes());
+                out.extend_from_slice(&t.angle.to_le_bytes());
+                out.extend_from_slice(&t.kind.to_le_bytes());
+                out.extend_from_slice(&t.flags.to_le_bytes());
+                out.push(t.special);
+                out.extend_from_slice(&t.args);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,79 +306,4 @@ mod tests {
             );
         }
     }
-}
-
-pub(crate) fn serialize_linedefs(
-    map: &Map,
-    vertex_idx: &HashMap<VertexId, u16>,
-    sidedef_idx: &HashMap<SidedefId, u16>,
-) -> Vec<u8> {
-    let stride = if map.format == MapFormat::Hexen { 16 } else { 14 };
-    let mut out = Vec::with_capacity(map.linedefs.len() * stride);
-    for (_, l) in &map.linedefs {
-        let v1 = vertex_idx.get(&l.v1).copied().unwrap_or(0);
-        let v2 = vertex_idx.get(&l.v2).copied().unwrap_or(0);
-        let right = l
-            .right
-            .and_then(|s| sidedef_idx.get(&s).copied())
-            .unwrap_or(0xFFFF);
-        let left = l
-            .left
-            .and_then(|s| sidedef_idx.get(&s).copied())
-            .unwrap_or(0xFFFF);
-        out.extend_from_slice(&v1.to_le_bytes());
-        out.extend_from_slice(&v2.to_le_bytes());
-        out.extend_from_slice(&l.flags.to_le_bytes());
-        match map.format {
-            MapFormat::Doom => {
-                out.extend_from_slice(&l.special.to_le_bytes());
-                out.extend_from_slice(&l.tag.to_le_bytes());
-            }
-            MapFormat::Hexen => {
-                out.push(l.special as u8);
-                out.extend_from_slice(&l.args);
-            }
-        }
-        out.extend_from_slice(&right.to_le_bytes());
-        out.extend_from_slice(&left.to_le_bytes());
-    }
-    out
-}
-
-fn _suppress_unused(_id: LinedefId) {}
-
-pub(crate) fn serialize_things(map: &Map) -> Vec<u8> {
-    let stride = if map.format == MapFormat::Hexen { 20 } else { 10 };
-    let mut out = Vec::with_capacity(map.things.len() * stride);
-    for (_, t) in &map.things {
-        match map.format {
-            MapFormat::Doom => {
-                out.extend_from_slice(
-                    &(t.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes(),
-                );
-                out.extend_from_slice(
-                    &(t.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes(),
-                );
-                out.extend_from_slice(&t.angle.to_le_bytes());
-                out.extend_from_slice(&t.kind.to_le_bytes());
-                out.extend_from_slice(&t.flags.to_le_bytes());
-            }
-            MapFormat::Hexen => {
-                out.extend_from_slice(&t.tid.to_le_bytes());
-                out.extend_from_slice(
-                    &(t.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes(),
-                );
-                out.extend_from_slice(
-                    &(t.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16).to_le_bytes(),
-                );
-                out.extend_from_slice(&t.z.to_le_bytes());
-                out.extend_from_slice(&t.angle.to_le_bytes());
-                out.extend_from_slice(&t.kind.to_le_bytes());
-                out.extend_from_slice(&t.flags.to_le_bytes());
-                out.push(t.special);
-                out.extend_from_slice(&t.args);
-            }
-        }
-    }
-    out
 }

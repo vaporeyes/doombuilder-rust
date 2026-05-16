@@ -90,4 +90,3 @@ fn rejects_bad_magic() {
     let msg = format!("{err}");
     assert!(msg.contains("bad magic"), "got: {msg}");
 }
-

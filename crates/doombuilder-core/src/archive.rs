@@ -124,4 +124,3 @@ fn has_doom_layout<R: Read + Seek>(archive: &ZipArchive<R>) -> bool {
             || lower == "mapinfo"
     })
 }
-

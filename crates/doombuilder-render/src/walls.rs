@@ -106,7 +106,12 @@ fn emit_walls_for_linedef(map: &Map, line: &MapLinedef, out: &mut Vec<Wall>) {
                         kind: WallKind::Upper,
                         facing_sector: ls,
                         sidedef: lside,
-                        quad: quad(p2, p1, lsec.ceiling_height as f32, rsec.ceiling_height as f32),
+                        quad: quad(
+                            p2,
+                            p1,
+                            lsec.ceiling_height as f32,
+                            rsec.ceiling_height as f32,
+                        ),
                     });
                 }
             } else if lsec.ceiling_height > rsec.ceiling_height {
@@ -115,7 +120,12 @@ fn emit_walls_for_linedef(map: &Map, line: &MapLinedef, out: &mut Vec<Wall>) {
                         kind: WallKind::Upper,
                         facing_sector: rs,
                         sidedef: rside,
-                        quad: quad(p1, p2, rsec.ceiling_height as f32, lsec.ceiling_height as f32),
+                        quad: quad(
+                            p1,
+                            p2,
+                            rsec.ceiling_height as f32,
+                            lsec.ceiling_height as f32,
+                        ),
                     });
                 }
             }

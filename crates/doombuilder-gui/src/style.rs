@@ -84,7 +84,10 @@ pub fn win32_toggle_button(on: bool) -> impl Fn(&Theme, button::Status) -> butto
     move |_theme, status| {
         let p = palette::active();
         let (bg, text_color) = if on {
-            (Background::Color(p.secondary), contrast_text(p.secondary, &p))
+            (
+                Background::Color(p.secondary),
+                contrast_text(p.secondary, &p),
+            )
         } else {
             let face = match status {
                 button::Status::Hovered => Background::Color(p.elevated),

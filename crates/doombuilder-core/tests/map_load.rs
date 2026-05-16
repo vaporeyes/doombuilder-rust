@@ -144,5 +144,8 @@ fn missing_required_lump_errors() {
     .unwrap();
     let err = load_doom(&wad, "MAP01").unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("VERTEXES") || msg.contains("LINEDEFS"), "got: {msg}");
+    assert!(
+        msg.contains("VERTEXES") || msg.contains("LINEDEFS"),
+        "got: {msg}"
+    );
 }

@@ -17,7 +17,10 @@
       "Bash(sips -g pixelWidth -g pixelHeight -g hasAlpha \"media/Level Editing App Logo for Doombuilder Port.png\")",
       "Read(//private/tmp/**)",
       "Bash(cp \"/Users/jsh/dev/projects/doombuilder-rust/media/Level Editing App Logo for Doombuilder Port.png\" logo.png)",
-      "Bash(python3 -)"
+      "Bash(python3 -)",
+      "Bash(rustc --version)",
+      "Skill(rust-best-practices)",
+      "Bash(cargo clippy *)"
     ]
   }
 }

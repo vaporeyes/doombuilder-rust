@@ -118,4 +118,3 @@ fn tooltip_box_style(_theme: &Theme) -> container::Style {
         ..Default::default()
     }
 }
-

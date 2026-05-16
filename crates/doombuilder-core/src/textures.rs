@@ -65,11 +65,8 @@ impl TextureSet {
         let mut patches: HashMap<usize, Patch> = HashMap::new();
         for (idx, name) in pnames.iter().enumerate() {
             if let Some(entry) = wad.find(&name.to_ascii_uppercase()) {
-                match parse_patch(wad.lump_bytes(entry).unwrap_or(&[])) {
-                    Ok(p) => {
-                        patches.insert(idx, p);
-                    }
-                    Err(_) => {}
+                if let Ok(p) = parse_patch(wad.lump_bytes(entry).unwrap_or(&[])) {
+                    patches.insert(idx, p);
                 }
             }
         }
@@ -198,9 +195,9 @@ impl TextureSet {
             });
         }
         let mut entries = [[0u8; 3]; 256];
-        for i in 0..256 {
+        for (i, entry) in entries.iter_mut().enumerate() {
             let off = i * 3;
-            entries[i] = [bytes[off], bytes[off + 1], bytes[off + 2]];
+            *entry = [bytes[off], bytes[off + 1], bytes[off + 2]];
         }
         Ok(Palette(entries))
     }
@@ -286,8 +283,8 @@ fn parse_texture_lump(bytes: &[u8]) -> Result<Vec<TextureDef>> {
             .to_ascii_uppercase();
         let width = i16::from_le_bytes(bytes[offset + 12..offset + 14].try_into().unwrap()) as u16;
         let height = i16::from_le_bytes(bytes[offset + 14..offset + 16].try_into().unwrap()) as u16;
-        let patchcount = i16::from_le_bytes(bytes[offset + 20..offset + 22].try_into().unwrap())
-            .max(0) as usize;
+        let patchcount =
+            i16::from_le_bytes(bytes[offset + 20..offset + 22].try_into().unwrap()).max(0) as usize;
         let mut patches = Vec::with_capacity(patchcount);
         let p_start = offset + 22;
         let p_end = p_start + patchcount * 10;

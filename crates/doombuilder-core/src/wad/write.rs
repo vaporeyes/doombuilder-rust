@@ -24,7 +24,12 @@ pub fn write_pwad(lumps: &[LumpEntry]) -> Vec<u8> {
     let mut cursor = HEADER_SIZE as u32;
     for lump in lumps {
         let mut padded = [0u8; 8];
-        let upper: Vec<u8> = lump.name.bytes().take(8).map(|b| b.to_ascii_uppercase()).collect();
+        let upper: Vec<u8> = lump
+            .name
+            .bytes()
+            .take(8)
+            .map(|b| b.to_ascii_uppercase())
+            .collect();
         padded[..upper.len()].copy_from_slice(&upper);
         let size = lump.data.len() as u32;
         entries.push((cursor, size, padded));

@@ -156,9 +156,7 @@ impl SpatialIndex {
         let envelope = AABB::from_corners(min, max);
         self.linedefs
             .locate_in_envelope_intersecting(&envelope)
-            .filter(|n| {
-                point_in_rect(n.ax, n.ay, min, max) && point_in_rect(n.bx, n.by, min, max)
-            })
+            .filter(|n| point_in_rect(n.ax, n.ay, min, max) && point_in_rect(n.bx, n.by, min, max))
             .map(|n| n.id)
             .collect()
     }
@@ -178,13 +176,7 @@ impl SpatialIndex {
     /// Top-level hit test. Things sit on top of everything else (their
     /// pickable radius is fixed in world units), then standard
     /// vertex > linedef > sector priority.
-    pub fn hit_test(
-        &self,
-        x: f32,
-        y: f32,
-        vertex_radius: f32,
-        linedef_radius: f32,
-    ) -> Option<Hit> {
+    pub fn hit_test(&self, x: f32, y: f32, vertex_radius: f32, linedef_radius: f32) -> Option<Hit> {
         if let Some(t) = self.nearest_thing(x, y, 24.0) {
             return Some(Hit::Thing(t));
         }
@@ -254,10 +246,10 @@ struct LinedefNode {
 impl RTreeObject for LinedefNode {
     type Envelope = AABB<[f32; 2]>;
     fn envelope(&self) -> Self::Envelope {
-        AABB::from_corners([self.ax.min(self.bx), self.ay.min(self.by)], [
-            self.ax.max(self.bx),
-            self.ay.max(self.by),
-        ])
+        AABB::from_corners(
+            [self.ax.min(self.bx), self.ay.min(self.by)],
+            [self.ax.max(self.bx), self.ay.max(self.by)],
+        )
     }
 }
 

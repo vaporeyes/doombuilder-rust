@@ -92,7 +92,9 @@ fn zdbsp_produces_full_lump_set() {
     let wad = Wad::from_bytes(bytes).expect("wad parses");
 
     // Every BSP-derived lump must be present and non-empty after zdbsp runs.
-    for name in ["SEGS", "SSECTORS", "NODES", "BLOCKMAP", "REJECT", "VERTEXES"] {
+    for name in [
+        "SEGS", "SSECTORS", "NODES", "BLOCKMAP", "REJECT", "VERTEXES",
+    ] {
         let entry = wad.find(name).unwrap_or_else(|| panic!("missing {name}"));
         let bytes = wad.lump_bytes(entry).unwrap();
         assert!(!bytes.is_empty(), "{name} unexpectedly empty");

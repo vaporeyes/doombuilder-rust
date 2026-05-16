@@ -28,15 +28,29 @@ static EMPTY_DIMS: std::sync::OnceLock<HashMap<String, (u32, u32)>> = std::sync:
 #[derive(Debug, Clone)]
 pub enum View2DMessage {
     PanBy(Vec2),
-    ZoomAt { pivot: Vec2, factor: f32, viewport: Vec2 },
+    ZoomAt {
+        pivot: Vec2,
+        factor: f32,
+        viewport: Vec2,
+    },
     /// Raw wheel signal; the App decides whether to zoom or adjust sectors
     /// based on the current edit mode + active modifiers.
-    Wheel { units: f32, pivot: Vec2, viewport: Vec2 },
+    Wheel {
+        units: f32,
+        pivot: Vec2,
+        viewport: Vec2,
+    },
     HoverAt(Vec2),
     HoverCleared,
     ClickAt(Vec2),
-    DragMoved { start: Vec2, current: Vec2 },
-    DragComplete { start: Vec2, end: Vec2 },
+    DragMoved {
+        start: Vec2,
+        current: Vec2,
+    },
+    DragComplete {
+        start: Vec2,
+        end: Vec2,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,26 +104,45 @@ pub struct View2D {
 
 #[derive(Debug, Clone)]
 pub enum ShapePreview {
-    Rectangle { origin: Vec2, cursor: Vec2, bevel: u32 },
-    Ellipse { origin: Vec2, cursor: Vec2, subdivisions: u32 },
-    Curve { points: Vec<Vec2>, cursor: Vec2, subdivisions: u32 },
-    Grid { origin: Vec2, cursor: Vec2, cols: u32, rows: u32 },
+    Rectangle {
+        origin: Vec2,
+        cursor: Vec2,
+        bevel: u32,
+    },
+    Ellipse {
+        origin: Vec2,
+        cursor: Vec2,
+        subdivisions: u32,
+    },
+    Curve {
+        points: Vec<Vec2>,
+        cursor: Vec2,
+        subdivisions: u32,
+    },
+    Grid {
+        origin: Vec2,
+        cursor: Vec2,
+        cols: u32,
+        rows: u32,
+    },
     /// Rubber-band line for free-draw mode: the segment from the last
     /// placed vertex to the current cursor. `closes_loop` flips the color
     /// to a "ready to close" green so the user can see when clicking will
     /// finish the room. `length` is precomputed in map units so the label
     /// reflects the actual line that would be drawn (snap-aware).
-    FreeChain { from: Vec2, cursor: Vec2, closes_loop: bool, length: i32 },
+    FreeChain {
+        from: Vec2,
+        cursor: Vec2,
+        closes_loop: bool,
+        length: i32,
+    },
 }
 
 impl View2D {
-    pub fn into_widget<Message: 'static>(
+    pub fn into_widget<Message: Clone + 'static>(
         self,
         on_event: impl Fn(View2DMessage) -> Message + 'static,
-    ) -> Element<'static, Message>
-    where
-        Message: Clone,
-    {
+    ) -> Element<'static, Message> {
         Canvas::new(View2DProgram {
             inner: self,
             on_event: Box::new(on_event),
@@ -225,8 +258,10 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                         if let Some(prev) = prev {
                             let delta = Vec2::new(p.x - prev.x, p.y - prev.y);
                             return Some(
-                                canvas::Action::publish((self.on_event)(View2DMessage::PanBy(delta)))
-                                    .and_capture(),
+                                canvas::Action::publish((self.on_event)(View2DMessage::PanBy(
+                                    delta,
+                                )))
+                                .and_capture(),
                             );
                         }
                     } else if let Some(start) = state.drag_start {
@@ -236,8 +271,8 @@ impl<Message> Program<Message> for View2DProgram<Message> {
                         if state.drag_active || dist_sq > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
                             state.drag_active = true;
                             let camera = &self.inner.camera;
-                            let start_w = camera
-                                .screen_to_world(Vec2::new(start.x, start.y), viewport);
+                            let start_w =
+                                camera.screen_to_world(Vec2::new(start.x, start.y), viewport);
                             let cur_w = camera.screen_to_world(Vec2::new(p.x, p.y), viewport);
                             return Some(
                                 canvas::Action::publish((self.on_event)(
@@ -484,6 +519,10 @@ fn draw_grid(frame: &mut Frame, camera: &Camera2D, viewport: Vec2, override_step
     frame.stroke(&v, Stroke::default().with_color(axis_color).with_width(1.0));
 }
 
+// Leaf drawing helper: the parameters are independent rendering inputs with
+// no natural grouping, so bundling them into a struct would add indirection
+// without clarifying anything.
+#[allow(clippy::too_many_arguments)]
 fn draw_grid_lines(
     frame: &mut Frame,
     camera: &Camera2D,
@@ -533,14 +572,8 @@ fn draw_sector_fills_textured(
 ) {
     for tile in fills {
         // World max-y maps to screen top because the camera flips Y.
-        let tl = camera.world_to_screen(
-            Vec2::new(tile.world_min.x, tile.world_max.y),
-            viewport,
-        );
-        let br = camera.world_to_screen(
-            Vec2::new(tile.world_max.x, tile.world_min.y),
-            viewport,
-        );
+        let tl = camera.world_to_screen(Vec2::new(tile.world_min.x, tile.world_max.y), viewport);
+        let br = camera.world_to_screen(Vec2::new(tile.world_max.x, tile.world_min.y), viewport);
         let w = (br.x - tl.x).max(0.0);
         let h = (br.y - tl.y).max(0.0);
         if w == 0.0 || h == 0.0 {
@@ -666,15 +699,15 @@ fn draw_linedefs(
         let is_selected = selection.contains(&HighlightKind::Linedef(id));
         let is_hovered = matches!(hover, Some(HighlightKind::Linedef(h)) if h == id);
         let stroke = if is_selected {
-            selected.clone()
+            selected
         } else if is_hovered {
-            hovered.clone()
+            hovered
         } else if line.left.is_some() && line.right.is_some() {
-            two_sided.clone()
+            two_sided
         } else {
-            one_sided.clone()
+            one_sided
         };
-        frame.stroke(&path, stroke.clone());
+        frame.stroke(&path, stroke);
 
         // Front-side direction tick: a short stub from the linedef midpoint
         // pointing in the direction of the right (front) sidedef. In our
@@ -721,6 +754,8 @@ fn draw_vertices_only_highlights(
     }
 }
 
+// Leaf drawing helper: see note on `draw_grid_lines`.
+#[allow(clippy::too_many_arguments)]
 fn draw_vertices(
     frame: &mut Frame,
     map: &Map,
@@ -772,6 +807,8 @@ fn draw_vertices(
     }
 }
 
+// Leaf drawing helper: see note on `draw_grid_lines`.
+#[allow(clippy::too_many_arguments)]
 fn draw_things(
     frame: &mut Frame,
     map: &Map,
@@ -793,7 +830,10 @@ fn draw_things(
         let rad = (t.angle as f32).to_radians();
         let dx = rad.cos();
         let dy = rad.sin();
-        let arrow_world = Vec2::new(world_x + dx * arrow_world_len, world_y + dy * arrow_world_len);
+        let arrow_world = Vec2::new(
+            world_x + dx * arrow_world_len,
+            world_y + dy * arrow_world_len,
+        );
         let arrow_end = camera.world_to_screen(arrow_world, viewport);
 
         let is_selected = selection.contains(&HighlightKind::Thing(id));
@@ -929,18 +969,30 @@ fn draw_shape_preview(
             if closed {
                 builder.close();
             }
-            frame.stroke(&builder.build(), st.clone());
+            frame.stroke(&builder.build(), *st);
         };
     match preview {
-        ShapePreview::Rectangle { origin, cursor, bevel } => {
+        ShapePreview::Rectangle {
+            origin,
+            cursor,
+            bevel,
+        } => {
             let pts = preview_rectangle(*origin, *cursor, *bevel);
             draw_polyline_world(frame, &pts, true, &stroke);
         }
-        ShapePreview::Ellipse { origin, cursor, subdivisions } => {
+        ShapePreview::Ellipse {
+            origin,
+            cursor,
+            subdivisions,
+        } => {
             let pts = preview_ellipse(*origin, *cursor, *subdivisions);
             draw_polyline_world(frame, &pts, true, &stroke);
         }
-        ShapePreview::Curve { points, cursor, subdivisions } => {
+        ShapePreview::Curve {
+            points,
+            cursor,
+            subdivisions,
+        } => {
             let mut chord = points.clone();
             chord.push(*cursor);
             // While only 1 or 2 anchors are placed, show a straight-line guide
@@ -951,21 +1003,26 @@ fn draw_shape_preview(
                 // points = [start, end]; cursor = pending control point.
                 let pts = preview_quadratic_bezier(points[0], points[1], *cursor, *subdivisions);
                 draw_polyline_world(frame, &pts, false, &stroke);
-                draw_polyline_world(
-                    frame,
-                    &[points[0], *cursor, points[1]],
-                    false,
-                    &dotted,
-                );
+                draw_polyline_world(frame, &[points[0], *cursor, points[1]], false, &dotted);
             }
         }
-        ShapePreview::Grid { origin, cursor, cols, rows } => {
+        ShapePreview::Grid {
+            origin,
+            cursor,
+            cols,
+            rows,
+        } => {
             let lines = preview_grid(*origin, *cursor, *cols, *rows);
             for seg in lines {
                 draw_polyline_world(frame, &seg, false, &stroke);
             }
         }
-        ShapePreview::FreeChain { from, cursor, closes_loop, length } => {
+        ShapePreview::FreeChain {
+            from,
+            cursor,
+            closes_loop,
+            length,
+        } => {
             // Yellow for "next segment", green for "this click closes the
             // loop" so the affordance is visible without having to read the
             // status bar. Slightly thicker stroke when closing so it pops.
@@ -977,7 +1034,7 @@ fn draw_shape_preview(
                     ..Default::default()
                 }
             } else {
-                stroke.clone()
+                stroke
             };
             draw_polyline_world(frame, &[*from, *cursor], false, &st);
             if *closes_loop {
@@ -1003,7 +1060,11 @@ fn draw_shape_preview(
                 // Offset the label so it doesn't sit under the crosshair.
                 // Up-and-right places it where Doom Builder users expect.
                 let label_pos = Point::new(s.x + 10.0, s.y - 10.0);
-                let txt_color = if *closes_loop { close_color } else { line_color };
+                let txt_color = if *closes_loop {
+                    close_color
+                } else {
+                    line_color
+                };
                 frame.fill_text(Text {
                     content: format!("{} u", length),
                     position: label_pos,
@@ -1117,7 +1178,9 @@ fn draw_thing_hover_preview(
 ) {
     let Some(t) = map.things.get(id) else { return };
     let info = config.thing_type(t.kind);
-    let title = info.map(|i| i.title.clone()).unwrap_or_else(|| format!("Thing {}", t.kind));
+    let title = info
+        .map(|i| i.title.clone())
+        .unwrap_or_else(|| format!("Thing {}", t.kind));
 
     // Anchor at the thing's screen position, offset to the right.
     let s = camera.world_to_screen(Vec2::new(t.x as f32, t.y as f32), viewport);
@@ -1145,7 +1208,11 @@ fn draw_thing_hover_preview(
     frame.fill_rectangle(Point::new(x, y), Size::new(card_w, card_h), bg);
     // 1-px border (4 rectangles).
     frame.fill_rectangle(Point::new(x, y), Size::new(card_w, 1.0), border);
-    frame.fill_rectangle(Point::new(x, y + card_h - 1.0), Size::new(card_w, 1.0), border);
+    frame.fill_rectangle(
+        Point::new(x, y + card_h - 1.0),
+        Size::new(card_w, 1.0),
+        border,
+    );
     frame.fill_rectangle(Point::new(x, y), Size::new(1.0, card_h), border);
     frame.fill_rectangle(
         Point::new(x + card_w - 1.0, y),
@@ -1254,7 +1321,10 @@ fn draw_drag_rect(frame: &mut Frame, camera: &Camera2D, viewport: Vec2, start: V
 }
 
 pub fn map_aabb(map: &Map) -> Option<(Vec2, Vec2)> {
-    let mut iter = map.vertices.iter().map(|(_, v)| Vec2::new(v.x as f32, v.y as f32));
+    let mut iter = map
+        .vertices
+        .iter()
+        .map(|(_, v)| Vec2::new(v.x as f32, v.y as f32));
     let first = iter.next()?;
     let mut min = first;
     let mut max = first;

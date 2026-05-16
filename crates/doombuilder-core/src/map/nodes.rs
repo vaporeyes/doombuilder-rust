@@ -158,9 +158,7 @@ fn build_initial_segs(
 ) -> Vec<Seg> {
     let mut out = Vec::new();
     for (lid, line) in &map.linedefs {
-        let (Some(v1), Some(v2)) =
-            (map.vertices.get(line.v1), map.vertices.get(line.v2))
-        else {
+        let (Some(v1), Some(v2)) = (map.vertices.get(line.v1), map.vertices.get(line.v2)) else {
             continue;
         };
         let lidx = linedef_idx[&lid];
@@ -423,8 +421,7 @@ fn split_segs(segs: Vec<Seg>, part: &Seg, ctx: &mut BuildCtx) -> (Vec<Seg>, Vec<
             Class::Front => front.push(s),
             Class::Back => back.push(s),
             Class::Collinear => {
-                let dot = (s.ex - s.sx) * (part.ex - part.sx)
-                    + (s.ey - s.sy) * (part.ey - part.sy);
+                let dot = (s.ex - s.sx) * (part.ex - part.sx) + (s.ey - s.sy) * (part.ey - part.sy);
                 if dot >= 0 {
                     front.push(s);
                 } else {
@@ -464,10 +461,8 @@ fn split_one(seg: &Seg, part: &Seg, ctx: &mut BuildCtx) -> (Seg, Seg) {
         (x.round() as i32, y.round() as i32)
     };
 
-    let new_vid =
-        ctx.base_vertex_count + ctx.extra_vertices.len() as u32;
-    ctx.extra_vertices
-        .push((clamp_i16(ix), clamp_i16(iy)));
+    let new_vid = ctx.base_vertex_count + ctx.extra_vertices.len() as u32;
+    ctx.extra_vertices.push((clamp_i16(ix), clamp_i16(iy)));
 
     // New offset for the back half: distance along linedef from (lx,ly) to (ix,iy).
     let half_offset = {
@@ -518,7 +513,12 @@ fn map_bbox(map: &Map) -> BBox {
     }
     if min_x > max_x {
         // Empty map fallback.
-        return BBox { top: 0, bottom: 0, left: 0, right: 0 };
+        return BBox {
+            top: 0,
+            bottom: 0,
+            left: 0,
+            right: 0,
+        };
     }
     BBox {
         top: clamp_i16(max_y),
@@ -629,7 +629,7 @@ fn build_blockmap(map: &Map, _vertex_idx: &HashMap<VertexId, u16>) -> Vec<u8> {
         let Some(v2) = map.vertices.get(line.v2) else {
             continue;
         };
-        let lindex = vertex_idx_to_linedef_idx(&map, line) as u16;
+        let lindex = vertex_idx_to_linedef_idx(map, line) as u16;
         // For each block cell whose AABB the segment intersects, append lindex.
         let lo_x = v1.x.min(v2.x);
         let hi_x = v1.x.max(v2.x);
@@ -646,7 +646,8 @@ fn build_blockmap(map: &Map, _vertex_idx: &HashMap<VertexId, u16>) -> Vec<u8> {
                 let cell_x1 = cell_x0 + BLOCK_SIZE;
                 let cell_y1 = cell_y0 + BLOCK_SIZE;
                 if segment_intersects_aabb(
-                    v1.x, v1.y, v2.x, v2.y, cell_x0, cell_y0, cell_x1, cell_y1,
+                    [v1.x, v1.y, v2.x, v2.y],
+                    [cell_x0, cell_y0, cell_x1, cell_y1],
                 ) {
                     buckets[by * cols + bx].push(lindex);
                 }
@@ -700,10 +701,11 @@ fn vertex_idx_to_linedef_idx(map: &Map, target: &crate::map::MapLinedef) -> usiz
     0
 }
 
-fn segment_intersects_aabb(
-    sx: i32, sy: i32, ex: i32, ey: i32,
-    rx0: i32, ry0: i32, rx1: i32, ry1: i32,
-) -> bool {
+/// `seg` is `[start_x, start_y, end_x, end_y]`; `rect` is
+/// `[min_x, min_y, max_x, max_y]`.
+fn segment_intersects_aabb(seg: [i32; 4], rect: [i32; 4]) -> bool {
+    let [sx, sy, ex, ey] = seg;
+    let [rx0, ry0, rx1, ry1] = rect;
     // Either endpoint inside?
     let inside = |x: i32, y: i32| x >= rx0 && x <= rx1 && y >= ry0 && y <= ry1;
     if inside(sx, sy) || inside(ex, ey) {
@@ -755,7 +757,7 @@ fn segment_intersects_aabb(
 /// correctly, just without the optimization.
 fn build_reject(sector_count: usize) -> Vec<u8> {
     let bits = sector_count * sector_count;
-    let bytes = (bits + 7) / 8;
+    let bytes = bits.div_ceil(8);
     vec![0u8; bytes]
 }
 
@@ -862,7 +864,7 @@ mod tests {
         let map = square_map();
         let out = build_nodes(&map);
         let s = map.sectors.len();
-        let expected = (s * s + 7) / 8;
+        let expected = (s * s).div_ceil(8);
         assert_eq!(out.reject.len(), expected);
     }
 

@@ -53,15 +53,16 @@ fn build_with_zdbsp(map: &Map, exe: &Path, extra_args: &[OsString]) -> Result<No
         .arg(&out_path)
         .arg(&in_path)
         .status()
-        .map_err(|e| Error::Io(std::io::Error::new(
-            e.kind(),
-            format!("failed to spawn zdbsp ({}): {e}", exe.display()),
-        )))?;
+        .map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to spawn zdbsp ({}): {e}", exe.display()),
+            ))
+        })?;
     if !status.success() {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("zdbsp exited with status {status}"),
-        )));
+        return Err(Error::Io(std::io::Error::other(format!(
+            "zdbsp exited with status {status}"
+        ))));
     }
 
     let bytes = std::fs::read(&out_path)?;
@@ -102,15 +103,36 @@ fn serialize_for_external_builder(map: &Map) -> Vec<u8> {
     let sectors = crate::map::save::serialize_sectors(map);
 
     let mut lumps: Vec<LumpEntry<'_>> = vec![
-        LumpEntry { name: &map.name, data: Vec::new() },
-        LumpEntry { name: "THINGS", data: things },
-        LumpEntry { name: "LINEDEFS", data: linedefs },
-        LumpEntry { name: "SIDEDEFS", data: sidedefs },
-        LumpEntry { name: "VERTEXES", data: vertexes },
-        LumpEntry { name: "SECTORS", data: sectors },
+        LumpEntry {
+            name: &map.name,
+            data: Vec::new(),
+        },
+        LumpEntry {
+            name: "THINGS",
+            data: things,
+        },
+        LumpEntry {
+            name: "LINEDEFS",
+            data: linedefs,
+        },
+        LumpEntry {
+            name: "SIDEDEFS",
+            data: sidedefs,
+        },
+        LumpEntry {
+            name: "VERTEXES",
+            data: vertexes,
+        },
+        LumpEntry {
+            name: "SECTORS",
+            data: sectors,
+        },
     ];
     if map.format == crate::format::MapFormat::Hexen {
-        lumps.push(LumpEntry { name: "BEHAVIOR", data: Vec::new() });
+        lumps.push(LumpEntry {
+            name: "BEHAVIOR",
+            data: Vec::new(),
+        });
     }
     write_pwad(&lumps)
 }
@@ -137,9 +159,9 @@ fn extract_node_output(wad: &Wad, map_name: &str, base_vertex_count: u32) -> Res
         .unwrap_or(dir.len());
 
     let lump_named = |name: &str| -> Result<Vec<u8>> {
-        for i in (map_idx + 1)..scan_end {
-            if dir[i].name_str().eq_ignore_ascii_case(name) {
-                return Ok(wad.lump_bytes(&dir[i])?.to_vec());
+        for entry in &dir[(map_idx + 1)..scan_end] {
+            if entry.name_str().eq_ignore_ascii_case(name) {
+                return Ok(wad.lump_bytes(entry)?.to_vec());
             }
         }
         Err(Error::MissingMapLump {
@@ -197,13 +219,8 @@ impl TempDir {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!(
-            "{}-{}-{}-{}",
-            prefix,
-            std::process::id(),
-            ts,
-            n
-        ));
+        let path =
+            std::env::temp_dir().join(format!("{}-{}-{}-{}", prefix, std::process::id(), ts, n));
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
     }

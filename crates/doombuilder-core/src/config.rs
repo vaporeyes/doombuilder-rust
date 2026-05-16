@@ -147,7 +147,9 @@ impl GameConfig {
     }
 
     pub fn sector_special(&self, id: u16) -> Option<&str> {
-        self.sector_specials.get(&id.to_string()).map(String::as_str)
+        self.sector_specials
+            .get(&id.to_string())
+            .map(String::as_str)
     }
 
     pub fn thing_type(&self, id: u16) -> Option<&ThingType> {

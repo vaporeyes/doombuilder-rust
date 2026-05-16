@@ -61,12 +61,19 @@ pub fn rasterise_sector_fill_slot(
     let height = (y1 - y0).max(1) as u32;
 
     let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
+    let mut target = RasterTarget {
+        rgba: &mut rgba[..],
+        width,
+        height,
+        origin_x: x0,
+        origin_y_top: y1,
+    };
     let mut i = 0;
     while i + 2 < mesh.indices.len() {
         let a = mesh.positions[mesh.indices[i] as usize];
         let b = mesh.positions[mesh.indices[i + 1] as usize];
         let c = mesh.positions[mesh.indices[i + 2] as usize];
-        rasterise_triangle(&mut rgba, width, height, x0, y1, a, b, c, flat);
+        rasterise_triangle(&mut target, a, b, c, flat);
         i += 3;
     }
 
@@ -98,12 +105,19 @@ pub fn rasterise_sector_solid(
     let width = (x1 - x0).max(1) as u32;
     let height = (y1 - y0).max(1) as u32;
     let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
+    let mut target = RasterTarget {
+        rgba: &mut rgba[..],
+        width,
+        height,
+        origin_x: x0,
+        origin_y_top: y1,
+    };
     let mut i = 0;
     while i + 2 < mesh.indices.len() {
         let a = mesh.positions[mesh.indices[i] as usize];
         let b = mesh.positions[mesh.indices[i + 1] as usize];
         let c = mesh.positions[mesh.indices[i + 2] as usize];
-        rasterise_triangle_solid(&mut rgba, width, height, x0, y1, a, b, c, color);
+        rasterise_triangle_solid(&mut target, a, b, c, color);
         i += 3;
     }
     Some(SectorFill {
@@ -114,17 +128,28 @@ pub fn rasterise_sector_solid(
     })
 }
 
-fn rasterise_triangle_solid(
-    rgba: &mut [u8],
+/// Mutable raster surface: the RGBA buffer plus its dimensions and the
+/// world-space coordinates of its top-left pixel.
+struct RasterTarget<'a> {
+    rgba: &'a mut [u8],
     width: u32,
     height: u32,
     origin_x: i32,
     origin_y_top: i32,
+}
+
+fn rasterise_triangle_solid(
+    target: &mut RasterTarget,
     a: [f32; 2],
     b: [f32; 2],
     c: [f32; 2],
     color: [u8; 4],
 ) {
+    let width = target.width;
+    let height = target.height;
+    let origin_x = target.origin_x;
+    let origin_y_top = target.origin_y_top;
+    let rgba = &mut *target.rgba;
     let min_x = a[0].min(b[0]).min(c[0]).floor() as i32;
     let max_x = a[0].max(b[0]).max(c[0]).ceil() as i32;
     let min_y = a[1].min(b[1]).min(c[1]).floor() as i32;
@@ -180,16 +205,17 @@ fn aabb(positions: &[[f32; 2]]) -> (f32, f32, f32, f32) {
 }
 
 fn rasterise_triangle(
-    rgba: &mut [u8],
-    width: u32,
-    height: u32,
-    origin_x: i32,
-    origin_y_top: i32,
+    target: &mut RasterTarget,
     a: [f32; 2],
     b: [f32; 2],
     c: [f32; 2],
     flat: &TextureImage,
 ) {
+    let width = target.width;
+    let height = target.height;
+    let origin_x = target.origin_x;
+    let origin_y_top = target.origin_y_top;
+    let rgba = &mut *target.rgba;
     let area = edge(a, b, c);
     if area.abs() < 1e-6 {
         return;

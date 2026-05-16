@@ -124,8 +124,16 @@ pub fn build_geometry(
         } else {
             key(&ceil_name)
         };
-        let floor_light = if floor_name == SKY_FLAT_NAME { 1.0 } else { light };
-        let ceil_light = if ceil_name == SKY_FLAT_NAME { 1.0 } else { light };
+        let floor_light = if floor_name == SKY_FLAT_NAME {
+            1.0
+        } else {
+            light
+        };
+        let ceil_light = if ceil_name == SKY_FLAT_NAME {
+            1.0
+        } else {
+            light
+        };
 
         let mut i = 0;
         while i + 2 < mesh.indices.len() {
@@ -186,7 +194,11 @@ pub fn build_geometry(
             let tx = thing.x as f32;
             let ty = thing.y as f32;
             let floor_y = match spatial.sector_at(tx, ty) {
-                Some(sid) => map.sectors.get(sid).map(|s| s.floor_height as f32).unwrap_or(0.0),
+                Some(sid) => map
+                    .sectors
+                    .get(sid)
+                    .map(|s| s.floor_height as f32)
+                    .unwrap_or(0.0),
                 None => 0.0,
             };
             let color = thing_color(config, thing.kind);
@@ -290,7 +302,13 @@ fn wall_vertex(p: [f32; 3], u: f32, v: f32, light: f32) -> Vertex3D {
     }
 }
 
-fn push_thing_box(out: &mut Vec<Vertex3D>, doom_x: f32, doom_y: f32, floor_y: f32, color: [f32; 3]) {
+fn push_thing_box(
+    out: &mut Vec<Vertex3D>,
+    doom_x: f32,
+    doom_y: f32,
+    floor_y: f32,
+    color: [f32; 3],
+) {
     let r = 16.0_f32;
     let h = 56.0_f32;
     let cx = doom_x;
@@ -451,43 +469,38 @@ impl<Message: 'static> shader::Program<Message> for View3DProgram<Message> {
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
         match event {
-            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                if cursor.position_in(bounds).is_some() {
-                    state.dragging = true;
-                    state.last_cursor = cursor.position_in(bounds);
-                    return Some(Action::capture());
-                }
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+                if cursor.position_in(bounds).is_some() =>
+            {
+                state.dragging = true;
+                state.last_cursor = cursor.position_in(bounds);
+                return Some(Action::capture());
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 state.dragging = false;
                 state.last_cursor = None;
             }
-            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                if state.dragging {
-                    if let Some(pos) = cursor.position_in(bounds) {
-                        if let Some(prev) = state.last_cursor.replace(pos) {
-                            let dx = pos.x - prev.x;
-                            let dy = pos.y - prev.y;
-                            return Some(
-                                Action::publish((self.on_event)(View3DMessage::OrbitBy { dx, dy }))
-                                    .and_capture(),
-                            );
-                        }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    if let Some(prev) = state.last_cursor.replace(pos) {
+                        let dx = pos.x - prev.x;
+                        let dy = pos.y - prev.y;
+                        return Some(
+                            Action::publish((self.on_event)(View3DMessage::OrbitBy { dx, dy }))
+                                .and_capture(),
+                        );
                     }
                 }
             }
-            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                if cursor.is_over(bounds) {
-                    let units = match delta {
-                        mouse::ScrollDelta::Lines { y, .. } => *y,
-                        mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
-                    };
-                    let factor = (1.15_f32).powf(-units);
-                    return Some(
-                        Action::publish((self.on_event)(View3DMessage::Zoom { factor }))
-                            .and_capture(),
-                    );
-                }
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                let units = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
+                };
+                let factor = (1.15_f32).powf(-units);
+                return Some(
+                    Action::publish((self.on_event)(View3DMessage::Zoom { factor })).and_capture(),
+                );
             }
             _ => {}
         }
@@ -577,7 +590,10 @@ impl Primitive for Map3DPrimitive {
 
         // Lazily upload any new texture referenced by a batch.
         for batch in &self.geometry.batches {
-            if pipeline.texture_bind_groups.contains_key(&batch.texture_name) {
+            if pipeline
+                .texture_bind_groups
+                .contains_key(&batch.texture_name)
+            {
                 continue;
             }
             let bg = if batch.texture_name == SOLID_TEXTURE_KEY {
@@ -594,7 +610,9 @@ impl Primitive for Map3DPrimitive {
                 };
                 pipeline.upload_texture(device, queue, img)
             };
-            pipeline.texture_bind_groups.insert(batch.texture_name.clone(), bg);
+            pipeline
+                .texture_bind_groups
+                .insert(batch.texture_name.clone(), bg);
         }
     }
 
@@ -952,8 +970,7 @@ impl Map3DPipeline {
             None => {
                 // 2x2 magenta-and-black checker for missing textures.
                 let pixels: Vec<u8> = vec![
-                    255, 0, 255, 255, 0, 0, 0, 255,
-                    0, 0, 0, 255, 255, 0, 255, 255,
+                    255, 0, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 255, 255,
                 ];
                 (2, 2, pixels)
             }

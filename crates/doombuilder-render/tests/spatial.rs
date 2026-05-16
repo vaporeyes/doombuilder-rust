@@ -5,9 +5,7 @@ use doombuilder_core::map::{
     Map, MapLinedef, MapSector, MapSidedef, MapVertex, TextureName, VertexId,
 };
 use doombuilder_core::MapFormat;
-use doombuilder_render::{
-    extract_sector_loops, triangulate_sector, Hit, SpatialIndex,
-};
+use doombuilder_render::{extract_sector_loops, triangulate_sector, Hit, SpatialIndex};
 
 fn square_map() -> (Map, [VertexId; 4]) {
     let mut map = Map::new("TEST", MapFormat::Doom);
