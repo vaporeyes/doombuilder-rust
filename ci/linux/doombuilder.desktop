@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DoomBuilder
+Comment=Doom map editor
+Exec=doombuilder
+Icon=doombuilder
+Categories=Development;Graphics;
+Terminal=false
